@@ -1,0 +1,485 @@
+/* 赓笔 亮色主题 - Apple HIG 风格 */
+
+/* ===== 全局基础 ===== */
+QWidget {
+    background-color: #ffffff;
+    color: #1d1d1f;
+    font-family: "SF Pro Text", "SF Pro", "-apple-system", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    font-size: 13px;
+}
+
+QMainWindow {
+    background-color: #ffffff;
+}
+
+/* ===== 菜单栏 ===== */
+QMenuBar {
+    background-color: #f2f2f7;
+    color: #1d1d1f;
+    border-bottom: 1px solid rgba(60, 60, 67, 0.29);
+    padding: 2px;
+    min-height: 28px;
+}
+
+QMenuBar::item {
+    background-color: transparent;
+    padding: 6px 12px;
+    border-radius: 6px;
+}
+
+QMenuBar::item:selected {
+    background-color: rgba(0, 122, 255, 0.12);
+}
+
+QMenuBar::item:pressed {
+    background-color: rgba(0, 122, 255, 0.18);
+}
+
+/* ===== 菜单 ===== */
+QMenu {
+    background-color: #ffffff;
+    color: #1d1d1f;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 10px;
+    padding: 6px;
+}
+
+QMenu::item {
+    padding: 6px 24px;
+    border-radius: 6px;
+}
+
+QMenu::item:selected {
+    background-color: #f2f2f7;
+}
+
+QMenu::separator {
+    height: 1px;
+    background-color: rgba(60, 60, 67, 0.29);
+    margin: 4px 8px;
+}
+
+/* ===== 状态栏 ===== */
+QStatusBar {
+    background-color: #f2f2f7;
+    color: rgba(60, 60, 67, 0.6);
+    border-top: 1px solid rgba(60, 60, 67, 0.29);
+}
+
+QStatusBar::item {
+    border: none;
+}
+
+/* ===== 分隔器 ===== */
+QSplitter::handle {
+    background-color: rgba(60, 60, 67, 0.29);
+}
+
+QSplitter::handle:horizontal {
+    width: 1px;
+}
+
+QSplitter::handle:vertical {
+    height: 1px;
+}
+
+/* ===== 树/列表视图 ===== */
+QTreeView, QListView, QListWidget {
+    background-color: transparent;
+    color: #1d1d1f;
+    border: none;
+    outline: 0;
+    padding: 2px;
+    show-decoration-selected: 0;
+}
+
+QTreeView::item, QListView::item, QListWidget::item {
+    padding: 6px 8px;
+    border-radius: 6px;
+    margin: 1px 4px;
+}
+
+QTreeView::item:selected, QListView::item:selected, QListWidget::item:selected {
+    background-color: rgba(0, 122, 255, 0.12);
+    color: #1d1d1f;
+}
+
+QTreeView::item:hover, QListView::item:hover, QListWidget::item:hover {
+    background-color: rgba(0, 122, 255, 0.06);
+}
+
+QTreeView::branch:has-siblings:!adjoins-item {
+    background: transparent;
+}
+
+/* ===== 文本编辑框 ===== */
+QPlainTextEdit, QTextEdit {
+    background-color: #ffffff;
+    color: #1d1d1f;
+    border: 1px solid rgba(60, 60, 67, 0.29);
+    border-radius: 10px;
+    padding: 8px;
+    selection-background-color: rgba(0, 122, 255, 0.2);
+    selection-color: #1d1d1f;
+}
+
+QPlainTextEdit:focus, QTextEdit:focus {
+    border: 1.5px solid #007aff;
+}
+
+/* ===== 按钮 ===== */
+QPushButton {
+    background-color: #f2f2f7;
+    color: #1d1d1f;
+    border: none;
+    border-radius: 8px;
+    padding: 6px 16px;
+    min-height: 28px;
+}
+
+QPushButton:hover {
+    background-color: #e5e5ea;
+}
+
+QPushButton:pressed {
+    background-color: #d1d1d6;
+}
+
+QPushButton:disabled {
+    background-color: #f2f2f7;
+    color: rgba(60, 60, 67, 0.3);
+}
+
+QPushButton#primaryBtn {
+    background-color: #007aff;
+    color: #ffffff;
+    border: none;
+    border-radius: 14px;
+    padding: 6px 20px;
+    min-height: 28px;
+    font-weight: 600;
+}
+
+QPushButton#primaryBtn:hover {
+    background-color: #3395ff;
+}
+
+QPushButton#primaryBtn:pressed {
+    background-color: #0062cc;
+}
+
+QPushButton#primaryBtn:disabled {
+    background-color: rgba(0, 122, 255, 0.4);
+    color: #ffffff;
+}
+
+/* ===== 输入控件 ===== */
+QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+    background-color: #ffffff;
+    color: #1d1d1f;
+    border: 1px solid rgba(60, 60, 67, 0.29);
+    border-radius: 8px;
+    padding: 5px 8px;
+    min-height: 20px;
+}
+
+QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
+    border: 1.5px solid #007aff;
+}
+
+QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
+    color: rgba(60, 60, 67, 0.3);
+    background-color: #f2f2f7;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 22px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: #ffffff;
+    color: #1d1d1f;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+    selection-background-color: rgba(0, 122, 255, 0.12);
+    selection-color: #1d1d1f;
+    padding: 4px;
+    outline: 0;
+}
+
+QComboBox QAbstractItemView::item {
+    padding: 6px 10px;
+    border-radius: 6px;
+}
+
+/* ===== 复选框 ===== */
+QCheckBox {
+    color: #1d1d1f;
+    spacing: 8px;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1.5px solid rgba(60, 60, 67, 0.4);
+    border-radius: 4px;
+    background-color: #ffffff;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #007aff;
+}
+
+QCheckBox::indicator:checked {
+    background-color: #007aff;
+    border-color: #007aff;
+}
+
+QCheckBox::indicator:disabled {
+    border-color: rgba(60, 60, 67, 0.2);
+    background-color: #f2f2f7;
+}
+
+/* ===== 标签 ===== */
+QLabel {
+    color: #1d1d1f;
+    background-color: transparent;
+}
+
+/* ===== 分组框 ===== */
+QGroupBox {
+    border: 1px solid rgba(60, 60, 67, 0.29);
+    border-radius: 10px;
+    margin-top: 14px;
+    padding-top: 14px;
+    color: rgba(60, 60, 67, 0.6);
+    font-weight: 600;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 8px;
+    background-color: #ffffff;
+}
+
+/* ===== 滚动条 ===== */
+QScrollBar:vertical {
+    background-color: transparent;
+    width: 8px;
+    border: none;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical {
+    background-color: rgba(60, 60, 67, 0.3);
+    border-radius: 4px;
+    min-height: 30px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background-color: rgba(60, 60, 67, 0.5);
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+    background: none;
+}
+
+QScrollBar:horizontal {
+    background-color: transparent;
+    height: 8px;
+    border: none;
+    margin: 2px;
+}
+
+QScrollBar::handle:horizontal {
+    background-color: rgba(60, 60, 67, 0.3);
+    border-radius: 4px;
+    min-width: 30px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background-color: rgba(60, 60, 67, 0.5);
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
+
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
+    background: none;
+}
+
+/* ===== 对话框 ===== */
+QDialog {
+    background-color: #ffffff;
+}
+
+/* ===== 标签页 ===== */
+QTabWidget::pane {
+    border: 1px solid rgba(60, 60, 67, 0.29);
+    border-radius: 10px;
+    top: -1px;
+}
+
+QTabBar::tab {
+    background-color: transparent;
+    color: rgba(60, 60, 67, 0.6);
+    padding: 8px 16px;
+    border: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+}
+
+QTabBar::tab:selected {
+    background-color: #ffffff;
+    color: #1d1d1f;
+}
+
+QTabBar::tab:hover:!selected {
+    background-color: rgba(0, 122, 255, 0.06);
+    color: #1d1d1f;
+}
+
+/* ===== 工具提示 ===== */
+QToolTip {
+    background-color: #ffffff;
+    color: #1d1d1f;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    border-radius: 8px;
+    padding: 6px 8px;
+}
+
+/* ===== 对象名驱动的语义样式 ===== */
+
+/* 面板标题 */
+QLabel#panelTitle {
+    font-weight: 600;
+    font-size: 15px;
+    color: #1d1d1f;
+}
+
+/* 对话框标题 */
+QLabel#dialogTitle {
+    font-size: 20px;
+    font-weight: 600;
+    color: #1d1d1f;
+}
+
+/* 次要文字 */
+QLabel#textSecondary {
+    color: rgba(60, 60, 67, 0.6);
+}
+
+/* 元信息文字 */
+QLabel#metaText {
+    color: rgba(60, 60, 67, 0.6);
+    font-size: 12px;
+}
+
+/* 提示文字 */
+QLabel#hintText {
+    color: rgba(60, 60, 67, 0.6);
+    padding: 8px;
+}
+
+/* 信息/进行中（苹果橙语义） */
+QLabel#textInfo {
+    color: #ff9500;
+}
+
+/* 警告 */
+QLabel#textWarning {
+    color: #ff9500;
+}
+
+/* 危险/错误 */
+QLabel#textDanger {
+    color: #ff3b30;
+}
+
+/* 成功 */
+QLabel#textSuccess {
+    color: #34c759;
+}
+
+/* 面板头部背景 */
+QFrame#panelHeader {
+    background-color: #f2f2f7;
+    border: none;
+    border-radius: 8px;
+}
+
+/* 折叠按钮 */
+QPushButton#collapseToggle {
+    text-align: left;
+    font-weight: 600;
+    background-color: transparent;
+    border: none;
+}
+
+QPushButton#collapseToggle:hover {
+    background-color: rgba(0, 122, 255, 0.06);
+}
+
+/* Agent 阶段进度指示器 */
+QLabel#phaseCurrent {
+    background-color: #007aff;
+    color: #ffffff;
+    font-weight: 600;
+    padding: 6px 10px;
+    border-radius: 6px;
+}
+
+QLabel#phaseCompleted {
+    background-color: #e5e5ea;
+    color: rgba(60, 60, 67, 0.6);
+    padding: 6px 10px;
+    border-radius: 6px;
+}
+
+QLabel#phasePending {
+    background-color: #f2f2f7;
+    color: rgba(60, 60, 67, 0.6);
+    padding: 6px 10px;
+    border-radius: 6px;
+}
+
+/* 流式输出视图 */
+QPlainTextEdit#streamView {
+    background-color: #f2f2f7;
+    color: #1d1d1f;
+    border: 1px solid rgba(60, 60, 67, 0.29);
+    border-radius: 8px;
+    padding: 6px;
+}
+
+/* 上下文条目内容 */
+QLabel#entryContent {
+    color: #1d1d1f;
+    background-color: #f2f2f7;
+    border-radius: 6px;
+    padding: 6px 8px;
+}
+
+/* 上下文条目元信息 */
+QLabel#entryMeta {
+    color: rgba(60, 60, 67, 0.6);
+    font-size: 11px;
+}
+
+/* 加载文字 */
+QLabel#loadingText {
+    color: #ff9500;
+    font-size: 14px;
+}
+
+/* 加载指示器 */
+QLabel#loadingLabel {
+    font-size: 16px;
+}

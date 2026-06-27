@@ -1,0 +1,81 @@
+"""路径与资源工具函数。
+
+提供资源文件路径解析等通用工具。
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+# PyInstaller 打包后，资源被解压到 sys._MEIPASS 临时目录；
+# 源码运行时则定位到包目录。两种模式都指向 novelforge/resources/。
+if getattr(sys, "frozen", False):
+    PACKAGE_ROOT: Path = Path(sys._MEIPASS) / "novelforge"  # type: ignore[attr-defined]
+else:
+    PACKAGE_ROOT = Path(__file__).resolve().parent.parent
+
+# 资源目录（novelforge/resources/）
+RESOURCES_DIR: Path = PACKAGE_ROOT / "resources"
+
+
+def get_resource_path(*parts: str) -> Path:
+    """获取资源文件路径。
+
+    Args:
+        *parts: 资源文件的相对路径部分（如 "defaults", "default_preset.json"）
+
+    Returns:
+        资源文件的绝对路径
+    """
+    return RESOURCES_DIR.joinpath(*parts)
+
+
+def get_theme_path(theme_name: str) -> Path:
+    """获取主题样式表文件路径。
+
+    Args:
+        theme_name: 主题名称（dark/light）
+
+    Returns:
+        QSS 文件路径
+    """
+    return get_resource_path("themes", f"{theme_name}.qss")
+
+
+def get_default_preset_path() -> Path:
+    """获取默认预设文件路径。"""
+    return get_resource_path("defaults", "default_preset.json")
+
+
+def get_extract_prompt_path() -> Path:
+    """获取默认上下文提取提示词路径。"""
+    return get_resource_path("defaults", "extract_prompt.txt")
+
+
+def get_default_regex_scripts_path() -> Path:
+    """获取默认正则脚本文件路径。"""
+    return get_resource_path("defaults", "default_regex_scripts.json")
+
+
+def get_agent_prompt_path(phase: str) -> Path:
+    """获取 Agent 阶段提示词路径。
+
+    Args:
+        phase: 阶段名（analysis/outline/verify/revise）
+
+    Returns:
+        提示词文件路径
+    """
+    return get_resource_path("defaults", "agent", f"phase_{phase}.txt")
+
+
+def load_text_resource(path: Path) -> str:
+    """加载文本资源文件内容。
+
+    Args:
+        path: 文件路径
+
+    Returns:
+        文件文本内容
+    """
+    return path.read_text(encoding="utf-8")

@@ -1,0 +1,85 @@
+{
+  "id": "default",
+  "name": "默认写作预设",
+  "prompts": [
+    {
+      "identifier": "main",
+      "name": "主提示",
+      "role": "system",
+      "content": "你是一位专业的小说续写助手。请根据提供的小说档案、前文章节和上下文信息，续写小说内容。\n\n续写要求：\n1. 保持与前文一致的叙事风格和语言特色\n2. 维持人物性格与设定的连贯性\n3. 推动情节自然发展，避免突兀转折\n4. 严格遵循小说的世界观设定\n5. 输出纯正文内容，不要包含章节标题、作者注记或元信息",
+      "system_prompt": true,
+      "marker": null,
+      "position": "start",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "forbid_overrides": false,
+      "extension": {},
+      "enabled": true
+    },
+    {
+      "identifier": "worldInfoBefore",
+      "name": "世界书（前）",
+      "role": "system",
+      "content": "",
+      "system_prompt": false,
+      "marker": "worldInfoBefore",
+      "position": "start",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "forbid_overrides": false,
+      "extension": {},
+      "enabled": true
+    },
+    {
+      "identifier": "chatHistory",
+      "name": "章节历史",
+      "role": "system",
+      "content": "",
+      "system_prompt": false,
+      "marker": "chatHistory",
+      "position": "start",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "forbid_overrides": false,
+      "extension": {},
+      "enabled": true
+    },
+    {
+      "identifier": "worldInfoAfter",
+      "name": "世界书（后）",
+      "role": "system",
+      "content": "",
+      "system_prompt": false,
+      "marker": "worldInfoAfter",
+      "position": "end",
+      "injection_position": 0,
+      "injection_depth": 4,
+      "injection_order": 100,
+      "forbid_overrides": false,
+      "extension": {},
+      "enabled": true
+    }
+  ],
+  "prompt_order": [
+    {
+      "character_id": 100000,
+      "order": [
+        {"identifier": "main", "enabled": true},
+        {"identifier": "worldInfoBefore", "enabled": true},
+        {"identifier": "chatHistory", "enabled": true},
+        {"identifier": "worldInfoAfter", "enabled": true}
+      ]
+    }
+  ],
+  "generation_params": {
+    "temperature": 0.8,
+    "max_tokens": 2000,
+    "top_p": 0.95,
+    "frequency_penalty": 0.0,
+    "presence_penalty": 0.0,
+    "max_context": 9999999
+  }
+}
