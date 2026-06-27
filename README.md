@@ -9,11 +9,12 @@
 - **上下文提取**：自动从前文章节提取人物、设定、伏笔等关键信息，按章节独立绑定存储，切换章节即加载对应上下文
 - **Token 拆分增量提取**：当选中章节较多时，按 Token 数自动拆分为多批请求，每批附带已有提取结果，仅输出新增或修改的条目（替换式合并）
 - **回溯章节数控制**：通过"回溯章节数"精确控制纳入续写提示词的前文范围（0=全部前文，N=最近 N 章），历史预算不设上限
+- **SillyTavern 兼容**：预设格式兼容 SillyTavern（`prompts` + `prompt_order` + `extensions.regex_scripts`），支持导入 ST 预设 JSON 与世界书（world info）条目，开箱即用现有生态资源
 - **SillyTavern 风格提示词组装**：三阶段组装（排序 → 深度注入 → Token 裁剪），支持宏替换、Jinja2 模板、正则脚本、worldInfoBefore/After 注入
 - **多轮 Agent 续写**：可选的智能续写模式，按"前文分析 → 大纲规划 → 写作 → 验证 → 修订"多阶段执行，支持暂停点与人工修订
 - **流式输出**：实时显示续写内容，支持停止、重写、多版本（swipe）对比、推理内容展示
 - **正则脚本引擎**：支持 USER_INPUT / AI_OUTPUT / WORLD_INFO 三类 placement，对接收与发送内容做正则变换
-- **主题与字体**：内置深色/浅色主题，可自定义字体族、字号、行高
+- **主题与字体**：Apple HIG 风格主题，支持暗色/亮色/跟随系统三种模式（系统模式实时响应切换），可自定义字体族、字号、行高
 - **本地优先**：所有项目数据、配置、API Key 均存储在本地，API Key 加密落盘
 
 ## 安装与运行
@@ -87,6 +88,20 @@ API Key 使用 PBKDF2HMAC + Fernet 加密存储，不明文落盘。
 - **数据模型**：pydantic v2
 - **存储**：aiosqlite（异步 SQLite）
 - **加密**：cryptography
+- **测试**：pytest
+
+## 测试
+
+```bash
+# 运行全部测试
+python -m pytest tests/ -q
+```
+
+部分 UI 测试依赖桌面环境，在无显示环境（如 CI/容器）下可按需排除：
+
+```bash
+python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"
+```
 
 ## 开源协议
 
