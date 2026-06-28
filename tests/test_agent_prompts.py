@@ -107,17 +107,23 @@ def test_phase_outline_placeholders() -> None:
 
 
 def test_phase_verify_placeholders() -> None:
-    """验证模板包含 3 个预期占位符。"""
+    """验证模板包含 4 个预期占位符。"""
     content = load_text_resource(get_agent_prompt_path("verify"))
-    expected = ["{{snapshot}}", "{{outline}}", "{{written_text}}"]
+    expected = ["{{snapshot}}", "{{outline}}", "{{written_text}}", "{{previous_chapters_text}}"]
     for ph in expected:
         assert ph in content, f"验证模板缺少占位符: {ph}"
 
 
 def test_phase_revise_placeholders() -> None:
-    """修订模板包含 3 个预期占位符。"""
+    """修订模板包含 5 个预期占位符。"""
     content = load_text_resource(get_agent_prompt_path("revise"))
-    expected = ["{{written_text}}", "{{critique}}", "{{outline}}"]
+    expected = [
+        "{{written_text}}",
+        "{{critique}}",
+        "{{outline}}",
+        "{{previous_chapters_text}}",
+        "{{pacing_speed}}",
+    ]
     for ph in expected:
         assert ph in content, f"修订模板缺少占位符: {ph}"
 
@@ -183,11 +189,13 @@ def test_macro_replacement_verify() -> None:
         "{{snapshot}}": '{"tone": "紧张"}',
         "{{outline}}": '{"continuation_goals": "升级冲突"}',
         "{{written_text}}": "主角拔剑而出。",
+        "{{previous_chapters_text}}": "前一章正文内容。",
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
     assert '"continuation_goals": "升级冲突"' in result
     assert "主角拔剑而出" in result
+    assert "前一章正文内容" in result
 
 
 def test_macro_replacement_revise() -> None:
@@ -197,11 +205,15 @@ def test_macro_replacement_revise() -> None:
         "{{written_text}}": "主角拔剑而出。",
         "{{critique}}": '{"passed": false}',
         "{{outline}}": '{"continuation_goals": "升级冲突"}',
+        "{{previous_chapters_text}}": "## 第一章\n\n前文参考。",
+        "{{pacing_speed}}": "medium",
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
     assert "主角拔剑而出" in result
     assert '"passed": false' in result
+    assert "前文参考" in result
+    assert "medium" in result
 
 
 def test_macro_replacement_empty_values() -> None:

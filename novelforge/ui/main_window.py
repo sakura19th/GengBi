@@ -47,7 +47,7 @@ from novelforge.core.regex_engine import RegexEngine
 from novelforge.core.template_engine import TemplateEngine
 from novelforge.core.token_counter import TokenCounter
 from novelforge.core.variable_store import VariableStore
-from novelforge.models import AgentRunConfig, Chapter, Continuation
+from novelforge.models import AgentRunConfig, Chapter, Continuation, VolumeRunConfig
 from novelforge.services.agent_orchestrator import AgentOrchestrator
 from novelforge.services.chapter_service import ChapterOperation, ChapterService
 from novelforge.services.context_extractor import ContextExtractor, ExtractResult
@@ -65,11 +65,13 @@ from novelforge.services.importer import TxtImporter
 from novelforge.services.preset_service import PresetService
 from novelforge.services.regex_service import RegexService
 from novelforge.services.storage_service import StorageService
+from novelforge.services.volume_orchestrator import VolumeOrchestrator
 from novelforge.services.worldbook_service import WorldBookService
 from novelforge.ui.chapter_editor import ChapterEditor
 from novelforge.ui.chapter_list import ChapterListWidget
 from novelforge.ui.checkpoint_dialog import CheckpointDialog
 from novelforge.ui.continuation_panel import ContinuationPanel
+from novelforge.ui.debug_prompt_dialog import DebugPromptDialog
 from novelforge.ui.dialogs import PrivacyDialog
 from novelforge.ui.extraction_dialog import ExtractionDialog
 from novelforge.ui.font_settings import FontSettingsDialog, apply_font_to_editor
@@ -243,6 +245,10 @@ class MainWindow(QMainWindow):
         self._agent_orchestrator: AgentOrchestrator | None = None
         # Agent 已完成阶段列表（用于进度指示器）
         self._agent_completed_phases: list[str] = []
+        # Volume 卷级多章节续写编排器（与 _continuation_worker/_agent_orchestrator 互斥使用）
+        self._volume_orchestrator: VolumeOrchestrator | None = None
+        # Volume 已完成卷阶段列表（用于进度指示器）
+        self._volume_completed_phases: list[str] = []
 
         self.setWindowTitle("赓笔 - 小说续写器")
         self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
@@ -287,6 +293,8 @@ class MainWindow(QMainWindow):
         self._refresh_worldbooks()
         # 从 config 加载上次的续写参数到面板
         self._apply_continuation_defaults()
+        # 从 config 加载上次的卷续写配置到 VolumePanel
+        self._load_volume_config()
 
         # M3: 初始编译正则脚本到引擎（需在 continuation_panel 创建后调用）
         self._refresh_regex_scripts()
@@ -383,6 +391,26 @@ class MainWindow(QMainWindow):
         )
         # 模式切换（单次/智能）
         self.continuation_panel.mode_changed.connect(self._on_mode_changed)
+        # 卷模式切换时显隐右侧续写输出面板
+        self.continuation_panel.output_panel_visibility_requested.connect(
+            self._on_output_panel_visibility_requested
+        )
+        # 检查点"编辑"后点击面板"继续"按钮恢复 orchestrator（一次性连接，
+        # volume_panel/agent_panel 实例在 ContinuationPanel.__init__ 中创建）
+        self.continuation_panel.volume_panel.continue_requested.connect(
+            self._on_volume_continue
+        )
+        # before_audit 审计重点输入区"取消续写"按钮
+        self.continuation_panel.volume_panel.cancel_checkpoint.connect(
+            self._on_volume_cancel_checkpoint
+        )
+        # 卷续写配置变更时实时保存到 config_manager
+        self.continuation_panel.volume_panel.config_changed.connect(
+            self._save_volume_config
+        )
+        self.continuation_panel.agent_panel.continue_requested.connect(
+            self._on_agent_continue
+        )
 
         # M4: 上下文提取预览面板信号
         context_panel = self.continuation_panel.context_preview_panel
@@ -395,6 +423,10 @@ class MainWindow(QMainWindow):
 
         # 状态消息
         self.status_message.connect(self._set_status_message)
+
+        # swipe 元信息与限速提示路由到状态栏（替代已删除的 _swipe_info_label）
+        self.continuation_panel.swipe_info_requested.connect(self._set_status_message)
+        self.continuation_panel.toast_requested.connect(self._on_toast_requested)
 
     def _setup_menu_bar(self) -> None:
         """创建菜单栏。"""
@@ -510,6 +542,15 @@ class MainWindow(QMainWindow):
         toggle_right.triggered.connect(self._toggle_right_panel)
         view_menu.addAction(toggle_right)
 
+        # ===== 调试菜单 =====
+        debug_menu = menubar.addMenu("调试(&D)")
+        self._debug_mode_action = QAction("调试模式", self)
+        self._debug_mode_action.setCheckable(True)
+        self._debug_mode_action.setChecked(False)
+        self._debug_mode_action.toggled.connect(self._on_debug_mode_toggled)
+        debug_menu.addAction(self._debug_mode_action)
+        self._debug_mode = False
+
         # ===== 工具菜单 =====
         tools_menu = menubar.addMenu("工具(&T)")
 
@@ -565,6 +606,43 @@ class MainWindow(QMainWindow):
         privacy_action.triggered.connect(self._on_show_privacy)
         help_menu.addAction(privacy_action)
 
+    def _on_debug_mode_toggled(self, checked: bool) -> None:
+        """调试模式开关切换。
+
+        Args:
+            checked: 是否开启调试模式
+        """
+        self._debug_mode = checked
+        # 实时更新运行中的 orchestrator
+        if hasattr(self, "_volume_orchestrator") and self._volume_orchestrator is not None:
+            self._volume_orchestrator.debug_mode = checked
+        if hasattr(self, "_agent_orchestrator") and self._agent_orchestrator is not None:
+            self._agent_orchestrator.debug_mode = checked
+
+    def _on_prompt_debug_requested(
+        self, phase_name: str, messages_json: str
+    ) -> None:
+        """调试提示词确认弹窗。
+
+        Args:
+            phase_name: 阶段名
+            messages_json: messages 列表的 JSON 字符串
+        """
+        import json as _json
+        try:
+            messages = _json.loads(messages_json)
+        except Exception:
+            messages = [{"role": "system", "content": messages_json}]
+
+        dialog = DebugPromptDialog(phase_name, messages, self)
+        dialog.exec()
+
+        # 确认结果传回 orchestrator
+        if hasattr(self, "_volume_orchestrator") and self._volume_orchestrator is not None and self._volume_orchestrator.isRunning():
+            self._volume_orchestrator.confirm_debug_prompt(dialog.confirmed)
+        elif hasattr(self, "_agent_orchestrator") and self._agent_orchestrator is not None and self._agent_orchestrator.isRunning():
+            self._agent_orchestrator.confirm_debug_prompt(dialog.confirmed)
+
     def _setup_status_bar(self) -> None:
         """创建状态栏。"""
         status_bar = self.statusBar()
@@ -580,7 +658,7 @@ class MainWindow(QMainWindow):
 
     def _setup_shortcuts(self) -> None:
         """注册 M1 快捷键。"""
-        # Ctrl+Enter 续写（根据当前模式路由到单次/Agent 流程）
+        # Ctrl+Enter 续写（根据当前模式路由到单次/Agent/卷续写流程）
         continue_sc = QKeySequence("Ctrl+Return")
         self._continue_action = QAction(self)
         self._continue_action.setShortcut(continue_sc)
@@ -751,6 +829,13 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.warning("关闭模板引擎失败: %s", e)
 
+        # 兜底保存卷续写配置（防止 config_changed 信号丢失）
+        try:
+            config = self.continuation_panel.get_volume_config()
+            self._save_volume_config(config)
+        except Exception as e:
+            logger.warning("关闭时保存卷续写配置失败: %s", e)
+
         self._save_window_state()
         logger.info("主窗口关闭，状态已保存")
         super().closeEvent(event)
@@ -868,6 +953,25 @@ class MainWindow(QMainWindow):
             })
         except Exception as e:
             logger.warning("加载续写参数默认值失败: %s", e)
+
+    def _load_volume_config(self) -> None:
+        """从 config_manager 加载卷续写配置并回填到 VolumePanel。"""
+        try:
+            data = self.config_manager.get_volume_settings()
+            if data:
+                config = VolumeRunConfig.model_validate(data)
+                self.continuation_panel.volume_panel.set_config(config)
+                logger.info("已加载卷续写配置")
+        except Exception as e:
+            logger.warning("加载卷续写配置失败: %s", e)
+
+    def _save_volume_config(self, config: VolumeRunConfig) -> None:
+        """保存卷续写配置到 config_manager（config_changed 信号触发）。"""
+        try:
+            self.config_manager.set_volume_settings(config.model_dump(mode="json"))
+            logger.debug("已保存卷续写配置")
+        except Exception as e:
+            logger.warning("保存卷续写配置失败: %s", e)
 
     # ===== 项目管理 =====
 
@@ -1463,9 +1567,6 @@ class MainWindow(QMainWindow):
         self._continuation_worker.chunk_received.connect(
             self.continuation_panel.append_chunk
         )
-        self._continuation_worker.reasoning_received.connect(
-            self.continuation_panel.append_reasoning
-        )
         self._continuation_worker.token_count.connect(
             lambda count: self._token_count_label.setText(
                 f"Token: {count} (接收中)"
@@ -1484,7 +1585,7 @@ class MainWindow(QMainWindow):
     # ===== 模式路由与 Agent 流程 =====
 
     def _on_start_continuation_routed(self, params: dict) -> None:
-        """根据当前续写模式路由到单次或 Agent 流程。
+        """根据当前续写模式路由到单次/Agent/卷续写流程。
 
         Args:
             params: 续写参数字典（由 continuation_panel 传入）
@@ -1492,6 +1593,8 @@ class MainWindow(QMainWindow):
         mode = self.continuation_panel.get_mode()
         if mode == "agent":
             self._on_start_agent_continuation(params)
+        elif mode == "volume":
+            self._on_start_volume_continuation(params)
         else:
             self._on_start_continuation(params)
 
@@ -1499,10 +1602,39 @@ class MainWindow(QMainWindow):
         """续写模式切换回调。
 
         Args:
-            mode: 模式名（"single"/"agent"）
+            mode: 模式名（"single"/"agent"/"volume"）
         """
-        self.continuation_panel.show_agent_panel(mode == "agent")
+        if mode == "volume":
+            # 卷模式：显示 volume_panel，隐藏 agent_panel 与单次参数区
+            self.continuation_panel.show_volume_panel(True)
+        else:
+            # 非 volume 模式：隐藏 volume_panel，由 show_agent_panel 管理其余显隐
+            self.continuation_panel.show_volume_panel(False)
+            self.continuation_panel.show_agent_panel(mode == "agent")
         logger.info("续写模式切换: %s", mode)
+
+    def _on_output_panel_visibility_requested(self, visible: bool) -> None:
+        """卷模式切换时显隐右侧续写输出面板。
+
+        卷模式开启时隐藏第 4 栏（输出面板）并把其空间让给第 3 栏（续写控制，
+        内含 VolumePanel 的产物查看器）；卷模式关闭时恢复默认面板尺寸。
+
+        Args:
+            visible: True 显示输出面板（离开卷模式），False 隐藏（进入卷模式）
+        """
+        output_widget = self._splitter.widget(4)
+        output_widget.setVisible(visible)
+        if visible:
+            # 恢复默认面板尺寸
+            self._splitter.setSizes(DEFAULT_PANEL_SIZES)
+        else:
+            # 卷模式：将输出面板空间让给续写控制面板（VolumePanel）
+            sizes = self._splitter.sizes()
+            # 把第 4 栏（输出）的尺寸加到第 3 栏（续写控制）
+            if len(sizes) >= 5:
+                sizes[3] += sizes[4]
+                sizes[4] = 0
+                self._splitter.setSizes(sizes)
 
     def _on_start_agent_continuation(self, params: dict) -> None:
         """开始 Agent 多阶段续写。
@@ -1635,6 +1767,7 @@ class MainWindow(QMainWindow):
             chapter_id=self._current_chapter.id,
             parent=self,
         )
+        self._agent_orchestrator.debug_mode = self._debug_mode
 
         # 连接信号
         self._agent_orchestrator.phase_started.connect(
@@ -1645,9 +1778,6 @@ class MainWindow(QMainWindow):
         )
         self._agent_orchestrator.chunk_received.connect(
             self.continuation_panel.append_chunk
-        )
-        self._agent_orchestrator.reasoning_received.connect(
-            self.continuation_panel.append_reasoning
         )
         self._agent_orchestrator.token_count.connect(
             lambda count: self._token_count_label.setText(
@@ -1660,6 +1790,9 @@ class MainWindow(QMainWindow):
         self._agent_orchestrator.finished.connect(self._on_continuation_finished)
         self._agent_orchestrator.error.connect(self._on_continuation_error)
         self._agent_orchestrator.auth_error.connect(self._on_auth_error)
+        self._agent_orchestrator.prompt_debug_requested.connect(
+            self._on_prompt_debug_requested
+        )
 
         self._agent_orchestrator.start()
         self._set_status_message("Agent 续写中...")
@@ -1696,6 +1829,10 @@ class MainWindow(QMainWindow):
     def _on_agent_checkpoint(self, checkpoint_name: str, payload: object) -> None:
         """Agent 检查点暂停回调：弹出模态对话框等待用户操作。
 
+        大纲暂停（after_outline）：接受=用原大纲继续；编辑=关闭对话框，用户在
+        AgentPanel 编辑大纲后点击"继续"按钮恢复；取消=终止 agent 流程。
+        验证暂停（after_verify）：接受/修订/重写均 resume（首版简化）。
+
         Args:
             checkpoint_name: 检查点名（after_outline/after_verify）
             payload: 检查点产物（Outline/CritiqueReport）
@@ -1708,11 +1845,12 @@ class MainWindow(QMainWindow):
             if action == "accept":
                 # 接受原大纲继续
                 self._agent_orchestrator.resume(payload)
-            elif action == "edit_continue":
-                # 使用编辑后的大纲继续
-                self._agent_orchestrator.resume(payload=result_payload)
+            elif action == "edit":
+                # 用户选择编辑：显示面板继续按钮，不立即 resume
+                self.continuation_panel.agent_panel.show_continue_button(checkpoint_name)
             elif action == "cancel":
                 # 取消整个 agent 流程
+                self.continuation_panel.agent_panel.hide_continue_button()
                 self._agent_orchestrator.stop()
         elif checkpoint_name == "after_verify":
             if action == "accept":
@@ -1724,6 +1862,486 @@ class MainWindow(QMainWindow):
             elif action == "rewrite":
                 # TODO: 首版简化为 resume（等同于 revise），未来应停止并重跑写作阶段
                 self._agent_orchestrator.resume()
+
+    def _on_agent_continue(self, checkpoint_name: str) -> None:
+        """Agent 面板继续按钮点击：读取编辑后的大纲并 resume orchestrator。
+
+        Args:
+            checkpoint_name: 检查点名（after_outline）
+        """
+        panel = self.continuation_panel.agent_panel
+        edited = panel.get_edited_outline()
+        panel.hide_continue_button()
+        self._agent_orchestrator.resume(
+            edited if edited is not None else None
+        )
+
+    # ===== 卷续写流程 =====
+
+    def _on_start_volume_continuation(self, params: dict) -> None:
+        """开始卷级多章节续写。
+
+        镜像 _on_start_agent_continuation 的验证与准备逻辑，但创建
+        VolumeOrchestrator 代替 AgentOrchestrator，由 orchestrator 内部
+        组装提示词并执行深度分析→卷大纲→审计→逐章循环。
+        """
+        if not self._current_chapter:
+            QMessageBox.warning(self, "提示", "请先选择章节")
+            return
+
+        endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            self._on_open_settings()
+            return
+
+        api_key = self.config_manager.decrypt_api_key(endpoint.get("id", ""))
+        if not api_key:
+            QMessageBox.warning(self, "提示", "API Key 无效，请检查设置")
+            self._on_open_settings()
+            return
+
+        model = params.get("model") or endpoint.get("default_model", "")
+        if not model:
+            QMessageBox.warning(self, "提示", "请选择模型")
+            return
+
+        # 获取 VolumeRunConfig
+        config = self.continuation_panel.get_volume_config()
+
+        # 上下文条目（与 agent 模式一致，提示用户先提取）
+        raw_entries = getattr(self, "_current_context_entries", None)
+        # 合并全局世界书条目（uid 冲突时世界书优先）
+        entries = self._merge_worldbook_entries(raw_entries)
+        if not entries:
+            QMessageBox.information(
+                self, "提示",
+                "请先在上下文提取预览区点击\"提取上下文\"按钮，\n"
+                "或启用一个全局世界书后再开始卷续写。",
+            )
+            return
+
+        # 加载项目对象
+        project = None
+        if self._current_project_id:
+            project = self.storage_service.load_project(self._current_project_id)
+
+        # 确保章节正文已加载（list_chapters 只加载元数据）
+        self._ensure_chapter_contents()
+
+        # 加载预设
+        preset_id = self.continuation_panel.volume_panel.get_selected_preset_id()
+        preset = self.preset_service.load_preset(preset_id)
+        if preset is None:
+            preset = self.preset_service.load_default_preset()
+            logger.warning("预设 %s 不存在，回退到默认预设", preset_id)
+
+        # 获取小说档案
+        novel_profile = project.novel_profile if project else {}
+
+        # 刷新正则脚本到引擎
+        self._refresh_regex_scripts()
+
+        # 章节元数据
+        chapter_metadata = (
+            dict(self._current_chapter.metadata) if self._current_chapter else {}
+        )
+
+        # 收集正则脚本 ID 快照
+        ordered_scripts = self.regex_service.get_ordered_scripts(
+            project_id=self._current_project_id or "",
+            preset_id=preset.id,
+            include_disabled=False,
+        )
+        regex_script_ids = [s.id for s, _ in ordered_scripts]
+
+        # 用户输入
+        user_input = self.continuation_panel.get_user_input()
+
+        # 锁定编辑器（卷模式不使用右侧输出面板的流式状态，
+        # 流式输出由 VolumePanel 自身的当前章节正文流式区承接）
+        self.chapter_editor.set_streaming_locked(True)
+
+        # 记录会话追踪信息（model 在启动时记录，prompt_messages 在 finished 时从 orchestrator 获取）
+        self._continuation_started_at = self.history_service.now_iso()
+        self._continuation_parameters = dict(params)
+        self._continuation_model = model
+        # 占位：VolumeOrchestrator 完成后用 get_writing_messages() 填充
+        self._continuation_prompt_messages = []
+
+        # 重置 Volume 面板进度与产物（同时清空流式区与整卷进度条）
+        self._volume_completed_phases = []
+        self.continuation_panel.volume_panel.reset()
+
+        # 断开旧 volume orchestrator 的信号连接，避免内存泄漏
+        old_orchestrator = getattr(self, "_volume_orchestrator", None)
+        if old_orchestrator is not None:
+            try:
+                old_orchestrator.phase_started.disconnect()
+                old_orchestrator.phase_finished.disconnect()
+                old_orchestrator.chapter_started.disconnect()
+                old_orchestrator.chapter_finished.disconnect()
+                old_orchestrator.chunk_received.disconnect()
+                old_orchestrator.reasoning_received.disconnect()
+                old_orchestrator.token_count.disconnect()
+                old_orchestrator.checkpoint_reached.disconnect()
+                old_orchestrator.finished.disconnect()
+                old_orchestrator.error.disconnect()
+                old_orchestrator.auth_error.disconnect()
+            except (RuntimeError, TypeError):
+                pass  # 信号可能已断开或对象已删除
+            old_orchestrator.deleteLater()
+
+        # 创建 VolumeOrchestrator（不传 messages，传 preset/chapters/context_entries 等原始数据）
+        self._volume_orchestrator = VolumeOrchestrator(
+            base_url=endpoint["base_url"],
+            api_key=api_key,
+            model=model,
+            parameters=params,
+            preset=preset,
+            chapters=self._current_chapters,
+            current_chapter=self._current_chapter,
+            context_entries=entries,
+            config=config,
+            user_input=user_input,
+            novel_profile=novel_profile,
+            project_id=self._current_project_id or "",
+            chapter_metadata=chapter_metadata,
+            regex_engine=self.regex_engine,
+            template_engine=self.template_engine,
+            regex_script_ids=regex_script_ids,
+            preset_id=preset.id,
+            preset_snapshot=preset.model_dump(mode="json"),
+            chapter_id=self._current_chapter.id,
+            parent=self,
+        )
+        self._volume_orchestrator.debug_mode = self._debug_mode
+
+        # 连接信号
+        self._volume_orchestrator.phase_started.connect(
+            self._on_volume_phase_started
+        )
+        self._volume_orchestrator.phase_finished.connect(
+            self._on_volume_phase_finished
+        )
+        self._volume_orchestrator.chapter_started.connect(
+            self._on_volume_chapter_started
+        )
+        self._volume_orchestrator.chapter_finished.connect(
+            self._on_volume_chapter_finished
+        )
+        self._volume_orchestrator.chunk_received.connect(
+            self.continuation_panel.volume_panel.append_chapter_chunk
+        )
+        self._volume_orchestrator.token_count.connect(
+            lambda count: self._token_count_label.setText(
+                f"Token: {count} (接收中)"
+            )
+        )
+        self._volume_orchestrator.checkpoint_reached.connect(
+            self._on_volume_checkpoint
+        )
+        self._volume_orchestrator.finished.connect(
+            self._on_volume_continuation_finished
+        )
+        self._volume_orchestrator.error.connect(self._on_continuation_error)
+        self._volume_orchestrator.auth_error.connect(self._on_auth_error)
+        self._volume_orchestrator.prompt_debug_requested.connect(
+            self._on_prompt_debug_requested
+        )
+
+        self._volume_orchestrator.start()
+        self._set_status_message("卷续写中...")
+
+    def _on_volume_phase_started(self, phase: str) -> None:
+        """卷级阶段开始回调：更新卷阶段进度指示器。
+
+        Args:
+            phase: 卷阶段名（deep_analysis/volume_outline/outline_audit）
+        """
+        # 映射 orchestrator 阶段名到面板阶段名
+        panel_phase = self._map_volume_phase(phase)
+        self.continuation_panel.volume_panel.update_volume_phase_progress(
+            panel_phase, self._volume_completed_phases
+        )
+
+    def _on_volume_phase_finished(self, phase: str, artifact: object) -> None:
+        """卷级阶段完成回调：更新产物查看器与进度指示器。
+
+        Args:
+            phase: 卷阶段名（deep_analysis/volume_outline/outline_audit/outline_final）
+            artifact: 阶段产物对象（DeepAnalysis/VolumeOutline/OutlineAuditReport）
+        """
+        panel = self.continuation_panel.volume_panel
+        if phase == "deep_analysis" and artifact is not None:
+            panel.update_deep_analysis(artifact)
+        elif phase == "volume_outline" and artifact is not None:
+            panel.update_volume_outline(artifact)
+        elif phase == "outline_audit":
+            if artifact is not None:
+                # 多轮审计：传入轮次索引，修订版大纲显示在审计报告 Tab（不覆盖卷大纲 Tab）
+                round_idx = len(panel._audit_reports)
+                panel.update_audit_report(artifact, round_idx)
+                panel._audit_reports.append(artifact)
+        elif phase == "outline_final" and artifact is not None:
+            # 终稿大纲更新到卷大纲 Tab
+            panel.update_final_outline(artifact)
+
+        # 切换产物查看 Tab 到对应阶段
+        panel.switch_to_tab(phase)
+
+        # 将 phase 加入已完成列表并刷新进度指示器
+        mapped = self._map_volume_phase(phase)
+        if mapped and mapped not in self._volume_completed_phases:
+            self._volume_completed_phases.append(mapped)
+        panel.update_volume_phase_progress("", self._volume_completed_phases)
+
+    def _on_volume_chapter_started(self, chapter_index: int) -> None:
+        """章节开始回调：更新章节进度指示器并启动流式区。
+
+        Args:
+            chapter_index: 章节序号（0 基）
+        """
+        config = self.continuation_panel.get_volume_config()
+        panel = self.continuation_panel.volume_panel
+        # 启动新章节流式：清空流式区并切到流式 tab
+        panel.start_chapter_streaming(chapter_index)
+        panel.update_chapter_progress(
+            chapter_index + 1,  # 转为 1 基
+            config.chapter_count,
+            "",  # 当前步骤未知（orchestrator 不发射步骤级事件）
+            [],
+        )
+
+    def _on_volume_chapter_finished(
+        self, chapter_index: int, artifacts: object
+    ) -> None:
+        """章节完成回调：添加章节产物到查看器并更新进度。
+
+        Args:
+            chapter_index: 章节序号（0 基）
+            artifacts: ChapterArtifacts 对象
+        """
+        config = self.continuation_panel.get_volume_config()
+        # 从卷大纲获取章节标题（若已生成）
+        title = ""
+        panel = self.continuation_panel.volume_panel
+        # 添加章节产物到折叠列表
+        panel.add_chapter_artifacts(
+            chapter_index + 1, artifacts, title
+        )
+        # 标记该章所有步骤完成
+        panel.update_chapter_progress(
+            chapter_index + 1,
+            config.chapter_count,
+            "",
+            ["outline", "writing", "verify", "revise"],
+        )
+
+    def _on_volume_checkpoint(
+        self, checkpoint_name: str, payload: object
+    ) -> None:
+        """卷级检查点暂停回调。
+
+        before_audit：不弹对话框，改为在 VolumePanel 卷大纲 Tab 下方显示
+        审计重点输入区，用户边看卷大纲边输入，点击"开始审计"恢复。
+        其他检查点：仍用 CheckpointDialog 简单模式。
+
+        Args:
+            checkpoint_name: 检查点名
+                （after_deep_analysis/after_volume_outline/before_audit/after_audit）
+            payload: 检查点产物（DeepAnalysis/VolumeOutline）
+        """
+        panel = self.continuation_panel.volume_panel
+
+        if checkpoint_name == "before_audit":
+            # before_audit：面板内嵌输入，不弹对话框
+            panel.show_audit_focus_input()
+            return
+
+        titles = {
+            "after_deep_analysis": "深度分析检查点",
+            "after_volume_outline": "卷大纲检查点",
+            "after_audit": "审计后检查点",
+        }
+        title = titles.get(checkpoint_name, "卷续写检查点")
+
+        # 使用 CheckpointDialog 简单模式，保持与 Agent 检查点一致的交互
+        dialog = CheckpointDialog(checkpoint_name, payload, self)
+        dialog.setWindowTitle(title)
+        dialog.exec()
+        action, result_payload = dialog.get_result()
+
+        if action == "accept":
+            panel.hide_continue_button()
+            self._volume_orchestrator.resume(payload)
+        elif action == "edit":
+            # 用户选择编辑：显示面板继续按钮，不立即 resume
+            panel.show_continue_button(checkpoint_name)
+        else:  # cancel
+            # 取消整个卷续写流程
+            panel.hide_continue_button()
+            self._volume_orchestrator.stop()
+
+    def _on_volume_continue(self, checkpoint_name: str, payload: object = None) -> None:
+        """VolumePanel 继续按钮点击：恢复 orchestrator。
+
+        before_audit：payload 为用户输入的审计重点字符串。
+        其他检查点：payload 为 None，读取面板编辑后的产物。
+
+        Args:
+            checkpoint_name: 检查点名
+                （after_deep_analysis/after_volume_outline/before_audit/after_audit）
+            payload: before_audit 时为审计重点字符串，其他为 None
+        """
+        panel = self.continuation_panel.volume_panel
+        if checkpoint_name == "before_audit":
+            panel.hide_continue_button()
+            self._volume_orchestrator.resume(payload)
+        else:
+            edited = self._get_edited_volume_checkpoint_payload(checkpoint_name)
+            panel.hide_continue_button()
+            self._volume_orchestrator.resume(
+                edited if edited is not None else None
+            )
+
+    def _on_volume_cancel_checkpoint(self) -> None:
+        """用户在面板检查点输入区点击"取消续写"。"""
+        panel = self.continuation_panel.volume_panel
+        panel.hide_continue_button()
+        panel.hide_audit_focus_input()
+        self._volume_orchestrator.stop()
+
+    def _get_edited_volume_checkpoint_payload(
+        self, checkpoint_name: str
+    ) -> object:
+        """从 VolumePanel 获取编辑后的检查点产物。
+
+        Args:
+            checkpoint_name: 检查点名
+
+        Returns:
+            编辑后的产物对象，解析失败或编辑器为空时返回 None
+        """
+        panel = self.continuation_panel.volume_panel
+        if checkpoint_name == "after_deep_analysis":
+            return panel.get_edited_deep_analysis()
+        elif checkpoint_name in ("after_volume_outline", "after_audit"):
+            return panel.get_edited_volume_outline()
+        return None
+
+    def _on_volume_continuation_finished(
+        self, continuation: Continuation
+    ) -> None:
+        """卷续写完成回调：处理完成的 Continuation。
+
+        镜像 _on_continuation_finished，但从 VolumeOrchestrator 获取
+        写作阶段的 model 与 messages 快照，更新 _continuation_prompt_messages
+        后再记录历史日志。
+
+        每章作为新章节插入到当前章节之后（后续章节 index 后移）。
+        VolumePanel 流式区显示完整卷正文（保持现有行为）。
+        """
+        from novelforge.services.storage_service import _generate_id
+        from novelforge.models import Chapter
+
+        self.continuation_panel.stop_streaming()
+        self.chapter_editor.set_streaming_locked(False)
+
+        # 从 volume orchestrator 获取写作阶段的 model 与 messages 快照
+        if self._volume_orchestrator is not None:
+            self._continuation_model = (
+                self._volume_orchestrator.get_writing_model()
+            )
+            self._continuation_prompt_messages = (
+                self._volume_orchestrator.get_writing_messages()
+            )
+
+        # 拆分每章为新章节，插入到当前章节之后
+        if self._current_chapter and continuation.volume_artifacts:
+            chapter_artifacts = continuation.volume_artifacts.chapter_artifacts
+            current_index = self._current_chapter.index
+            project_id = self._current_chapter.project_id
+
+            # 从终稿大纲获取章节标题（按 chapter_index 匹配）
+            final_outline = continuation.volume_artifacts.final_outline
+            chapter_titles: dict[int, str] = {}
+            if final_outline is not None:
+                for plan in final_outline.chapters:
+                    chapter_titles[plan.index] = plan.title
+
+            # 计算新章节数量
+            n_new = sum(1 for ca in chapter_artifacts if ca.content)
+            if n_new > 0:
+                # 将当前章节之后的所有章节 index 后移 n_new 位
+                later_chapters = [
+                    ch for ch in self._current_chapters
+                    if ch.index > current_index
+                ]
+                for ch in later_chapters:
+                    self.storage_service.update_chapter_index(
+                        ch.id, ch.index + n_new
+                    )
+
+                # 为每章创建新章节
+                new_chapter_index = current_index + 1
+                for ca in chapter_artifacts:
+                    if not ca.content:
+                        continue
+                    title = chapter_titles.get(
+                        ca.chapter_index, f"第{new_chapter_index}章"
+                    )
+                    new_chapter = Chapter(
+                        id=_generate_id("ch_"),
+                        project_id=project_id,
+                        index=new_chapter_index,
+                        title=title,
+                        content=ca.content,
+                        word_count=len(ca.content),
+                    )
+                    self.storage_service.save_chapter(new_chapter)
+                    new_chapter_index += 1
+
+                # 刷新章节列表
+                self._refresh_chapter_list()
+
+        # 卷模式：在 VolumePanel 流式区显示完整卷正文
+        # （不调用 set_current_swipe，避免写入已被隐藏的右侧输出面板）
+        self.continuation_panel.volume_panel.set_full_volume_content(
+            continuation.content
+        )
+
+        # M5: 记录历史日志（用容器 Continuation 的 id 和完整卷正文）
+        self._record_history(
+            swipe_id=continuation.id,
+            status=continuation.status,
+            output_text=continuation.content,
+            error_message="",
+        )
+
+        # 清理 volume orchestrator 引用
+        self._volume_orchestrator = None
+
+        self._set_status_message(
+            f"卷续写完成: {len(continuation.content)} 字, 状态: {continuation.status}"
+        )
+
+    @staticmethod
+    def _map_volume_phase(phase: str) -> str:
+        """将 VolumeOrchestrator 阶段名映射到 VolumePanel 阶段名。
+
+        Args:
+            phase: orchestrator 阶段名（deep_analysis/volume_outline/outline_audit）
+
+        Returns:
+            面板阶段名（deep_analysis/volume_outline/audit），无法映射时返回空串
+        """
+        mapping = {
+            "deep_analysis": "deep_analysis",
+            "volume_outline": "volume_outline",
+            "outline_audit": "audit",
+        }
+        return mapping.get(phase, "")
 
     def _handle_extraction_failure(
         self,
@@ -2244,7 +2862,7 @@ class MainWindow(QMainWindow):
         self._refresh_worldbooks()
 
     def _on_stop_continuation(self) -> None:
-        """停止流式输出（单次续写与 Agent 流程均处理）。"""
+        """停止流式输出（单次续写、Agent 与卷续写流程均处理）。"""
         if self._continuation_worker and self._continuation_worker.isRunning():
             self._continuation_worker.stop()
             self._set_status_message("正在停止续写...")
@@ -2254,6 +2872,12 @@ class MainWindow(QMainWindow):
         ):
             self._agent_orchestrator.stop()
             self._set_status_message("正在停止 Agent 流程...")
+        if (
+            self._volume_orchestrator is not None
+            and self._volume_orchestrator.isRunning()
+        ):
+            self._volume_orchestrator.stop()
+            self._set_status_message("正在停止卷续写流程...")
 
     def _on_continuation_finished(self, continuation: Continuation) -> None:
         """续写完成（单次与 Agent 流程共用）。"""
@@ -2355,7 +2979,7 @@ class MainWindow(QMainWindow):
         self._on_open_settings()
 
     def _on_rewrite(self, params: dict) -> None:
-        """重写（根据当前模式路由到单次/Agent 流程）。"""
+        """重写（根据当前模式路由到单次/Agent/卷续写流程）。"""
         # 沿用上次参数，created_by=rewrite
         if self.continuation_panel.current_swipe:
             last_params = self.continuation_panel.current_swipe.parameters_snapshot
@@ -2808,3 +3432,18 @@ class MainWindow(QMainWindow):
         """设置状态栏消息。"""
         self._save_status_label.setText(message)
         logger.info("状态: %s", message)
+
+    def _on_toast_requested(self, message: str) -> None:
+        """在状态栏显示临时提示，3 秒后还原为 swipe 元信息或"就绪"。"""
+        self._set_status_message(message)
+        QTimer.singleShot(3000, self._restore_status_after_toast)
+
+    def _restore_status_after_toast(self) -> None:
+        """toast 超时后还原状态栏。"""
+        swipe = self.continuation_panel.current_swipe
+        if swipe:
+            self._set_status_message(
+                f"模型: {swipe.model} | 状态: {swipe.status} | 字数: {len(swipe.content)}"
+            )
+        else:
+            self._set_status_message("就绪")

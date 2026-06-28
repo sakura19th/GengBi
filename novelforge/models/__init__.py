@@ -40,6 +40,19 @@ from novelforge.models.regex import (
     VALID_PLACEMENTS,
     RegexScript,
 )
+from novelforge.models.volume import (
+    DEFAULT_AUDIT_DIMENSIONS,
+    VALID_ANALYSIS_DEPTHS,
+    VALID_PLOT_ROLES,
+    AuditDimension,
+    ChapterArtifacts,
+    ChapterPlan,
+    DeepAnalysis,
+    OutlineAuditReport,
+    VolumeArtifacts,
+    VolumeOutline,
+    VolumeRunConfig,
+)
 from novelforge.models.worldbook import WorldBook
 
 __all__ = [
@@ -54,6 +67,18 @@ __all__ = [
     "CritiqueReport",
     "AgentArtifacts",
     "AgentRunConfig",
+    # 卷级多章节续写
+    "DeepAnalysis",
+    "ChapterPlan",
+    "VolumeOutline",
+    "AuditDimension",
+    "OutlineAuditReport",
+    "ChapterArtifacts",
+    "VolumeArtifacts",
+    "VolumeRunConfig",
+    "VALID_ANALYSIS_DEPTHS",
+    "DEFAULT_AUDIT_DIMENSIONS",
+    "VALID_PLOT_ROLES",
     # 上下文条目
     "ContextEntry",
     "VALID_CATEGORIES",

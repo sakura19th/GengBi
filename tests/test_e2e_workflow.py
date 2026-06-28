@@ -336,6 +336,34 @@ class TestE2EImportAndChapter:
         updated_chapters = temp_storage.list_chapters(first_chapter.project_id)
         assert len(updated_chapters) == len(chapters) - 1
 
+    def test_delete_chapter_preserves_remaining_content(
+        self, temp_storage: StorageService, sample_project: tuple[Project, list[Chapter]]
+    ) -> None:
+        """删除中间章节后，后续章节正文必须完整保留（不被空 content 覆盖）。"""
+        _, chapters = sample_project
+        chapter_service = ChapterService(temp_storage)
+
+        # 确保每个章节有明确正文
+        for ch in chapters:
+            full = temp_storage.load_chapter(ch.id)
+            full.content = f"章节{ch.index}的正文内容"
+            temp_storage.save_chapter(full)
+
+        # 删除第一章（非末尾），触发 reindex
+        first = chapters[0]
+        chapter_service.delete_chapter(first)
+
+        # 验证剩余章节正文完整保留
+        remaining = temp_storage.list_chapters(first.project_id)
+        assert len(remaining) == len(chapters) - 1
+        for ch in remaining:
+            full = temp_storage.load_chapter(ch.id)
+            assert full.content != "", f"章节 {ch.id} 正文被清空！"
+            assert "正文内容" in full.content
+        # 验证 index 连续
+        for i, ch in enumerate(sorted(remaining, key=lambda c: c.index)):
+            assert ch.index == i
+
 
 class TestE2EPresetAndPrompt:
     """端到端：预设与提示词组装。"""

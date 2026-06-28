@@ -123,6 +123,15 @@ class StorageService:
         data = chapter.model_dump(mode="json")
         self._runner.run(self.storage.save_chapter(data))
 
+    def update_chapter_index(self, chapter_id: str, new_index: int) -> None:
+        """只更新章节的 index 列，不触碰正文文件。
+
+        用于 reindex 场景，避免 save_chapter 用空 content 覆盖正文。
+        """
+        self._runner.run(
+            self.storage.update_chapter_index(chapter_id, new_index)
+        )
+
     def load_chapter(self, chapter_id: str) -> Chapter | None:
         """加载章节（含正文）。"""
         data = self._runner.run(self.storage.load_chapter(chapter_id))

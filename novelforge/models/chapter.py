@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from novelforge.models.agent import AgentArtifacts
 from novelforge.models.context import ContextEntry
+from novelforge.models.volume import VolumeArtifacts
 
 
 class Continuation(BaseModel):
@@ -47,6 +48,7 @@ class Continuation(BaseModel):
     prompt_snapshot: list[dict[str, Any]] = Field(default_factory=list)
     reasoning_content: str | None = None
     agent_artifacts: AgentArtifacts | None = None
+    volume_artifacts: VolumeArtifacts | None = None
 
 
 class Chapter(BaseModel):

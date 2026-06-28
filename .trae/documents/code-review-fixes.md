@@ -1,190 +1,190 @@
-# 代码审查修复计划
+# 代码审查修复（高+中+部分低严重度问题）
 
-## 摘要
+## 问题概述
 
-对前序会话修改的代码进行审查，发现 2 个严重问题、3 个中等问题需修复。核心问题集中在 `strip_html_tags` 函数：步骤 C 替换模式缺少 lookbehind 导致误删正常文本，且该函数被无条件应用于所有续写输出（包括非 HTML 预设的纯文本输出），存在静默数据损坏风险。
+对最近修改的代码（plot_role 容错、错误反馈重试、before_audit 检查点、配置持久化）进行全面审查后，发现 1 高 + 3 中 + 3 低共 7 个问题需修复。本计划聚焦实际漏洞和易改的优化项，不涉及大规模重构。
 
-## 当前状态分析
+## 修复清单（7 项）
 
-### 严重问题
+### 修复 1（高）：章节数不足不触发反馈重试 — _run_volume_outline
 
-#### 问题 1：`strip_html_tags` 步骤 C 替换模式缺少 lookbehind
+**文件**: `novelforge/services/volume_orchestrator.py`（L851-857）
 
-**文件**：`/workspace/novelforge/core/regex_engine.py` 第 536-546 行
+**问题**: LLM 返回章节数不足时 `return None` 直接返回，不进入 except 分支，不触发反馈重试。导致 LLM 偶发少输出一章就终止整个卷续写流程（`error.emit("卷大纲生成失败，流程终止")`）。
 
-**根因**：搜索模式使用 `(?<![/a-zA-Z0-9_])` lookbehind，但替换模式 `rf"/?{re.escape(tag)}(?![a-zA-Z0-9_])"` 缺少此断言。导致替换比搜索更激进。
-
-**实例验证**：文本 `"into the path/to/file go to school"`
-- `slash_tags` = `{"to", "file"}`（来自 `/to` 和 `/file`）
-- 搜索 `"to"`：`"into"` 中的 `"to"` 前面是 `"n"`（word char），lookbehind 阻止匹配 → 但 `"go to"` 中的 `"to"` 匹配 → 搜索成功
-- 替换 `/?to(?![a-zA-Z0-9_])`：无 lookbehind，匹配 `"into"` 中的 `"to"` → `"into"` 被破坏为 `"in"`
-- 结果：`"in the path/file go  school"` — 正常文本被损坏
-
-#### 问题 2：`strip_html_tags` 被无条件应用于所有续写输出
-
-**文件**：`/workspace/novelforge/services/continuation_worker.py` 第 377-383 行
-
-**根因**：无论预设是否产生 HTML，`strip_html_tags` 都在所有非空 `final_content` 上执行。其中第 515 行 `re.sub(r"<[^>]+>", "", result)` 会删除 `<` 和 `>` 之间的所有内容，包括正常文本如 `x < 5 and y > 3`（被破坏为 `x  3`）。
-
-### 中等问题
-
-#### 问题 3：`user_input` 未纳入 token 预算计算
-
-**文件**：`/workspace/novelforge/core/prompt_assembler.py` 第 450、543-545 行
-
-**根因**：token 预算 `budget = max_context - max_tokens - system_tokens - injection_tokens`（第 450 行）未包含 `user_input` 的 token。`user_input` 在历史裁剪完成后才追加（第 544-545 行），较长的用户输入可能导致总 token 超出 `max_context`。
-
-#### 问题 4：`_on_prompts_reordered` 不发射 `preset_changed` 信号
-
-**文件**：`/workspace/novelforge/ui/preset_manager.py` 第 620-635 行
-
-**根因**：拖拽排序后保存了新顺序但不发射信号，与 `_on_prompt_check_changed`（第 811 行）和 `_on_toggle_preset_enabled`（第 826 行）行为不一致。MainWindow 若依赖该信号刷新续写面板，排序变更不会生效。
-
-#### 问题 5：测试静默吞没所有异常
-
-**文件**：`/workspace/tests/test_tgbreak_e2e.py` 第 88-96 行
-
-**根因**：`except Exception: pass` 完全静默吞没正则脚本解析异常，可能掩盖真实 bug。
-
-## 拟议修改
-
-### 修改 1：修复步骤 C 替换模式 lookbehind（严重）
-
-**文件**：`/workspace/novelforge/core/regex_engine.py` 第 544-546 行
-
-将替换模式从：
+**修复**: 将 `return None` 改为 `raise ValueError(...)`，让其进入 except 分支触发反馈重试：
 ```python
-result = re.sub(
-    rf"/?{re.escape(tag)}(?![a-zA-Z0-9_])", "", result
-)
-```
-改为：
-```python
-result = re.sub(
-    rf"(?<![/a-zA-Z0-9_])/?{re.escape(tag)}(?![a-zA-Z0-9_])", "", result
-)
-```
-
-加入与搜索模式一致的 `(?<![/a-zA-Z0-9_])` lookbehind，确保替换范围与搜索范围一致，不误伤更长单词的子串。
-
-### 修改 2：`strip_html_tags` 条件执行 + 标签模式精确化（严重）
-
-**文件 A**：`/workspace/novelforge/services/continuation_worker.py` 第 377-383 行
-
-将无条件调用改为检测 HTML 特征后再调用：
-```python
-# 剥离 HTML 标签，输出纯文本
-# 仅当内容含 HTML 标签特征时才执行，避免破坏纯文本输出
-if final_content and _contains_html(final_content):
-    try:
-        from novelforge.core.regex_engine import strip_html_tags
-        final_content = strip_html_tags(final_content)
-        logger.debug("已剥离 HTML 标签")
-    except Exception as e:
-        logger.warning("HTML 标签剥离失败: %s", e)
-```
-
-新增辅助函数 `_contains_html`（在 continuation_worker.py 模块级）：
-```python
-import re as _re
-
-_HTML_PATTERN = _re.compile(r"<[a-zA-Z/!]")
-
-def _contains_html(text: str) -> bool:
-    """检测文本是否含 HTML 标签特征。
-
-    匹配 < 后跟字母、/ 或 !（HTML 标签开始），不匹配 < 后跟空格/数字
-    （如数学表达式 x < 5）。
-    """
-    return bool(_HTML_PATTERN.search(text))
-```
-
-**文件 B**：`/workspace/novelforge/core/regex_engine.py` 第 515 行
-
-将通用标签移除模式从 `<[^>]+>` 精确化为 `</?[a-zA-Z][^>]*>`，要求 `<` 后跟可选 `/` 和字母（真正的 HTML 标签），不匹配 `< 5` 等数学表达式：
-```python
-# 移除所有剩余 HTML/XML 标签（要求 < 后跟字母或 /，避免误伤数学表达式）
-result = re.sub(r"</?[a-zA-Z][^>]*>", "", result)
-```
-
-### 修改 3：`user_input` 纳入 token 预算（中等）
-
-**文件**：`/workspace/novelforge/core/prompt_assembler.py` 第 446-450 行
-
-在预算计算前计算 `user_input` 的 token 占用并扣除：
-```python
-# 计算 user_input 的 token 占用
-user_input_tokens = 0
-if user_input:
-    user_input_tokens = self.token_counter.count_messages(
-        [{"role": "user", "content": user_input}], model
+elif len(outline.chapters) < chapter_count:
+    raise ValueError(
+        f"章节数不足: 期望 {chapter_count}, 实际 {len(outline.chapters)}"
     )
-
-budget = (
-    max_context - max_tokens - system_tokens
-    - injection_tokens - user_input_tokens
-)
 ```
+同时删除原 `logger.error(...)`（except 分支会 logger.warning）。
 
-同步更新第 461 行的 `reduced_max_tokens` 计算，也扣除 `user_input_tokens`：
+### 修复 2（中）：章节数不足不触发反馈重试 — _run_outline_final
+
+**文件**: `novelforge/services/volume_orchestrator.py`（L1020-1026）
+
+**问题**: 同修复 1，`_run_outline_final` 章节数不足时 `return None` 不触发反馈重试。虽有降级保底（保持审计后大纲），但丧失了让 LLM 修正的机会。
+
+**修复**: 同修复 1，改为 `raise ValueError(...)`：
 ```python
-reduced_max_tokens = (
-    max_context - system_tokens - injection_tokens
-    - user_input_tokens - min_context_budget
-)
+elif len(outline.chapters) < chapter_count:
+    raise ValueError(
+        f"章节数不足: 期望 {chapter_count}, 实际 {len(outline.chapters)}"
+    )
 ```
 
-### 修改 4：`_on_prompts_reordered` 发射信号（中等）
+### 修复 3（中）：重试时 messages 缺少 LLM 上次 assistant 输出
 
-**文件**：`/workspace/novelforge/ui/preset_manager.py` 第 635 行后
+**文件**: `novelforge/services/volume_orchestrator.py`（3 处 except 分支）
 
-在 `save_preset` 后追加信号发射：
+**问题**: 重试时 messages 为 `[system, user_feedback]`，缺少 LLM 上次的 assistant 输出。LLM 只看到错误描述，看不到自己具体输出了什么错误内容，修正针对性较弱。且无 assistant 却有 user 追问的对话顺序可能让部分模型困惑。
+
+**修复**: 在 3 个 except 分支中，`messages.append(user_feedback)` 之前先 `messages.append({"role": "assistant", "content": content})`。注意 `content` 变量在 try 块中已赋值（`content = response["choices"][0]["message"]["content"]`），except 分支可访问。
+
+**3.1 `_run_volume_outline` except 分支**（L864-876）：
 ```python
-self.preset_service.reorder_prompts(self._current_preset, new_order)
-self.preset_service.save_preset(self._current_preset)
-self.preset_changed.emit(self._current_preset.id)
+except Exception as e:
+    logger.warning("VolumeOutline 失败 (attempt %d): %s", attempt + 1, e)
+    # 补充 LLM 上次输出到上下文，让它在下次重试时针对性修正
+    messages.append({"role": "assistant", "content": content})
+    # 反馈错误信息给 LLM
+    messages.append({
+        "role": "user",
+        "content": (
+            f"上次输出校验失败：{e}。请修正上述问题，严格按 JSON Schema "
+            "重新输出完整的 VolumeOutline JSON 对象。特别注意：plot_role "
+            "必须为 起/承/转/合/高潮/过渡 中的单一值，严禁组合拼接"
+            "（如\"承转\"无效，应输出\"承\"或\"转\"）。"
+        ),
+    })
+    continue
 ```
 
-### 修改 5：测试异常日志记录（中等）
+**3.2 `_run_outline_audit` except 分支**（L945-957）：同样在 user 消息前补充 `messages.append({"role": "assistant", "content": content})`。
 
-**文件**：`/workspace/tests/test_tgbreak_e2e.py` 第 88-96 行
+**3.3 `_run_outline_final` except 分支**（L1033-1044）：同样在 user 消息前补充 `messages.append({"role": "assistant", "content": content})`。
 
-将 `except Exception: pass` 改为记录日志：
+**注意**: 若异常发生在 `content = response[...]` 之前（如网络错误），`content` 变量未定义。需用 `content = locals().get("content", "")` 或在 try 块外预初始化 `content = ""`。采用预初始化更清晰：在 `for attempt` 循环内、try 之前加 `content = ""`。
+
+### 修复 4（中）：except Exception 捕获 RateLimitError/APIError 不合理
+
+**文件**: `novelforge/services/volume_orchestrator.py`（3 处 except 分支）
+
+**问题**: `except Exception` 会捕获 `RateLimitError`（限流）和 `APIError`（服务端错误），立即重试可能加重服务端压力。网络/服务端错误应直接上抛由 `_async_run` 顶层处理。
+
+**修复**: 在 `except AuthError` 之后、`except Exception` 之前，增加 `except (RateLimitError, APIError): raise`。需先 import 这两个异常类。
+
+**import 修改**（文件顶部）：在现有 `from novelforge.services.llm_client import ...` 行补充 `RateLimitError, APIError`（搜索确认现有 import）。
+
+**3 处 except 分支结构**（统一改为）：
 ```python
-import logging
-logger = logging.getLogger(__name__)
-
-# ...
-for script_data in regex_scripts_data:
-    try:
-        script = _parse_regex_script_from_st(script_data)
-        if not script.id:
-            script.id = _generate_regex_id()
-        regex_service.add_script(script, scope="preset", preset_id=preset.id)
-        scripts.append(script)
-    except Exception as e:
-        logger.warning("导入正则脚本失败: %s", e)
+except AuthError:
+    raise
+except RateLimitError:
+    raise
+except APIError:
+    raise
+except asyncio.CancelledError:
+    raise
+except Exception as e:
+    logger.warning("... 失败 (attempt %d): %s", attempt + 1, e)
+    messages.append({"role": "assistant", "content": content})
+    messages.append({"role": "user", "content": "..."})
+    continue
 ```
 
-## 假设与决策
+### 修复 5（低）：plot_role 未 strip 导致含空格值误判
 
-1. **不修改 `strip_html_tags` 的整体结构**：保留步骤 A/B/C 的清理逻辑，仅修复 lookbehind 缺失和标签模式精确化。
-2. **HTML 检测使用简单模式**：`<[a-zA-Z/!]` 检测足够覆盖真实 HTML 标签（`<div>`、`</p>`、`<!--`），不覆盖数学表达式（`< 5`）。对于 TGbreak 的半残标签（`cliche>` 无 `<`），由 `_contains_html` 检测到 `>` 不触发（因无 `<`），但此时 `strip_html_tags` 不会被调用——这是可接受的，因为半残标签仅在 TGbreak 预设的 trimStrings 作用下产生，而 trimStrings 同时会剥离 `<`，使得 `_contains_html` 检测不到 `<`。
+**文件**: `novelforge/models/volume.py`（L138-141）
 
-   **修正决策**：为覆盖 TGbreak 半残标签场景，`_contains_html` 也检测 `>` 后跟 ASCII 标签名的模式。更新检测函数：
-   ```python
-   _HTML_PATTERN = _re.compile(r"<[a-zA-Z/!]|/?[a-zA-Z_]\w*>")
-   ```
-   这样 `cliche>` 和 `ai_last_output>` 也会触发 `strip_html_tags`。
+**问题**: `if not v` 仅处理空字符串和 None。LLM 偶发返回带前后空白的值（如 `" 高潮 "`）会被误判为非法——`v in VALID_PLOT_ROLES` 为 False（含空格），后续匹配也失败，最终抛错。
 
-3. **`user_input` token 计算使用 `count_messages`**：与系统消息的计算方式一致，确保准确性。
-4. **不修复实体反转义顺序问题**（审查中的中等问题 3）：该问题在小说续写场景中极少触发（AI 输出很少包含 `&lt;` 等实体），优先级低，不在本次修复范围。
-5. **不修复默认预设 ID 硬编码问题**（审查中的轻微问题 10）：影响小，不在本次范围。
+**修复**: 在 `if not v` 之后增加 `v = v.strip()`，strip 后为空也返回空字符串：
+```python
+def validate_plot_role(cls, v):
+    # 允许空字符串（默认值）
+    if not v:
+        return v
+    # 去除前后空白，避免 LLM 偶发输出带空格的值被误判
+    v = v.strip()
+    if not v:
+        return v
+    # 精确匹配
+    if v in VALID_PLOT_ROLES:
+        return v
+    # ...（后续容错归一化逻辑不变）
+```
+
+### 修复 6（低）：before_audit 对话框 QPlainTextEdit 无最小高度
+
+**文件**: `novelforge/ui/checkpoint_dialog.py`（L186-190）
+
+**问题**: `_setup_audit_focus_mode` 中 `QPlainTextEdit()` 未设置 `setMinimumHeight`。用户缩小对话框时编辑区会被压缩到很小，不便输入。
+
+**修复**: 在 `self._audit_focus_edit = QPlainTextEdit()` 之后增加：
+```python
+self._audit_focus_edit.setMinimumHeight(120)
+```
+
+### 修复 7（低）：CheckpointDialog 内部标题被 main_window 覆盖（冗余）
+
+**文件**: `novelforge/ui/checkpoint_dialog.py`（L174）
+
+**问题**: `_setup_audit_focus_mode` 中 `self.setWindowTitle("审计前 - 输入需着重审计的部分")` 会被 `main_window._on_volume_checkpoint` 的 `dialog.setWindowTitle(title)`（L2161）覆盖为"审计前检查点"。内部标题是冗余的。
+
+**修复**: 删除 `_setup_audit_focus_mode` 中的 `self.setWindowTitle(...)` 行（L174）。标题统一由 main_window 的 titles 字典管理。
+
+## 不修改的部分
+
+- **问题 B.2**（三处反馈消息文本重复）：保持显式，差异明确，不抽取辅助方法。
+- **问题 B.3**（配置持久化无防抖）：变更频率低，当前实现可接受。
+- **问题 B.4**（_token_value_to_text 硬编码）：5 项映射稳定，不抽取共享常量。
+- **问题 C.1**（暂停点复选框标签过短无 tooltip）：当前标签在卷续写上下文中基本可理解，不增加 tooltip。
+- **问题 4.2**（analysis_depth/pacing_speed 未匹配时静默失败）：VolumeRunConfig validator 已拦截非法值，持久化 JSON 被篡改的概率极低，不增加日志。
 
 ## 验证步骤
 
-1. 运行 TGbreak E2E 测试：`python -m pytest tests/test_tgbreak_e2e.py -v` — 预期 14/14 通过
-2. 运行正则引擎相关测试：`python -m pytest tests/ -q -k "regex or strip or html"` — 预期全通过
-3. 运行全量测试套件（排除环境缺失的 UI 测试）：`python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"` — 预期无回归
-4. 手动验证步骤 C 修复：用诊断脚本确认 `"into"` 不被破坏为 `"in"`
-5. 手动验证条件执行：确认纯文本输出（无 HTML）不被 `strip_html_tags` 处理
+1. 运行编排器测试：
+   ```
+   python -m pytest tests/test_volume_orchestrator.py -q --tb=short
+   ```
+2. 运行模型测试：
+   ```
+   python -m pytest tests/test_volume_models.py -q --tb=short
+   ```
+3. 运行 UI 测试：
+   ```
+   python -m pytest tests/test_volume_ui.py -q --tb=short
+   ```
+4. 运行完整测试套件确认无回归：
+   ```
+   python -m pytest tests/ -q --tb=short
+   ```
+   预期：428+ passed, 13 skipped, 0 failed。
+
+### 新增/更新测试
+
+**文件**: `tests/test_volume_orchestrator.py`
+- **新增** `test_volume_outline_chapter_count_short_triggers_retry`：
+  - mock 第一次响应返回 chapters 数量不足（如 1 章，期望 2 章），第二次返回合法 2 章。
+  - 断言重试发生（第二次调用时 messages 含 assistant + user 反馈）。
+  - 断言最终返回有效 VolumeOutline。
+- **更新** `test_volume_outline_error_feedback_retry`（已有）：
+  - 断言第二次调用时 messages 含 assistant 消息（LLM 上次输出）。
+
+**文件**: `tests/test_volume_models.py`
+- **新增** `test_chapter_plan_plot_role_with_spaces_normalized`：
+  - 验证 `ChapterPlan(plot_role=" 高潮 ")` 归一化为 `"高潮"`。
+  - 验证 `ChapterPlan(plot_role="  承  ")` 归一化为 `"承"`。
+
+## 假设与决策
+
+- **决策**：修复 1/2 将章节数不足改为 raise ValueError 进入 except 分支——让反馈重试机制覆盖此情况，避免 LLM 单次失误终止流程。
+- **决策**：修复 3 补充 assistant 消息——让 LLM 看到自己的错误输出，修正针对性更强。用 `content = ""` 预初始化避免变量未定义。
+- **决策**：修复 4 将 RateLimitError/APIError 上抛——网络错误不应立即重试，由顶层处理。
+- **决策**：修复 5 增加 `v.strip()`——防御 LLM 偶发输出带空格的值，符合容错兜底精神。
+- **决策**：修复 6/7 是易改的 UI 小问题——最小高度提升可用性，删除冗余标题统一管理。
+- **假设**：`content` 变量在 except 分支可访问（Python 作用域），但若异常发生在 `content = response[...]` 之前则未定义，需预初始化 `content = ""`。
+- **假设**：`from novelforge.services.llm_client import ...` 现有 import 行可补充 `RateLimitError, APIError`（需搜索确认现有 import 内容）。

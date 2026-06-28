@@ -69,6 +69,34 @@ def get_agent_prompt_path(phase: str) -> Path:
     return get_resource_path("defaults", "agent", f"phase_{phase}.txt")
 
 
+# 卷级多章节续写支持的阶段名集合
+_VOLUME_PROMPT_PHASES = frozenset(
+    {"deep_analysis", "volume_outline", "outline_audit", "outline_final", "chapter_outline"}
+)
+
+
+def get_volume_prompt_path(phase: str) -> Path:
+    """获取卷级多章节续写阶段提示词路径。
+
+    与 get_agent_prompt_path 镜像，但限定为卷续写流程的阶段名。
+
+    Args:
+        phase: 阶段名，取值 deep_analysis/volume_outline/outline_audit/outline_final/chapter_outline
+
+    Returns:
+        提示词文件路径（resources/defaults/agent/phase_{phase}.txt）
+
+    Raises:
+        ValueError: phase 不在支持的取值范围内
+    """
+    if phase not in _VOLUME_PROMPT_PHASES:
+        valid = "/".join(sorted(_VOLUME_PROMPT_PHASES))
+        raise ValueError(
+            f"非法的卷续写阶段名: {phase!r}，支持取值: {valid}"
+        )
+    return get_resource_path("defaults", "agent", f"phase_{phase}.txt")
+
+
 def load_text_resource(path: Path) -> str:
     """加载文本资源文件内容。
 

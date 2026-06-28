@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from novelforge.models import AgentRunConfig, CritiqueReport, Outline
 from novelforge.ui.helpers import set_label_state
+from novelforge.ui.wheel_filter import WheelEventFilter
 from novelforge.utils.outline_serializer import (
     format_critique,
     format_outline,
@@ -67,11 +69,14 @@ class AgentPanel(QWidget):
         config_changed(object): AgentRunConfig 对象
         resume(object): checkpoint payload（编辑后的大纲等）
         cancel_checkpoint(): 取消暂停
+        continue_requested(str): 用户在检查点选择编辑后，点击"继续"按钮时发射，
+            携带检查点名（after_outline）
     """
 
     config_changed = Signal(object)
     resume = Signal(object)
     cancel_checkpoint = Signal()
+    continue_requested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         """初始化 Agent 面板。
@@ -82,6 +87,7 @@ class AgentPanel(QWidget):
         super().__init__(parent)
         self._current_outline: Outline | None = None
         self._current_critique: CritiqueReport | None = None
+        self._current_checkpoint_name: str = ""
 
         self._setup_ui()
         self._setup_connections()
@@ -166,7 +172,18 @@ class AgentPanel(QWidget):
         critique_layout.addWidget(self._critique_edit)
         artifacts_layout.addWidget(self._critique_group)
 
+        # 继续按钮：检查点选择"编辑"后显示，用户在面板编辑产物后点击恢复
+        self._continue_btn = QPushButton("继续")
+        self._continue_btn.setObjectName("primaryBtn")
+        self._continue_btn.hide()
+        self._continue_btn.clicked.connect(self._on_continue_clicked)
+        artifacts_layout.addWidget(self._continue_btn)
+
         layout.addWidget(self._artifacts_group, 1)
+
+        # 安装滚轮事件过滤器
+        self._wheel_filter = WheelEventFilter(self)
+        self._max_revise_spin.installEventFilter(self._wheel_filter)
 
     def _setup_connections(self) -> None:
         """连接信号。"""
@@ -291,6 +308,34 @@ class AgentPanel(QWidget):
         return parse_outline(text)
 
     # ------------------------------------------------------------------
+    # 检查点继续按钮
+    # ------------------------------------------------------------------
+
+    def show_continue_button(self, checkpoint_name: str) -> None:
+        """显示继续按钮。
+
+        用户在检查点对话框选择"编辑"后由主窗口调用：关闭对话框让用户在面板中
+        编辑大纲，编辑完成后点击"继续"按钮恢复 orchestrator。
+
+        Args:
+            checkpoint_name: 检查点名（after_outline）
+        """
+        self._current_checkpoint_name = checkpoint_name
+        self._continue_btn.show()
+
+    def hide_continue_button(self) -> None:
+        """隐藏继续按钮并清空当前检查点名。"""
+        self._continue_btn.hide()
+        self._current_checkpoint_name = ""
+
+    def _on_continue_clicked(self) -> None:
+        """继续按钮点击：发射 continue_requested 信号携带检查点名。
+
+        主窗口接收后从面板读取编辑后的大纲并 resume orchestrator。
+        """
+        self.continue_requested.emit(self._current_checkpoint_name)
+
+    # ------------------------------------------------------------------
     # 重置
     # ------------------------------------------------------------------
 
@@ -301,4 +346,6 @@ class AgentPanel(QWidget):
         self._outline_edit.clear()
         self._critique_edit.clear()
         self._critique_group.setChecked(False)
+        # 隐藏继续按钮
+        self.hide_continue_button()
         self.update_phase_progress("", [])

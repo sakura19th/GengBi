@@ -26,6 +26,7 @@
             "auto_save": bool,
             "show_token_count": bool
         },
+        "volume": {},  # 卷续写配置持久化（VolumeRunConfig 的 JSON dump）
         "context_extract": {
             "extractor_model": "",
             "cache_enabled": true,
@@ -79,6 +80,7 @@ def get_default_config() -> dict[str, Any]:
             "auto_save": True,
             "show_token_count": True,
         },
+        "volume": {},
         "context_extract": {
             "extractor_model": "",
             "cache_enabled": True,
@@ -350,6 +352,16 @@ class ConfigManager:
     def get_continuation_settings(self) -> dict[str, Any]:
         """获取续写配置。"""
         return self.config.get("continuation", {})
+
+    def get_volume_settings(self) -> dict[str, Any]:
+        """获取卷续写配置（VolumeRunConfig 的 JSON dump）。"""
+        return self.config.get("volume", {})
+
+    def set_volume_settings(self, settings: dict[str, Any]) -> None:
+        """设置卷续写配置并保存。"""
+        with self._lock:
+            self.config["volume"] = settings
+            self.save()
 
     def get_context_extract_settings(self) -> dict[str, Any]:
         """获取上下文提取配置。"""

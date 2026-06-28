@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS continuations (
     prompt_snapshot TEXT DEFAULT '[]',
     reasoning_content TEXT,
     agent_artifacts TEXT,
+    volume_artifacts TEXT,
     FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_continuations_chapter ON continuations(chapter_id);
@@ -333,14 +334,14 @@ class Storage:
         # 创建表和索引
         await self._conn.executescript(SCHEMA_SQL)
 
-        # 幂等迁移：为旧版 continuations 表补充 agent_artifacts 列
-        await self._migrate_continuations_agent_artifacts()
+        # 幂等迁移：为旧版 continuations 表补充 agent_artifacts / volume_artifacts 列
+        await self._migrate_continuations_columns()
 
         await self._conn.commit()
         logger.info("数据库连接成功: %s（日志模式: %s）", self._db_path, journal_mode)
 
-    async def _migrate_continuations_agent_artifacts(self) -> None:
-        """幂等迁移：为 continuations 表补充 agent_artifacts 列。
+    async def _migrate_continuations_columns(self) -> None:
+        """幂等迁移：为 continuations 表补充 agent_artifacts / volume_artifacts 列。
 
         SQLite 不支持 ADD COLUMN IF NOT EXISTS，需先查 PRAGMA table_info
         检测列是否存在，再决定是否 ALTER TABLE。
@@ -356,6 +357,11 @@ class Storage:
                 "ALTER TABLE continuations ADD COLUMN agent_artifacts TEXT"
             )
             logger.info("已为 continuations 表添加 agent_artifacts 列")
+        if "volume_artifacts" not in column_names:
+            await self._conn.execute(
+                "ALTER TABLE continuations ADD COLUMN volume_artifacts TEXT"
+            )
+            logger.info("已为 continuations 表添加 volume_artifacts 列")
 
     async def close(self) -> None:
         """关闭数据库连接。"""
@@ -534,6 +540,23 @@ class Storage:
                 pass
             raise
 
+    async def update_chapter_index(
+        self, chapter_id: str, new_index: int
+    ) -> None:
+        """只更新章节的 index 列，不触碰正文文件。
+
+        用于 reindex 场景，避免 save_chapter 用空 content 覆盖正文。
+
+        Args:
+            chapter_id: 章节 ID
+            new_index: 新的章节序号
+        """
+        await self.conn.execute(
+            'UPDATE chapters SET "index" = ?, updated_at = ? WHERE id = ?',
+            (new_index, datetime.now().isoformat(), chapter_id),
+        )
+        await self.conn.commit()
+
     async def load_chapter(self, chapter_id: str) -> dict[str, Any] | None:
         """加载章节元数据与正文。
 
@@ -683,8 +706,8 @@ class Storage:
                 status, created_by, parameters_snapshot, preset_id,
                 preset_snapshot, regex_script_ids_snapshot,
                 extracted_context_snapshot, prompt_snapshot, reasoning_content,
-                agent_artifacts)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                agent_artifacts, volume_artifacts)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 continuation["id"],
                 continuation["chapter_id"],
@@ -707,6 +730,9 @@ class Storage:
                 continuation.get("reasoning_content"),
                 json.dumps(continuation.get("agent_artifacts"), ensure_ascii=False)
                 if continuation.get("agent_artifacts")
+                else None,
+                json.dumps(continuation.get("volume_artifacts"), ensure_ascii=False)
+                if continuation.get("volume_artifacts")
                 else None,
             ),
         )
@@ -748,6 +774,7 @@ class Storage:
             "prompt_snapshot": json.loads(row[13]) if row[13] else [],
             "reasoning_content": row[14],
             "agent_artifacts": json.loads(row[15]) if len(row) > 15 and row[15] else None,
+            "volume_artifacts": json.loads(row[16]) if len(row) > 16 and row[16] else None,
         }
 
     # ===== 历史日志操作 =====

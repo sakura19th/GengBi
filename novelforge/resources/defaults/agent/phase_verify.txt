@@ -6,6 +6,9 @@
 # 续写大纲（JSON）
 {{outline}}
 
+# 插入点前 10 章正文参考
+{{previous_chapters_text}}
+
 # 续写文本
 {{written_text}}
 

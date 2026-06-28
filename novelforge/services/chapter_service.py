@@ -326,14 +326,18 @@ class ChapterService:
         self.storage.save_chapter(original)
 
     def _reindex_after(self, project_id: str, start_index: int) -> None:
-        """重排指定 index 之后的章节序号（确保连续）。"""
+        """重排指定 index 之后的章节序号（确保连续）。
+
+        使用 update_chapter_index 只更新 SQL 的 index 列，
+        不触碰正文文件，避免 list_chapters 返回空 content 覆盖正文。
+        """
         chapters = self.storage.list_chapters(project_id)
         chapters.sort(key=lambda c: c.index)
         # 重新分配 index
         for new_idx, ch in enumerate(chapters):
             if ch.index != new_idx:
                 ch.index = new_idx
-                self.storage.save_chapter(ch)
+                self.storage.update_chapter_index(ch.id, new_idx)
 
     def _reindex_all(self, project_id: str) -> None:
         """重排项目所有章节的 index。"""

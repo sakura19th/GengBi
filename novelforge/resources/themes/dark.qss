@@ -483,3 +483,17 @@ QLabel#loadingText {
 QLabel#loadingLabel {
     font-size: 16px;
 }
+
+/* ===== 卷续写整卷进度条 ===== */
+QProgressBar#volumeProgressBar {
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    background-color: rgba(255, 255, 255, 0.08);
+    text-align: center;
+    font-weight: 600;
+    color: #ffffff;
+}
+QProgressBar#volumeProgressBar::chunk {
+    background-color: #0a84ff;
+    border-radius: 5px;
+}

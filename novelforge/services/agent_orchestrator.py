@@ -79,6 +79,7 @@ class AgentOrchestrator(QThread):
     error = Signal(str)
     auth_error = Signal()
     token_count = Signal(int)
+    prompt_debug_requested = Signal(str, str)
 
     def __init__(
         self,
@@ -148,6 +149,13 @@ class AgentOrchestrator(QThread):
         self.preset_snapshot = preset_snapshot or {}
         self.chapter_id = chapter_id
 
+        # Find current chapter position for lookback computation
+        self._current_chapter_index = -1
+        for i, ch in enumerate(self.chapters):
+            if ch.id == current_chapter.id:
+                self._current_chapter_index = i
+                break
+
         # 线程安全停止
         self._stop_event = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -173,6 +181,11 @@ class AgentOrchestrator(QThread):
             template_engine=template_engine,
         )
 
+        # 调试模式（UI 线程设置，开启后每次 LLM 调用前弹窗确认）
+        self.debug_mode: bool = False
+        self._debug_confirmed: asyncio.Event | None = None
+        self._debug_confirmed_result: bool = False
+
     def stop(self) -> None:
         """请求停止 Agent 流程（线程安全）。
 
@@ -191,6 +204,42 @@ class AgentOrchestrator(QThread):
         self._checkpoint_payload = payload
         if self._loop and self._resume_event:
             self._loop.call_soon_threadsafe(self._resume_event.set)
+
+    def confirm_debug_prompt(self, confirmed: bool) -> None:
+        """UI 线程调用，确认调试提示词弹窗。
+
+        Args:
+            confirmed: True=发送，False=取消
+        """
+        self._debug_confirmed_result = confirmed
+        if self._loop and self._debug_confirmed:
+            self._loop.call_soon_threadsafe(self._debug_confirmed.set)
+
+    async def _maybe_debug_prompt(
+        self, messages: list[dict[str, Any]], phase_name: str
+    ) -> bool:
+        """调试模式下弹窗确认提示词。
+
+        若 debug_mode 为 False，直接返回 True。
+        若为 True，emit prompt_debug_requested 信号，等待 UI 线程确认。
+
+        Args:
+            messages: 即将发送的 messages 列表
+            phase_name: 阶段名（用于弹窗标题）
+
+        Returns:
+            True=确认发送，False=取消
+        """
+        if not self.debug_mode:
+            return True
+        if self._debug_confirmed is None:
+            return True
+        self._debug_confirmed.clear()
+        self._debug_confirmed_result = False
+        messages_json = json.dumps(messages, ensure_ascii=False, indent=2)
+        self.prompt_debug_requested.emit(phase_name, messages_json)
+        await self._debug_confirmed.wait()
+        return self._debug_confirmed_result
 
     def get_writing_messages(self) -> list[dict[str, Any]]:
         """获取写作阶段的 messages 快照（供历史日志记录）。
@@ -240,6 +289,7 @@ class AgentOrchestrator(QThread):
         """异步执行多阶段 Agent 流程。"""
         self._loop = asyncio.get_running_loop()
         self._resume_event = asyncio.Event()
+        self._debug_confirmed = asyncio.Event()
 
         if self._client is None:
             self._client = LLMClient(self.base_url, self.api_key)
@@ -316,7 +366,7 @@ class AgentOrchestrator(QThread):
                     final_content, current_critique, artifacts.outline
                 )
                 final_content, reasoning_content, messages = (
-                    await self._run_writing(artifacts.outline, guidance)
+                    await self._run_writing(artifacts.outline, guidance, original_content=final_content)
                 )
                 self._writing_messages = messages
                 new_critique = await self._run_verify(
@@ -377,6 +427,10 @@ class AgentOrchestrator(QThread):
         system_prompt = self._apply_macros(template, macros)
         messages = [{"role": "system", "content": system_prompt}]
 
+        # 调试模式确认
+        if not await self._maybe_debug_prompt(messages, "前文分析"):
+            return None
+
         for attempt in range(2):
             temperature = 0.3 if attempt == 0 else 0.0
             try:
@@ -404,7 +458,7 @@ class AgentOrchestrator(QThread):
         失败重试一次，再失败返回 None。
         """
         template = self._load_template("outline")
-        chapters_text = self._chapters_text
+        chapters_text = self._build_lookback_chapters_text()
         if snapshot is not None:
             snapshot_text = json.dumps(
                 snapshot.model_dump(), ensure_ascii=False, indent=2
@@ -418,6 +472,10 @@ class AgentOrchestrator(QThread):
         }
         system_prompt = self._apply_macros(template, macros)
         messages = [{"role": "system", "content": system_prompt}]
+
+        # 调试模式确认
+        if not await self._maybe_debug_prompt(messages, "大纲规划"):
+            return None
 
         for attempt in range(2):
             temperature = 0.3 if attempt == 0 else 0.0
@@ -438,10 +496,11 @@ class AgentOrchestrator(QThread):
         return None
 
     async def _run_writing(
-        self,
-        outline: Outline | None,
-        revision_guidance: dict | None = None,
-    ) -> tuple[str, str, list[dict[str, Any]]]:
+    self,
+    outline: Outline | None,
+    revision_guidance: dict | None = None,
+    original_content: str = "",
+) -> tuple[str, str, list[dict[str, Any]]]:
         """阶段④：续写，流式输出。
 
         将 outline 格式化为 Markdown，通过 ContextEntry 或 fallback 注入。
@@ -496,12 +555,24 @@ class AgentOrchestrator(QThread):
             guidance_text = json.dumps(
                 revision_guidance, ensure_ascii=False, indent=2
             )
-            messages.append(
-                {
-                    "role": "user",
-                    "content": f"请根据以下修订指导重写续写内容：\n\n{guidance_text}",
-                }
-            )
+            if original_content:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"以下是当前已生成的内容，请根据修订指导重写：\n\n{original_content}\n\n修订指导：\n{guidance_text}",
+                    }
+                )
+            else:
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"请根据以下修订指导重写续写内容：\n\n{guidance_text}",
+                    }
+                )
+
+        # 调试模式确认
+        if not await self._maybe_debug_prompt(messages, "续写写作"):
+            return "", "", []
 
         # 创建 async stop 事件（轮询 threading.Event）
         async_stop = asyncio.Event()
@@ -574,9 +645,14 @@ class AgentOrchestrator(QThread):
             "{{snapshot}}": snapshot_text,
             "{{outline}}": outline_text,
             "{{written_text}}": written_text,
+            "{{previous_chapters_text}}": self._build_lookback_chapters_text(),
         }
         system_prompt = self._apply_macros(template, macros)
         messages = [{"role": "system", "content": system_prompt}]
+
+        # 调试模式确认
+        if not await self._maybe_debug_prompt(messages, "质量验证"):
+            return None
 
         for attempt in range(2):
             temperature = 0.2 if attempt == 0 else 0.0
@@ -626,6 +702,10 @@ class AgentOrchestrator(QThread):
         }
         system_prompt = self._apply_macros(template, macros)
         messages = [{"role": "system", "content": system_prompt}]
+
+        # 调试模式确认
+        if not await self._maybe_debug_prompt(messages, "修订指导"):
+            return {}
 
         for attempt in range(2):
             temperature = 0.3 if attempt == 0 else 0.0
@@ -684,6 +764,26 @@ class AgentOrchestrator(QThread):
         parts: list[str] = []
         for ch in self.chapters:
             parts.append(f"## {ch.title}\n\n{ch.content}")
+        return "\n\n".join(parts)
+
+    def _build_lookback_chapters_text(self, max_chapters: int = 10) -> str:
+        """Build text from chapters before current chapter (lookback, inclusive).
+
+        Takes chapters[max(0, idx-9):idx+1] (10 chapters including current).
+        Falls back to all chapters if current chapter not found.
+
+        Args:
+            max_chapters: Maximum number of chapters to include (default 10)
+
+        Returns:
+            Joined chapter text in "## {title}\\n\\n{content}" format
+        """
+        if self._current_chapter_index >= 0:
+            start = max(0, self._current_chapter_index - max_chapters + 1)
+            lookback = self.chapters[start:self._current_chapter_index + 1]
+        else:
+            lookback = self.chapters
+        parts = [f"## {ch.title}\n\n{ch.content}" for ch in lookback]
         return "\n\n".join(parts)
 
     def _format_outline(self, outline: Outline) -> str:

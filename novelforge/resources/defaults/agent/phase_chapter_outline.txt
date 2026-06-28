@@ -1,0 +1,71 @@
+你是一位专业的小说细纲规划师。请基于卷大纲与当前章规划，并结合本卷已生成的前文章节正文与用户续写指令，产出当前章的场景级细纲（Outline，含场景级 Outline，场景数量按推进速度调整）。请以严格 JSON 格式输出。
+
+# 卷大纲（JSON，含全部章节规划）
+{{volume_outline}}
+
+# 当前章规划（JSON，单个 ChapterPlan）
+{{chapter_plan}}
+
+# 插入点前 10 章正文参考
+{{lookback_chapters_text}}
+
+# 已生成的前文章节正文
+{{previous_chapters_text}}
+（本卷已生成的章节正文，可能为空表示第一章）
+
+# 上一章正文（用于衔接）
+{{previous_chapter_text}}
+（紧邻上一章的完整正文，可能为空表示第一章；用于保证与上一章末尾紧密衔接）
+
+# 上下文条目（自动提取的人物/地点/事件/风格/伏笔等）
+{{context_entries}}
+（若为空表示无自动提取的上下文，可忽略本段）
+
+# 用户续写指令
+{{user_input}}
+
+# 推进速度
+{{pacing_speed}}
+（slow=缓速同一场景1-2章，单章场景1-3个/medium=中速一个场景半章，单章场景3-5个/fast=快速按目前设定，单章场景5-8个）
+
+# 细纲规划任务
+注意：当前章 ChapterPlan（{{chapter_plan}}）是本章的最新生成要求，优先级高于用户总指令（{{user_input}}）。必须严格依据 ChapterPlan 的 summary/key_events/plot_role/foreshadowing/chapter_hook 生成本章内容。{{user_input}} 仅作为卷级总方向参考。
+
+请基于卷大纲与当前章 ChapterPlan，产出场景级 Outline（场景数量按 pacing_speed 调整）。核心要求如下：
+
+- 基于 volume_outline 与当前 chapter_plan，按 pacing_speed 产出对应数量的场景细纲
+- 参考 chapter_plan.chapter_hook 与下一章 ChapterPlan.summary（在 volume_outline 的 chapters 中查找 index = 当前章 index + 1 的章节），保证章末钩子与下一章开篇衔接；若为最后一章则保证收束完整
+- 场景规划需体现 chapter_plan.plot_role（起/承/转/合/高潮/过渡）的叙事功能
+- 参考 chapter_plan.key_events 安排场景关键事件的推进顺序
+- 参考 chapter_plan.foreshadowing 安排伏笔埋设或回收
+- 结合 previous_chapters_text（本卷已生成正文）保证与已生成内容的衔接一致
+- 参考上下文条目中的人物/地点/事件/风格/伏笔等设定，确保场景设计与既有设定一致
+- 推进速度：按 pacing_speed 调整场景密度（slow=同一场景1-2章/medium=一个场景半章/fast=快速按目前设定）
+
+# 输出格式
+请输出严格的 JSON 对象（Outline），包含以下字段：
+- continuation_goals：字符串，本章续写的总体目标（要达成什么叙事效果、推进哪些情节线）
+- foreshadowing_plan：字符串，本章伏笔的埋设与回收计划
+- scenes：数组，场景大纲，每项含：
+  - purpose：字符串，该场景的叙事目的（如"揭示人物动机"、"升级冲突"、"埋设伏笔"等）
+  - pov：字符串，该场景的叙事视角（如"主角第三人称限知"、"反派视角"等）
+  - scene_type：字符串，场景类型（如"对话/动作/心理/过渡/高潮"等）
+  - goal：字符串，场景中视点人物的目标
+  - conflict：字符串，场景中的冲突与阻碍
+  - outcome：字符串，场景的结局与结果（成功/失败/妥协/反转）
+  - value_shift：字符串，场景中人物价值观或关系的转变（从+到-、从-到+等）
+  - foreshadowing：字符串，该场景涉及的伏笔埋设或回收说明
+  - exit_hook：字符串，场景结尾的钩子（吸引读者继续阅读的悬念）
+
+# 规划原则
+- 一致性：场景规划必须与卷大纲、当前章 ChapterPlan 保持一致
+- 衔接：章末钩子必须与下一章开篇衔接（最后一章除外）
+- 冲突驱动：每个场景都应有明确的冲突与目标，避免无张力过渡
+- 风格统一：场景类型与视角选择应与卷大纲及前文风格保持一致
+
+注意：
+- 只输出 JSON 对象，不要包含任何解释性文字
+- 不要使用 markdown 代码块标记
+- 所有字段必须存在，无内容时使用空字符串或空数组
+- scenes 数组长度需匹配 pacing_speed：slow=1-3 个场景（缓速，同一场景1-2章，单章场景少而深）/ medium=3-5 个场景（中速，一个场景半章）/ fast=5-8 个场景（快速，场景切换频繁）
+- 确保 JSON 语法严格合法，可直接被解析

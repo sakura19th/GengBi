@@ -103,6 +103,20 @@ def is_openai_model(model: str) -> bool:
     return bool(_OPENAI_MODEL_PATTERN.match(model))
 
 
+def count_text_tokens(text: str) -> int:
+    """计算文本的 token 数（模型无关，使用字符数估算）。
+
+    供卷级深度分析按 token 切分章节使用，不依赖具体模型 tokenizer。
+
+    Args:
+        text: 待计算文本
+
+    Returns:
+        估算的 token 数
+    """
+    return estimate_tokens_by_chars(text)
+
+
 def get_tokenizer_name_for_model(model: str) -> str | None:
     """获取 OpenAI 模型对应的 tokenizer 名。
 

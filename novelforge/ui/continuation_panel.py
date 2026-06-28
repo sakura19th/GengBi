@@ -1,14 +1,15 @@
 """续写控制面板。
 
 包含：
-- 续写配置区（预设选择、模型、温度、字数、复选框）
+- 顶部模式切换区（QComboBox 选择 single/agent/volume 模式）
+- 中部垂直 QSplitter：
+  - 上半：模式面板区（续写配置区/AgentPanel/VolumePanel，按模式显隐），撑满中间空间
+  - 下半：用户输入区（QPlainTextEdit），默认小、可拖动把手调整高度
+- 底部按钮区（流式布局，开始/停止/重写/接受/对比等）
 - 上下文提取预览面板（M4：显示提取结果，支持编辑/禁用/添加）
 - 流式输出区（QPlainTextEdit，QTimer 50ms 节流批量更新）
-- 流式中按钮（停止），流结束后按钮（重写、接受并追加、接受并继续、编辑后接受）
 - 光标动画（█ 闪烁）
 - 滚动自动跟随（可锁定）
-- 推理内容可折叠显示区域
-- swipe 元数据显示（模型、参数、时间、字数）
 
 Signals:
     start_continuation(dict): 请求开始续写（参数字典）
@@ -19,11 +20,12 @@ Signals:
     edit_then_accept(): 编辑后接受
     compare_swipes(): 请求并排对比
     extract_context_requested(bool): 请求上下文提取（force_refresh 参数）
+    swipe_info_requested(str): 请求 MainWindow 在状态栏显示 swipe 元信息
+    toast_requested(str): 请求 MainWindow 在状态栏显示临时提示（限速等）
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, Signal
@@ -35,21 +37,21 @@ from PySide6.QtWidgets import (
     QFrame,
     QGroupBox,
     QHBoxLayout,
-    QLabel,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
     QSplitter,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
 
-from novelforge.models import Continuation
+from novelforge.models import Continuation, VolumeRunConfig
 from novelforge.ui.agent_panel import AgentPanel
 from novelforge.ui.context_preview_panel import ContextPreviewPanel
 from novelforge.ui.flow_layout import QFlowLayout
-from novelforge.ui.helpers import select_combo_by_id, set_label_state
+from novelforge.ui.helpers import select_combo_by_id
+from novelforge.ui.volume_panel import VolumePanel
+from novelforge.ui.wheel_filter import WheelEventFilter
 from novelforge.ui.worldbook_panel import WorldBookPanel
 
 logger = logging.getLogger(__name__)
@@ -88,8 +90,15 @@ class ContinuationPanel(QWidget):
     extract_context_requested = Signal(bool)
     # 查看组装后的续写提示词
     view_prompt_requested = Signal()
-    # 模式切换（"single"/"agent"）
+    # 模式切换（"single"/"agent"/"volume"）
     mode_changed = Signal(str)
+    # 卷模式切换时请求显隐右侧续写输出面板（visible=True 显示输出面板，
+    # visible=False 隐藏输出面板并把空间让给卷控制面板）
+    output_panel_visibility_requested = Signal(bool)
+    # 请求 MainWindow 在状态栏显示 swipe 元信息（替代已删除的 _swipe_info_label）
+    swipe_info_requested = Signal(str)
+    # 请求 MainWindow 在状态栏显示临时提示（限速等，3 秒后由 MainWindow 还原）
+    toast_requested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         """初始化续写控制面板。"""
@@ -98,10 +107,11 @@ class ContinuationPanel(QWidget):
         self._current_swipe: Continuation | None = None
         self._all_swipes: list[Continuation] = []
         self._chunk_buffer: list[str] = []  # 待刷新的 chunk 缓冲
-        self._reasoning_buffer: list[str] = []
 
         # Agent 面板（不在本面板布局中直接显示，由 show_agent_panel 控制显隐）
         self._agent_panel = AgentPanel()
+        # Volume 面板（卷续写，由 show_volume_panel 控制显隐）
+        self._volume_panel = VolumePanel()
 
         self._setup_ui()
         self._setup_timers()
@@ -120,8 +130,21 @@ class ContinuationPanel(QWidget):
         self._mode_combo = QComboBox()
         self._mode_combo.addItem("单次续写", "single")
         self._mode_combo.addItem("智能续写（多阶段 Agent）", "agent")
+        self._mode_combo.addItem("卷续写（多章节）", "volume")
         mode_layout.addWidget(self._mode_combo)
         layout.addWidget(mode_group)
+
+        # ===== 中部 QSplitter：模式面板区（上）+ 用户输入区（下）=====
+        # 上半部分撑满中间空间，下半部分默认小、可拖动调整高度
+        self._content_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._content_splitter.setChildrenCollapsible(False)
+        self._content_splitter.setHandleWidth(6)
+
+        # ----- 上半：模式面板容器 -----
+        self._mode_content_widget = QWidget()
+        mode_content_layout = QVBoxLayout(self._mode_content_widget)
+        mode_content_layout.setContentsMargins(0, 0, 0, 0)
+        mode_content_layout.setSpacing(4)
 
         # ===== 续写配置区 =====
         self._config_group = QGroupBox("续写配置")
@@ -159,28 +182,35 @@ class ContinuationPanel(QWidget):
         self._worldbook_panel = WorldBookPanel()
         config_form.addRow(self._worldbook_panel)
 
-        layout.addWidget(self._config_group)
+        mode_content_layout.addWidget(self._config_group, 1)
 
         # ===== Agent 面板（默认隐藏，由 show_agent_panel 控制显隐）=====
-        layout.addWidget(self._agent_panel)
+        mode_content_layout.addWidget(self._agent_panel, 1)
         self._agent_panel.hide()
 
-        # ===== 用户输入区 =====
-        user_input_group = QGroupBox("用户输入（续写指令）")
-        user_input_layout = QVBoxLayout(user_input_group)
+        # ===== Volume 面板（默认隐藏，由 show_volume_panel 控制显隐）=====
+        mode_content_layout.addWidget(self._volume_panel, 1)
+        self._volume_panel.hide()
+
+        # ----- 下半：用户输入区（贴底，可拖动调整高度）-----
+        self._user_input_group = QGroupBox("用户输入（续写指令）")
+        user_input_layout = QVBoxLayout(self._user_input_group)
+        user_input_layout.setContentsMargins(2, 2, 2, 2)
+        user_input_layout.setSpacing(2)
         self._user_input_edit = QPlainTextEdit()
         self._user_input_edit.setPlaceholderText(
             "输入续写指令或额外要求（可选）...\n如：聚焦主角的心理变化，增加环境描写"
         )
-        self._user_input_edit.setMaximumHeight(100)
+        self._user_input_edit.setMinimumHeight(36)
         user_input_layout.addWidget(self._user_input_edit)
-        layout.addWidget(user_input_group)
 
-        # ===== swipe 元数据显示 =====
-        self._swipe_info_label = QLabel("无续写版本")
-        self._swipe_info_label.setObjectName("metaText")
-        self._swipe_info_label.setWordWrap(True)
-        layout.addWidget(self._swipe_info_label)
+        self._content_splitter.addWidget(self._mode_content_widget)
+        self._content_splitter.addWidget(self._user_input_group)
+        self._content_splitter.setStretchFactor(0, 1)  # 模式面板撑满中间
+        self._content_splitter.setStretchFactor(1, 0)  # 用户输入默认小
+        self._content_splitter.setSizes([400, 60])
+
+        layout.addWidget(self._content_splitter, 1)
 
         # ===== 上下文预览面板（不在本面板布局中，由 MainWindow 放入独立分栏） =====
         self._context_preview_panel = ContextPreviewPanel()
@@ -192,18 +222,6 @@ class ContinuationPanel(QWidget):
         self._output_edit.setPlaceholderText("续写输出将显示在此处...")
         self._auto_scroll_check = QCheckBox("自动滚动跟随")
         self._auto_scroll_check.setChecked(True)
-
-        # ===== 推理内容区（可折叠，保留在控制面板内） =====
-        self._reasoning_group = QGroupBox("推理内容")
-        self._reasoning_group.setCheckable(True)
-        self._reasoning_group.setChecked(False)
-        self._reasoning_group.setMinimumHeight(80)
-        reasoning_layout = QVBoxLayout(self._reasoning_group)
-        self._reasoning_edit = QPlainTextEdit()
-        self._reasoning_edit.setReadOnly(True)
-        self._reasoning_edit.setPlaceholderText("推理内容将显示在此处（如有）...")
-        reasoning_layout.addWidget(self._reasoning_edit)
-        layout.addWidget(self._reasoning_group, 1)
 
         # ===== 按钮区（流式布局，窄屏自动换行） =====
         btn_layout = QFlowLayout()
@@ -244,6 +262,13 @@ class ContinuationPanel(QWidget):
         btn_layout.addWidget(self._compare_btn)
 
         layout.addLayout(btn_layout)
+
+        # 安装滚轮事件过滤器：未聚焦时不响应滚轮，转发给父级滚动区域
+        self._wheel_filter = WheelEventFilter(self)
+        for combo in (self._mode_combo, self._preset_combo, self._endpoint_combo, self._model_combo):
+            combo.installEventFilter(self._wheel_filter)
+        for spin in (self._temp_spin, self._lookback_spin):
+            spin.installEventFilter(self._wheel_filter)
 
     def _setup_timers(self) -> None:
         """设置定时器。"""
@@ -320,7 +345,7 @@ class ContinuationPanel(QWidget):
         self.mode_changed.emit(self.get_mode())
 
     def get_mode(self) -> str:
-        """获取当前续写模式（"single"/"agent"）。"""
+        """获取当前续写模式（"single"/"agent"/"volume"）。"""
         idx = self._mode_combo.currentIndex()
         if idx >= 0:
             data = self._mode_combo.itemData(idx)
@@ -332,7 +357,7 @@ class ContinuationPanel(QWidget):
         """设置续写模式。
 
         Args:
-            mode: 模式名（"single"/"agent"）
+            mode: 模式名（"single"/"agent"/"volume"）
         """
         for i in range(self._mode_combo.count()):
             if self._mode_combo.itemData(i) == mode:
@@ -349,6 +374,28 @@ class ContinuationPanel(QWidget):
         self._agent_panel.setVisible(show)
         self._config_group.setVisible(not show)
 
+    def show_volume_panel(self, visible: bool) -> None:
+        """切换 Volume 面板的显示。
+
+        卷续写模式下显示 volume_panel，并隐藏 Agent 面板与单次参数区；
+        非 volume 模式下仅隐藏 volume_panel（由 show_agent_panel 或
+        单次参数区管理其余显隐）。
+
+        卷模式开启时同时请求隐藏右侧续写输出面板（让空间给卷控制面板），
+        卷模式关闭时请求恢复右侧续写输出面板。
+
+        Args:
+            visible: True 时显示 volume_panel 并隐藏 agent_panel/config_group，
+                False 时仅隐藏 volume_panel
+        """
+        self._volume_panel.setVisible(visible)
+        if visible:
+            # 卷模式：隐藏 agent_panel 与单次参数区
+            self._agent_panel.hide()
+            self._config_group.hide()
+        # 卷模式开启→隐藏输出面板(visible=False)；卷模式关闭→显示输出面板(True)
+        self.output_panel_visibility_requested.emit(not visible)
+
     def set_presets(self, presets: list[dict], default_id: str = "default") -> None:
         """设置预设列表。
 
@@ -364,6 +411,8 @@ class ContinuationPanel(QWidget):
         # 选中默认或之前的预设
         target_id = current_id or default_id
         select_combo_by_id(self._preset_combo, target_id)
+        # 同步卷模式预设
+        self._volume_panel.set_presets(presets, default_id)
 
     def get_selected_preset_id(self) -> str:
         """获取选中的预设 ID。"""
@@ -424,9 +473,7 @@ class ContinuationPanel(QWidget):
         """开始流式输出模式。"""
         self._is_streaming = True
         self._chunk_buffer.clear()
-        self._reasoning_buffer.clear()
         self._output_edit.clear()
-        self._reasoning_edit.clear()
 
         # 启动节流定时器
         self._flush_timer.start()
@@ -451,10 +498,8 @@ class ContinuationPanel(QWidget):
         self._chunk_buffer.append(text)
 
     def append_reasoning(self, text: str) -> None:
-        """追加推理内容 chunk 到缓冲区。"""
-        self._reasoning_buffer.append(text)
-        # 推理内容直接刷新（频率较低）
-        self._reasoning_edit.appendPlainText(text)
+        """推理内容框已移除，此方法保留为 no-op 以兼容外部信号连接。"""
+        pass
 
     def _flush_buffer(self) -> None:
         """刷新缓冲区到输出区（节流批量更新）。"""
@@ -527,13 +572,15 @@ class ContinuationPanel(QWidget):
         self.rewrite.emit(params)
 
     def _set_swipe_info(self, text: str, state: str = "metaText") -> None:
-        """更新 swipe 信息标签文本与状态色（对象名驱动）。
+        """请求 MainWindow 在状态栏显示 swipe 元信息。
+
+        state 参数保留以兼容调用方，实际状态色由状态栏统一处理（不再区分）。
 
         Args:
             text: 信息文字
-            state: 状态对象名（metaText=次要/textSuccess=绿/textDanger=红/textInfo=橙）
+            state: 状态对象名（保留兼容，已不生效）
         """
-        set_label_state(self._swipe_info_label, text, state)
+        self.swipe_info_requested.emit(text)
 
     def _update_button_states(self) -> None:
         """更新按钮状态。"""
@@ -577,13 +624,6 @@ class ContinuationPanel(QWidget):
         if swipe:
             # 显示 swipe 内容
             self._output_edit.setPlainText(swipe.content)
-            # 显示推理内容
-            if swipe.reasoning_content:
-                self._reasoning_edit.setPlainText(swipe.reasoning_content)
-                self._reasoning_group.setVisible(True)
-            else:
-                self._reasoning_edit.clear()
-                self._reasoning_group.setVisible(False)
             # 显示元数据
             self._set_swipe_info(
                 f"模型: {swipe.model} | "
@@ -595,8 +635,6 @@ class ContinuationPanel(QWidget):
             )
         else:
             self._output_edit.clear()
-            self._reasoning_edit.clear()
-            self._reasoning_group.setVisible(False)
             self._set_swipe_info("无续写版本", "metaText")
 
         self._update_button_states()
@@ -604,10 +642,9 @@ class ContinuationPanel(QWidget):
     def clear_output(self) -> None:
         """清空输出区。"""
         self._output_edit.clear()
-        self._reasoning_edit.clear()
         self._current_swipe = None
         self._all_swipes = []
-        self._swipe_info_label.setText("无续写版本")
+        self._set_swipe_info("无续写版本", "metaText")
         self._update_button_states()
 
     def show_error(self, message: str) -> None:
@@ -616,12 +653,8 @@ class ContinuationPanel(QWidget):
         self._set_swipe_info(f"错误: {message}", "textDanger")
 
     def show_toast(self, message: str) -> None:
-        """显示临时提示信息。"""
-        self._swipe_info_label.setText(message)
-        QTimer.singleShot(3000, lambda: self._swipe_info_label.setText(
-            "无续写版本" if not self._current_swipe else
-            f"模型: {self._current_swipe.model}"
-        ))
+        """请求 MainWindow 在状态栏显示临时提示（3 秒后由 MainWindow 还原）。"""
+        self.toast_requested.emit(message)
 
     # ===== 属性 =====
 
@@ -659,6 +692,23 @@ class ContinuationPanel(QWidget):
     def agent_panel(self) -> AgentPanel:
         """Agent 多阶段续写配置与监控面板。"""
         return self._agent_panel
+
+    @property
+    def volume_panel(self) -> VolumePanel:
+        """Volume 卷级多章节续写配置与监控面板。"""
+        return self._volume_panel
+
+    def get_volume_panel(self) -> VolumePanel:
+        """获取 Volume 面板实例。"""
+        return self._volume_panel
+
+    def get_volume_config(self) -> VolumeRunConfig:
+        """从 Volume 面板读取当前卷续写配置。
+
+        Returns:
+            当前 VolumeRunConfig 对象
+        """
+        return self._volume_panel.get_config()
 
     def get_user_input(self) -> str:
         """获取用户输入的续写指令。"""

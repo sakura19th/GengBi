@@ -1031,6 +1031,88 @@ class TestThemePersistence:
         assert manager.get_appearance().get("theme") == "dark"
 
 
+# ===== 9b. 卷续写配置持久化 =====
+
+
+class TestVolumeConfigPersistence:
+    """卷续写配置（VolumeRunConfig）持久化测试。"""
+
+    def test_volume_settings_default_empty(self, tmp_path) -> None:
+        """默认 volume 配置为空字典。"""
+        from novelforge.core.config import ConfigManager
+
+        config_path = tmp_path / "config.json"
+        manager = ConfigManager(config_path=config_path)
+        manager.load()
+        assert manager.get_volume_settings() == {}
+
+    def test_volume_settings_set_and_get(self, tmp_path) -> None:
+        """set_volume_settings 后 get_volume_settings 返回相同 dict。"""
+        from novelforge.core.config import ConfigManager
+
+        config_path = tmp_path / "config.json"
+        manager = ConfigManager(config_path=config_path)
+        manager.load()
+
+        settings = {
+            "chapter_count": 7,
+            "pacing_speed": "fast",
+            "enable_outline_audit": False,
+            "checkpoints": {
+                "after_deep_analysis": True,
+                "after_volume_outline": False,
+                "before_audit": False,
+                "after_audit": True,
+            },
+        }
+        manager.set_volume_settings(settings)
+
+        # 重新加载
+        manager2 = ConfigManager(config_path=config_path)
+        manager2.load()
+        restored = manager2.get_volume_settings()
+        assert restored == settings
+        assert restored["chapter_count"] == 7
+        assert restored["pacing_speed"] == "fast"
+
+    def test_volume_settings_roundtrip_with_volume_run_config(self, tmp_path) -> None:
+        """VolumeRunConfig model_dump → set_volume_settings → get_volume_settings → model_validate 往返一致。"""
+        from novelforge.core.config import ConfigManager
+        from novelforge.models import VolumeRunConfig
+
+        config_path = tmp_path / "config.json"
+        manager = ConfigManager(config_path=config_path)
+        manager.load()
+
+        original = VolumeRunConfig(
+            chapter_count=12,
+            target_words_per_chapter=4000,
+            analysis_depth="exhaustive",
+            pacing_speed="slow",
+            audit_rounds=2,
+            checkpoints={
+                "after_deep_analysis": True,
+                "after_volume_outline": True,
+                "before_audit": False,
+                "after_audit": True,
+            },
+        )
+        manager.set_volume_settings(original.model_dump(mode="json"))
+
+        # 重新加载并反序列化
+        manager2 = ConfigManager(config_path=config_path)
+        manager2.load()
+        restored = VolumeRunConfig.model_validate(manager2.get_volume_settings())
+
+        assert restored.chapter_count == 12
+        assert restored.target_words_per_chapter == 4000
+        assert restored.analysis_depth == "exhaustive"
+        assert restored.pacing_speed == "slow"
+        assert restored.audit_rounds == 2
+        assert restored.checkpoints["after_deep_analysis"] is True
+        assert restored.checkpoints["before_audit"] is False
+
+
 # ===== 10. HistoryPanel UI 测试 =====
 
 
