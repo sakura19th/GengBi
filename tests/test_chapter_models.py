@@ -25,7 +25,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from pydantic import ValidationError
 
-from novelforge.models.agent import AgentArtifacts
 from novelforge.models.chapter import Chapter, Continuation
 from novelforge.models.context import ContextEntry
 
@@ -198,12 +197,12 @@ def test_chapter_with_multiple_continuations() -> None:
 
 
 def test_chapter_with_continuation_agent_artifacts() -> None:
-    """Chapter 含带 agent_artifacts 的 Continuation 嵌套构造。"""
+    """Chapter 含带 agent_artifacts 的 Continuation 嵌套构造（dict 类型，向后兼容）。"""
     cont = Continuation(
         id="c_agent",
         content="正文",
         model="m",
-        agent_artifacts=AgentArtifacts(revision_rounds=3),
+        agent_artifacts={"revision_rounds": 3},
     )
     ch = Chapter(
         id="ch_agent",
@@ -213,8 +212,8 @@ def test_chapter_with_continuation_agent_artifacts() -> None:
     )
     assert len(ch.continuations) == 1
     assert ch.continuations[0].agent_artifacts is not None
-    assert isinstance(ch.continuations[0].agent_artifacts, AgentArtifacts)
-    assert ch.continuations[0].agent_artifacts.revision_rounds == 3
+    assert isinstance(ch.continuations[0].agent_artifacts, dict)
+    assert ch.continuations[0].agent_artifacts["revision_rounds"] == 3
 
 
 # ===== 4. Continuation 含 snapshot 字段 =====
@@ -360,15 +359,15 @@ def test_chapter_roundtrip() -> None:
 
 
 def test_chapter_roundtrip_with_agent_artifacts() -> None:
-    """Chapter 含 agent_artifacts 的 Continuation round-trip。"""
+    """Chapter 含 agent_artifacts 的 Continuation round-trip（dict 类型，向后兼容）。"""
     cont = Continuation(
         id="c_agent",
         content="正文",
         model="m",
-        agent_artifacts=AgentArtifacts(
-            revision_rounds=2,
-            phase_logs=[{"phase": "writing", "ok": True}],
-        ),
+        agent_artifacts={
+            "revision_rounds": 2,
+            "phase_logs": [{"phase": "writing", "ok": True}],
+        },
     )
     ch = Chapter(
         id="ch_agent_rt",
@@ -379,9 +378,9 @@ def test_chapter_roundtrip_with_agent_artifacts() -> None:
     restored = Chapter.model_validate_json(ch.model_dump_json())
     assert len(restored.continuations) == 1
     assert restored.continuations[0].agent_artifacts is not None
-    assert isinstance(restored.continuations[0].agent_artifacts, AgentArtifacts)
-    assert restored.continuations[0].agent_artifacts.revision_rounds == 2
-    assert restored.continuations[0].agent_artifacts.phase_logs[0]["phase"] == "writing"
+    assert isinstance(restored.continuations[0].agent_artifacts, dict)
+    assert restored.continuations[0].agent_artifacts["revision_rounds"] == 2
+    assert restored.continuations[0].agent_artifacts["phase_logs"][0]["phase"] == "writing"
 
 
 # ===== 6. datetime 字段（created_at / updated_at） =====

@@ -5,13 +5,10 @@
 from __future__ import annotations
 
 from novelforge.models.agent import (
-    AgentArtifacts,
-    AgentRunConfig,
     CritiqueIssue,
     CritiqueReport,
     Outline,
     Scene,
-    StorySnapshot,
 )
 from novelforge.models.chapter import Chapter, Continuation
 from novelforge.models.context import (
@@ -59,14 +56,11 @@ __all__ = [
     # 章节与续写
     "Chapter",
     "Continuation",
-    # Agent 多阶段续写
-    "StorySnapshot",
+    # 续写流程共享模型（大纲/场景/验证报告）
     "Scene",
     "Outline",
     "CritiqueIssue",
     "CritiqueReport",
-    "AgentArtifacts",
-    "AgentRunConfig",
     # 卷级多章节续写
     "DeepAnalysis",
     "ChapterPlan",

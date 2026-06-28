@@ -1,7 +1,9 @@
 """CheckpointDialog 测试。
 
 覆盖以下检查点：
-1. 大纲模式（after_outline）编辑按钮回调：get_result 返回 ("edit", None)
+1. 简单模式（after_deep_analysis）编辑按钮回调：get_result 返回 ("edit", None)
+2. 简单模式接受按钮回调：get_result 返回 ("accept", payload)
+3. 简单模式取消按钮回调：get_result 返回 ("cancel", None)
 """
 from __future__ import annotations
 
@@ -19,7 +21,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from novelforge.models import Outline, Scene
 from novelforge.ui.checkpoint_dialog import CheckpointDialog
 
 
@@ -30,41 +31,43 @@ def qapp() -> QApplication:
     return app
 
 
-def make_outline() -> Outline:
-    """构建测试用 Outline（含 1 个场景）。"""
-    return Outline(
-        continuation_goals="推进主角的成长弧光",
-        foreshadowing_plan="埋设神秘信物的伏笔",
-        scenes=[
-            Scene(
-                purpose="揭示真相",
-                pov="主角",
-                scene_type="对话",
-                goal="获取关键情报",
-                conflict="信任危机",
-                outcome="主角决定独自行动",
-                value_shift="从依赖到独立",
-                foreshadowing="信物在月光下闪烁",
-                exit_hook="主角推门走入夜色",
-            )
-        ],
-    )
+class TestCheckpointDialogSimpleMode:
+    """CheckpointDialog 简单模式（卷续写检查点）回调测试。"""
 
-
-class TestCheckpointDialogEditAction:
-    """CheckpointDialog 大纲模式编辑按钮回调测试。"""
-
-    def test_on_edit_returns_edit_and_none(self, qapp) -> None:
-        """after_outline 模式下调用 _on_edit 后 get_result 为 ("edit", None)。"""
-        outline = make_outline()
+    def test_default_action_is_cancel(self, qapp) -> None:
+        """默认 action 为 cancel。"""
         dialog = CheckpointDialog(
-            checkpoint_name="after_outline",
-            payload=outline,
+            checkpoint_name="after_deep_analysis",
+            payload={"sample": "data"},
         )
-
-        # 默认 action 为 cancel
         assert dialog.get_result() == ("cancel", None)
 
-        # 触发编辑按钮回调
+    def test_on_edit_returns_edit_and_none(self, qapp) -> None:
+        """after_deep_analysis 模式下调用 _on_edit 后 get_result 为 ("edit", None)。"""
+        dialog = CheckpointDialog(
+            checkpoint_name="after_deep_analysis",
+            payload={"sample": "data"},
+        )
         dialog._on_edit()
         assert dialog.get_result() == ("edit", None)
+
+    def test_on_accept_returns_accept_and_payload(self, qapp) -> None:
+        """after_deep_analysis 模式下调用 _on_accept 后 get_result 为 ("accept", payload)。"""
+        payload = {"sample": "data"}
+        dialog = CheckpointDialog(
+            checkpoint_name="after_volume_outline",
+            payload=payload,
+        )
+        dialog._on_accept()
+        action, result_payload = dialog.get_result()
+        assert action == "accept"
+        assert result_payload == payload
+
+    def test_on_cancel_returns_cancel_and_none(self, qapp) -> None:
+        """after_audit 模式下调用 _on_cancel 后 get_result 为 ("cancel", None)。"""
+        dialog = CheckpointDialog(
+            checkpoint_name="after_audit",
+            payload={"sample": "data"},
+        )
+        dialog._on_cancel()
+        assert dialog.get_result() == ("cancel", None)

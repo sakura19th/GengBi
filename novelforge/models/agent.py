@@ -1,7 +1,6 @@
-"""Agent 多阶段续写数据模型。
+"""续写流程共享数据模型。
 
-定义多轮 Agent 续写流程的结构化产物与运行配置。
-对齐 novel-continuation-agent skill 的 6 阶段工作流。
+定义大纲、场景、验证报告等结构化产物，供卷级多章节续写流程使用。
 """
 from __future__ import annotations
 
@@ -18,36 +17,6 @@ VALID_CRITIQUE_CATEGORIES: frozenset[str] = frozenset(
 VALID_CRITIQUE_SEVERITIES: frozenset[str] = frozenset(
     {"critical", "major", "minor"}
 )
-
-
-class StorySnapshot(BaseModel):
-    """前文分析产物（阶段①②）。
-
-    字段说明：
-    - ``structure_position``：结构定位（开头/发展/高潮/结尾）
-    - ``tone``：基调
-    - ``core_conflict_status``：核心冲突状态
-    - ``stakes``：利害关系
-    - ``active_characters``：活跃人物（含 name/status/motivation）
-    - ``plot_threads``：活跃剧情线
-    - ``unresolved_promises``：未兑现承诺
-    - ``foreshadowing_tracker``：伏笔追踪（契诃夫之枪）
-    - ``world_state``：世界状态
-    - ``style_profile``：风格指纹
-    """
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    structure_position: str = ""
-    tone: str = ""
-    core_conflict_status: str = ""
-    stakes: str = ""
-    active_characters: list[dict[str, Any]] = Field(default_factory=list)
-    plot_threads: list[dict[str, Any]] = Field(default_factory=list)
-    unresolved_promises: list[dict[str, Any]] = Field(default_factory=list)
-    foreshadowing_tracker: list[dict[str, Any]] = Field(default_factory=list)
-    world_state: str = ""
-    style_profile: str = ""
 
 
 class Scene(BaseModel):
@@ -145,55 +114,3 @@ class CritiqueReport(BaseModel):
     issues: list[CritiqueIssue] = Field(default_factory=list)
     passed: bool = False
 
-
-class AgentArtifacts(BaseModel):
-    """Agent 流程产物快照。
-
-    字段说明：
-    - ``snapshot``：前文分析产物
-    - ``outline``：大纲
-    - ``critique``：首次验证报告
-    - ``final_critique``：最终验证报告
-    - ``revision_rounds``：修订轮次
-    - ``phase_logs``：各阶段日志
-    """
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    snapshot: StorySnapshot | None = None
-    outline: Outline | None = None
-    critique: CritiqueReport | None = None
-    final_critique: CritiqueReport | None = None
-    revision_rounds: int = 0
-    phase_logs: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class AgentRunConfig(BaseModel):
-    """Agent 运行配置。
-
-    字段说明：
-    - ``phases``：阶段开关
-    - ``checkpoints``：暂停点开关
-    - ``max_revise_rounds``：最大修订轮次
-    - ``per_phase_overrides``：每阶段参数覆盖（model/temperature）
-    """
-
-    model_config = ConfigDict(populate_by_name=True)
-
-    phases: dict[str, bool] = Field(
-        default_factory=lambda: {
-            "analysis": True,
-            "outline": True,
-            "writing": True,
-            "verify": True,
-            "revise": True,
-        }
-    )
-    checkpoints: dict[str, bool] = Field(
-        default_factory=lambda: {
-            "after_outline": False,
-            "after_verify": False,
-        }
-    )
-    max_revise_rounds: int = 1
-    per_phase_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)

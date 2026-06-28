@@ -5,7 +5,6 @@
 2. parse_token_limit 与 VolumePanel token 切分下拉框联动 get_config
 3. ContinuationPanel 用户输入框高度约束（maxHeight 80 / minHeight 60）
 4. VolumePanel.show_continue_button/hide_continue_button 显隐与产物 tab 切换
-5. AgentPanel.show_continue_button/hide_continue_button 显隐
 """
 from __future__ import annotations
 
@@ -23,7 +22,6 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from novelforge.ui.agent_panel import AgentPanel
 from novelforge.ui.continuation_panel import ContinuationPanel
 from novelforge.ui.helpers import select_combo_by_id
 from novelforge.ui.volume_panel import VolumePanel
@@ -47,12 +45,6 @@ def volume_panel(qapp) -> VolumePanel:
 def continuation_panel(qapp) -> ContinuationPanel:
     """创建 ContinuationPanel 实例。"""
     return ContinuationPanel()
-
-
-@pytest.fixture
-def agent_panel(qapp) -> AgentPanel:
-    """创建 AgentPanel 实例。"""
-    return AgentPanel()
 
 
 # ===== 1. VolumePanel 预设管理 =====
@@ -350,24 +342,3 @@ class TestVolumePanelContinueButton:
 
         volume_panel.hide_continue_button()
         assert volume_panel._continue_btn.isHidden()
-
-
-# ===== 5. AgentPanel 继续/隐藏继续按钮 =====
-
-
-class TestAgentPanelContinueButton:
-    """AgentPanel.show_continue_button/hide_continue_button 测试。"""
-
-    def test_show_continue_button_after_outline(self, agent_panel) -> None:
-        """after_outline 时显示继续按钮。"""
-        agent_panel.show_continue_button("after_outline")
-        # 面板未作为顶层窗口显示，isVisible 受祖先链影响，用 isHidden 反映显式 show/hide
-        assert not agent_panel._continue_btn.isHidden()
-
-    def test_hide_continue_button(self, agent_panel) -> None:
-        """hide_continue_button 隐藏继续按钮。"""
-        agent_panel.show_continue_button("after_outline")
-        assert not agent_panel._continue_btn.isHidden()
-
-        agent_panel.hide_continue_button()
-        assert agent_panel._continue_btn.isHidden()

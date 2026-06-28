@@ -25,6 +25,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 
 from novelforge.utils.paths import (
+    get_agent_prompt_path,
     get_volume_prompt_path,
     load_text_resource,
 )
@@ -280,6 +281,15 @@ def test_get_volume_prompt_path_filename_pattern() -> None:
         path = get_volume_prompt_path(phase)
         assert path.name.startswith("phase_")
         assert path.name.endswith(".txt")
+
+
+def test_get_agent_prompt_path_verify_revise() -> None:
+    """get_agent_prompt_path 对 verify/revise 返回存在的路径（volume 复用）。"""
+    for phase in ("verify", "revise"):
+        path = get_agent_prompt_path(phase)
+        assert path.name == f"phase_{phase}.txt"
+        assert path.parent.name == "agent"
+        assert path.exists(), f"路径不存在: {path}"
 
 
 # ===== 7. 宏替换函数验证 =====

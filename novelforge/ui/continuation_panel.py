@@ -1,9 +1,9 @@
 """续写控制面板。
 
 包含：
-- 顶部模式切换区（QComboBox 选择 single/agent/volume 模式）
+- 顶部模式切换区（QComboBox 选择 single/volume 模式）
 - 中部垂直 QSplitter：
-  - 上半：模式面板区（续写配置区/AgentPanel/VolumePanel，按模式显隐），撑满中间空间
+  - 上半：模式面板区（续写配置区/VolumePanel，按模式显隐），撑满中间空间
   - 下半：用户输入区（QPlainTextEdit），默认小、可拖动把手调整高度
 - 底部按钮区（流式布局，开始/停止/重写/接受/对比等）
 - 上下文提取预览面板（M4：显示提取结果，支持编辑/禁用/添加）
@@ -46,7 +46,6 @@ from PySide6.QtWidgets import (
 )
 
 from novelforge.models import Continuation, VolumeRunConfig
-from novelforge.ui.agent_panel import AgentPanel
 from novelforge.ui.context_preview_panel import ContextPreviewPanel
 from novelforge.ui.flow_layout import QFlowLayout
 from novelforge.ui.helpers import select_combo_by_id
@@ -90,7 +89,7 @@ class ContinuationPanel(QWidget):
     extract_context_requested = Signal(bool)
     # 查看组装后的续写提示词
     view_prompt_requested = Signal()
-    # 模式切换（"single"/"agent"/"volume"）
+    # 模式切换（"single"/"volume"）
     mode_changed = Signal(str)
     # 卷模式切换时请求显隐右侧续写输出面板（visible=True 显示输出面板，
     # visible=False 隐藏输出面板并把空间让给卷控制面板）
@@ -108,8 +107,6 @@ class ContinuationPanel(QWidget):
         self._all_swipes: list[Continuation] = []
         self._chunk_buffer: list[str] = []  # 待刷新的 chunk 缓冲
 
-        # Agent 面板（不在本面板布局中直接显示，由 show_agent_panel 控制显隐）
-        self._agent_panel = AgentPanel()
         # Volume 面板（卷续写，由 show_volume_panel 控制显隐）
         self._volume_panel = VolumePanel()
 
@@ -129,7 +126,6 @@ class ContinuationPanel(QWidget):
         mode_layout = QHBoxLayout(mode_group)
         self._mode_combo = QComboBox()
         self._mode_combo.addItem("单次续写", "single")
-        self._mode_combo.addItem("智能续写（多阶段 Agent）", "agent")
         self._mode_combo.addItem("卷续写（多章节）", "volume")
         mode_layout.addWidget(self._mode_combo)
         layout.addWidget(mode_group)
@@ -183,10 +179,6 @@ class ContinuationPanel(QWidget):
         config_form.addRow(self._worldbook_panel)
 
         mode_content_layout.addWidget(self._config_group, 1)
-
-        # ===== Agent 面板（默认隐藏，由 show_agent_panel 控制显隐）=====
-        mode_content_layout.addWidget(self._agent_panel, 1)
-        self._agent_panel.hide()
 
         # ===== Volume 面板（默认隐藏，由 show_volume_panel 控制显隐）=====
         mode_content_layout.addWidget(self._volume_panel, 1)
@@ -345,7 +337,7 @@ class ContinuationPanel(QWidget):
         self.mode_changed.emit(self.get_mode())
 
     def get_mode(self) -> str:
-        """获取当前续写模式（"single"/"agent"/"volume"）。"""
+        """获取当前续写模式（"single"/"volume"）。"""
         idx = self._mode_combo.currentIndex()
         if idx >= 0:
             data = self._mode_combo.itemData(idx)
@@ -357,41 +349,29 @@ class ContinuationPanel(QWidget):
         """设置续写模式。
 
         Args:
-            mode: 模式名（"single"/"agent"/"volume"）
+            mode: 模式名（"single"/"volume"）
         """
         for i in range(self._mode_combo.count()):
             if self._mode_combo.itemData(i) == mode:
                 self._mode_combo.setCurrentIndex(i)
                 return
 
-    def show_agent_panel(self, show: bool) -> None:
-        """切换 Agent 面板与单次参数区的显示。
-
-        Args:
-            show: True 时显示 agent_panel 并隐藏单次参数区（config_group），
-                False 时隐藏 agent_panel 并显示单次参数区
-        """
-        self._agent_panel.setVisible(show)
-        self._config_group.setVisible(not show)
-
     def show_volume_panel(self, visible: bool) -> None:
         """切换 Volume 面板的显示。
 
-        卷续写模式下显示 volume_panel，并隐藏 Agent 面板与单次参数区；
-        非 volume 模式下仅隐藏 volume_panel（由 show_agent_panel 或
-        单次参数区管理其余显隐）。
+        卷续写模式下显示 volume_panel，并隐藏单次参数区；
+        非 volume 模式下仅隐藏 volume_panel（由单次参数区管理其余显隐）。
 
         卷模式开启时同时请求隐藏右侧续写输出面板（让空间给卷控制面板），
         卷模式关闭时请求恢复右侧续写输出面板。
 
         Args:
-            visible: True 时显示 volume_panel 并隐藏 agent_panel/config_group，
+            visible: True 时显示 volume_panel 并隐藏 config_group，
                 False 时仅隐藏 volume_panel
         """
         self._volume_panel.setVisible(visible)
         if visible:
-            # 卷模式：隐藏 agent_panel 与单次参数区
-            self._agent_panel.hide()
+            # 卷模式：隐藏单次参数区
             self._config_group.hide()
         # 卷模式开启→隐藏输出面板(visible=False)；卷模式关闭→显示输出面板(True)
         self.output_panel_visibility_requested.emit(not visible)
@@ -687,11 +667,6 @@ class ContinuationPanel(QWidget):
     def auto_scroll_check(self) -> QCheckBox:
         """自动滚动复选框控件（由 MainWindow 放入输出分栏）。"""
         return self._auto_scroll_check
-
-    @property
-    def agent_panel(self) -> AgentPanel:
-        """Agent 多阶段续写配置与监控面板。"""
-        return self._agent_panel
 
     @property
     def volume_panel(self) -> VolumePanel:
