@@ -4,7 +4,7 @@
 1. 首次调用（global.json 不存在）→ 注入 4 条默认脚本
 2. global.json 为空数组 → 注入 4 条默认脚本
 3. global.json 已含脚本 → 不覆盖
-4. 注入后脚本可被 get_ordered_scripts 加载且含 NF-思维链隐藏
+4. 注入后脚本可被 get_ordered_scripts 加载且含 GB-思维链隐藏
 """
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def test_ensure_default_scripts_injects_when_absent(
 
     assert len(scripts) == 4
     names = {s.scriptName for s in scripts}
-    assert "NF-思维链隐藏" in names
+    assert "GB-思维链隐藏" in names
     assert _global_path(regex_service).exists()
 
 
@@ -57,7 +57,7 @@ def test_ensure_default_scripts_injects_when_empty(
 
     assert len(scripts) == 4
     thinking = next(
-        s for s in scripts if s.scriptName == "NF-思维链隐藏"
+        s for s in scripts if s.scriptName == "GB-思维链隐藏"
     )
     assert 2 in thinking.placement  # AI_OUTPUT
 
@@ -88,7 +88,7 @@ def test_ensure_default_scripts_does_not_overwrite_existing(
 def test_injected_scripts_loadable_via_get_ordered(
     regex_service: RegexService,
 ) -> None:
-    """注入后可通过 get_ordered_scripts 加载，含 NF-思维链隐藏。"""
+    """注入后可通过 get_ordered_scripts 加载，含 GB-思维链隐藏。"""
     regex_service.ensure_default_scripts_exist()
 
     ordered = regex_service.get_ordered_scripts(
@@ -99,5 +99,5 @@ def test_injected_scripts_loadable_via_get_ordered(
 
     scripts = [s for s, _ in ordered]
     names = {s.scriptName for s in scripts}
-    assert "NF-思维链隐藏" in names
+    assert "GB-思维链隐藏" in names
     assert len(scripts) == 4

@@ -1,4 +1,4 @@
-"""NovelForge 端到端实例测试。
+"""赓笔 端到端实例测试。
 
 验证整个项目从导入 TXT → 章节管理 → 预设/正则/模板 → 上下文提取 →
 提示词组装 → 导出 → 历史日志的完整流程能跑通。
@@ -1125,7 +1125,7 @@ class TestE2EFullWorkflow:
 def main() -> int:
     """运行所有端到端测试。"""
     print("=" * 60)
-    print("NovelForge 端到端实例测试")
+    print("赓笔 端到端实例测试")
     print("=" * 60)
 
     import pytest as _pytest

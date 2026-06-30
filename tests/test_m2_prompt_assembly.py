@@ -960,7 +960,7 @@ def test_token_counter(result: TestResult) -> None:
 def main() -> int:
     """运行所有测试。"""
     print("=" * 60)
-    print("NovelForge M2 里程碑提示词组装管线测试")
+    print("赓笔 M2 里程碑提示词组装管线测试")
     print("=" * 60)
 
     result = TestResult()

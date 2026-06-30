@@ -667,7 +667,7 @@ def test_apply_single_script() -> None:
 def main() -> int:
     """运行所有测试。"""
     print("=" * 60)
-    print("NovelForge M3 里程碑验证测试")
+    print("赓笔 M3 里程碑验证测试")
     print("=" * 60)
 
     test_parse_find_regex()

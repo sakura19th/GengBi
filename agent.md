@@ -1,12 +1,12 @@
-# NovelForge 项目约束文件
+# 赓笔 (GengBi) 项目约束文件
 
 > **重要**：本文件是项目的核心约束文档。每次修改项目代码后，必须读取并即时更新本文件，确保文档与代码保持同步。
 
 ## 项目概述
 
-NovelForge 是一个 SillyTavern (ST) 兼容的小说续写工具，提供从 TXT 导入、章节管理、上下文提取、提示词组装到 LLM 流式续写的完整工作流。
+赓笔 (GengBi) 是一个 SillyTavern (ST) 兼容的小说续写工具，提供从 TXT 导入、章节管理、上下文提取、提示词组装到 LLM 流式续写的完整工作流。
 
-**当前版本：v0.2.2**（定义于 `novelforge/__init__.py` 的 `__version__`，由"关于"对话框引用，README 顶部同步标注）
+**当前版本：v0.2.3**（定义于 `novelforge/__init__.py` 的 `__version__`，由"关于"对话框引用，README 顶部同步标注）
 
 **版本更新记录**：维护在 `README.md` 的"更新记录"章节，按版本倒序排列，每次发版须追加新版本小节（新增功能/修复/优化分类，每条一行简洁描述）
 
@@ -83,7 +83,7 @@ novelforge/
 └── resources/       # 资源文件
     ├── defaults/        # 默认预设、正则、提取提示词
     │   ├── default_preset.json         # 默认写作预设（16 条分层模块化提示：系统基础层 main + 功能模块层 抗八股/抗重复/字数 + 文风互斥层 通用网文/古风/轻小说 + 推进互斥层 适中/保守/冒险 + 增强层 思维链 + 可选层 NSFW + Marker 层；main 含 {{world_ontology}}/{{protagonist_profile}} 宏引用 + <novelforge_thinking>/<novelforge_chapter> XML 输出；generation_params 含 temperature/top_p/top_k/max_tokens/max_context/reasoning_effort 八项）
-    │   ├── default_regex_scripts.json  # 默认正则脚本（4 条核心：NF-思维链隐藏/NF-八股抹除/NF-破折号规范/NF-空行清理，placement 均为 AI_OUTPUT=2）
+    │   ├── default_regex_scripts.json  # 默认正则脚本（4 条核心：GB-思维链隐藏/GB-八股抹除/GB-破折号规范/GB-空行清理，placement 均为 AI_OUTPUT=2；脚本内部 ID 仍为 nf_regex_* 保持向后兼容）
     │   ├── extract_prompt.txt          # 上下文提取提示词模板（单批次提取）
     │   ├── extract_merge_prompt.txt    # 上下文提取【信息汇总】环节提示词（多批次 LLM 合并去重，含 {{entries_blocks}} 占位符）
     │   └── agent/       # 续写阶段提示词模板（phase_*.txt，卷续写用）
