@@ -8,6 +8,12 @@
 世界观设定：{{world_setting}}
 写作风格：{{writing_style}}
 
+# 世界观底层元描述（全文提取固化，作为分析的底层规则约束）
+{{world_ontology}}
+
+# 主角形象档案（跟随章节缓存，分析时需关注主角弧光演变与 OOC 红线）
+{{protagonist_profile}}
+
 # 章节文本（用于排布规律/文风/对话模式/剧情分析等所有维度）
 {{chapters_text}}
 

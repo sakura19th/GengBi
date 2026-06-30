@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 # 分类显示名称映射
 CATEGORY_DISPLAY_NAMES: dict[str, str] = {
     "characters": "人物",
+    "protagonist_behavior": "主角行为",
     "locations": "地点",
     "events": "事件",
     "style": "风格",
@@ -67,6 +68,7 @@ CATEGORY_DISPLAY_NAMES: dict[str, str] = {
 # 分类显示顺序
 CATEGORY_ORDER: list[str] = [
     "characters",
+    "protagonist_behavior",
     "locations",
     "events",
     "style",
@@ -272,6 +274,8 @@ class ContextPreviewPanel(QWidget):
     cancel_requested = Signal()
     extract_requested = Signal(dict)
     view_extract_prompt_requested = Signal()
+    extract_ontology_requested = Signal()
+    view_ontology_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """初始化预览面板。"""
@@ -357,6 +361,22 @@ class ContextPreviewPanel(QWidget):
         self._extract_btn.setObjectName("primaryBtn")
         self._extract_btn.clicked.connect(self._on_extract_clicked)
         extract_row.addWidget(self._extract_btn)
+
+        self._extract_ontology_btn = QPushButton("提取世界观底层")
+        self._extract_ontology_btn.setObjectName("primaryBtn")
+        self._extract_ontology_btn.setToolTip(
+            "全文拆分分析提取 7 维度世界观元描述，固化到项目并绑定世界书"
+        )
+        self._extract_ontology_btn.clicked.connect(self._on_extract_ontology_clicked)
+        extract_row.addWidget(self._extract_ontology_btn)
+
+        self._view_ontology_btn = QPushButton("查看世界观底层")
+        self._view_ontology_btn.setObjectName("secondaryBtn")
+        self._view_ontology_btn.setToolTip(
+            "查看已提取的世界观底层 7 维度元描述"
+        )
+        self._view_ontology_btn.clicked.connect(self._on_view_ontology_clicked)
+        extract_row.addWidget(self._view_ontology_btn)
 
         extract_row.addWidget(QLabel("前文:"))
 
@@ -782,6 +802,14 @@ class ContextPreviewPanel(QWidget):
         config = self.get_lookback_config()
         self.extract_requested.emit(config)
 
+    def _on_extract_ontology_clicked(self) -> None:
+        """提取世界观底层按钮点击，发射信号给 MainWindow。"""
+        self.extract_ontology_requested.emit()
+
+    def _on_view_ontology_clicked(self) -> None:
+        """查看世界观底层按钮点击，发射信号给 MainWindow。"""
+        self.view_ontology_requested.emit()
+
     def _on_view_prompt_clicked(self) -> None:
         """查看提示词按钮点击。"""
         self.view_extract_prompt_requested.emit()
@@ -856,6 +884,145 @@ class ContextPreviewPanel(QWidget):
             f"提取中... 批次 {batch_idx}/{total_batches} 已完成 "
             f"({len(entries)} 条)"
         )
+
+    # ===== 世界观底层提取流式接口（复用 _stream_view）=====
+
+    def start_ontology_extraction(self) -> None:
+        """开始世界观提取：复用 stream_view 显示流式输出，禁用按钮。"""
+        self._is_extracting = True
+        self._loading_frame_index = 0
+        self._loading_label.setText(LOADING_FRAMES[0])
+        self._loading_label.setVisible(True)
+        self._loading_text.setText("世界观提取中...")
+        self._loading_text.setVisible(True)
+        self._cancel_btn.setEnabled(False)
+        self._add_btn.setEnabled(False)
+        self._clear_btn.setEnabled(False)
+        self._extract_btn.setEnabled(False)
+        self._extract_ontology_btn.setEnabled(False)
+        self._set_label_state(self._status_label, "世界观提取中", "textInfo")
+        self._loading_timer.start()
+        # 显示流式输出查看区并清空内容
+        self._stream_view.clear()
+        self._stream_view.setPlaceholderText("等待世界观流式输出...")
+        self._stream_group.setVisible(True)
+        self._stream_group.setChecked(True)
+        self._stream_group.setTitle("世界观流式输出（实时接收中...）")
+
+    def update_ontology_progress(self, text: str) -> None:
+        """追加世界观提取 chunk 到 stream_view。
+
+        Args:
+            text: 新接收的 chunk 文本
+        """
+        if not self._is_extracting:
+            return
+        self._stream_view.insertPlainText(text)
+        cursor = self._stream_view.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self._stream_view.setTextCursor(cursor)
+        # 累积字符数显示进度
+        current = self._loading_text.text()
+        if "世界观提取中" in current and "已接收" in current:
+            import re
+            m = re.search(r"(\d+)", current)
+            count = int(m.group(1)) if m else 0
+            count += len(text)
+            self._loading_text.setText(f"世界观提取中... 已接收 {count} 字符")
+        else:
+            self._loading_text.setText(f"世界观提取中... 已接收 {len(text)} 字符")
+
+    def update_ontology_batch(self, batch_idx: int, total_batches: int) -> None:
+        """更新世界观提取批次进度文本。
+
+        Args:
+            batch_idx: 当前完成的批次序号（从 1 开始）
+            total_batches: 总批次数
+        """
+        if not self._is_extracting:
+            return
+        self._loading_text.setText(
+            f"世界观提取中... 批次 {batch_idx}/{total_batches} 已完成"
+        )
+
+    def finish_ontology_extraction(self, status: str) -> None:
+        """世界观提取完成：停止 loading，更新标题。
+
+        Args:
+            status: 完成状态消息
+        """
+        self._is_extracting = False
+        self._loading_timer.stop()
+        self._loading_label.setVisible(False)
+        self._loading_text.setVisible(False)
+        self._add_btn.setEnabled(True)
+        self._clear_btn.setEnabled(True)
+        self._extract_btn.setEnabled(True)
+        self._extract_ontology_btn.setEnabled(True)
+        self._set_label_state(self._status_label, "世界观提取完成", "textSuccess")
+        self._stream_group.setTitle("世界观流式输出（接收完成）")
+
+    def fail_ontology_extraction(self, error: str) -> None:
+        """世界观提取失败：停止 loading，显示错误。
+
+        Args:
+            error: 错误信息
+        """
+        self._is_extracting = False
+        self._loading_timer.stop()
+        self._loading_label.setVisible(False)
+        self._loading_text.setVisible(False)
+        self._add_btn.setEnabled(True)
+        self._clear_btn.setEnabled(True)
+        self._extract_btn.setEnabled(True)
+        self._extract_ontology_btn.setEnabled(True)
+        self._set_label_state(self._status_label, "世界观提取失败", "textDanger")
+        self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
+        self._stream_group.setTitle("世界观流式输出（已中断）")
+
+    def restore_extraction_state(self, stream_text: str, is_ontology: bool = False) -> None:
+        """恢复章节切换前的提取中状态（切回发起章节时调用）。
+
+        复用现有 _is_extracting / _stream_view / _loading_* 状态，重建"接收中"
+        视觉态。update_extraction_progress / update_ontology_progress 的
+        `if not self._is_extracting: return` 守卫在恢复后重新放行后续 chunk。
+
+        Args:
+            stream_text: 已缓冲的流式输出文本
+            is_ontology: True=世界观提取（标题/状态文本不同），False=上下文提取
+        """
+        self._is_extracting = True
+        self._loading_frame_index = 0
+        self._loading_label.setText(LOADING_FRAMES[0])
+        self._loading_label.setVisible(True)
+        title = "世界观提取中..." if is_ontology else "提取中..."
+        self._loading_text.setText(title)
+        self._loading_text.setVisible(True)
+        self._cancel_btn.setEnabled(not is_ontology)
+        self._add_btn.setEnabled(False)
+        self._clear_btn.setEnabled(False)
+        if is_ontology:
+            self._extract_btn.setEnabled(False)
+            self._extract_ontology_btn.setEnabled(False)
+            self._set_label_state(self._status_label, "世界观提取中", "textInfo")
+        else:
+            self._extract_btn.setEnabled(False)
+            self._extract_ontology_btn.setEnabled(True)
+            self._set_label_state(self._status_label, "提取中", "textInfo")
+        self._loading_timer.start()
+        # 显示流式输出区并回填缓冲文本
+        self._stream_view.clear()
+        self._stream_view.setPlaceholderText("等待流式输出...")
+        self._stream_view.setPlainText(stream_text)
+        cursor = self._stream_view.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self._stream_view.setTextCursor(cursor)
+        self._stream_group.setVisible(True)
+        self._stream_group.setChecked(True)
+        prefix = "世界观流式输出" if is_ontology else "流式输出"
+        self._stream_group.setTitle(f"{prefix}（实时接收中...）")
+        # 更新 loading 文本字符数
+        self._loading_text.setText(f"{title} 已接收 {len(stream_text)} 字符")
 
     def load_entries_for_chapter(
         self,

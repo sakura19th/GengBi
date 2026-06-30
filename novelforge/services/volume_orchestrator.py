@@ -37,15 +37,18 @@ from novelforge.core.token_counter import count_text_tokens
 from novelforge.models import (
     Chapter,
     ChapterArtifacts,
+    ChapterStageArtifact,
     ContextEntry,
     Continuation,
     CritiqueReport,
     DeepAnalysis,
     Outline,
     OutlineAuditReport,
+    ProtagonistProfile,
     VolumeArtifacts,
     VolumeOutline,
     VolumeRunConfig,
+    WorldOntology,
     WritingPreset,
 )
 from novelforge.services.llm_client import (
@@ -134,6 +137,8 @@ class VolumeOrchestrator(QThread):
         preset_id: str = "",
         preset_snapshot: dict[str, Any] | None = None,
         chapter_id: str = "",
+        world_ontology: WorldOntology | None = None,
+        protagonist_profile: ProtagonistProfile | None = None,
         parent=None,
     ) -> None:
         """初始化卷级编排器。
@@ -158,6 +163,8 @@ class VolumeOrchestrator(QThread):
             preset_id: 预设 ID
             preset_snapshot: 预设内容快照
             chapter_id: 章节 ID
+            world_ontology: 底层世界观元描述（从 Project 读取，全文固化）
+            protagonist_profile: 主角形象档案（从当前章节缓存读取，反映至当前章节状态）
             parent: 父 QObject
         """
         super().__init__(parent)
@@ -174,6 +181,9 @@ class VolumeOrchestrator(QThread):
             if ch.id == current_chapter.id:
                 self._current_chapter_index = i
                 break
+        # 记录项目原始章节数（含插入点后章节），供动态前文窗口构造有效序列时
+        # 跳过插入点后原章节（self.chapters 在中间续写时含全文末尾章节）
+        self._original_chapter_count = len(self.chapters)
         self.context_entries = context_entries
         self.config = config
         self.user_input = user_input
@@ -186,6 +196,10 @@ class VolumeOrchestrator(QThread):
         self.preset_id = preset_id
         self.preset_snapshot = preset_snapshot or {}
         self.chapter_id = chapter_id
+        # 底层世界观元描述（全文提取一次固化，注入各阶段提示词）
+        self.world_ontology = world_ontology
+        # 主角形象档案（跟随章节缓存，反映至当前章节状态，注入各阶段提示词）
+        self.protagonist_profile = protagonist_profile
 
         # 线程安全停止
         self._stop_event = threading.Event()
@@ -449,59 +463,181 @@ class VolumeOrchestrator(QThread):
                     else None
                 )
 
+                # 动态前文窗口：含本卷新生成章节，每章生成前重新计算
+                dynamic_lookback = self._build_dynamic_lookback_text()
+
+                # 阶段产物序列（细纲/初稿/审计①/修改正文①/审计②/...）
+                stages: list[ChapterStageArtifact] = []
+
                 # 单章细纲
                 outline = await self._run_chapter_outline(
                     final_outline,
                     chapter_plan,
                     previous_chapters_text,
                     previous_chapter_text,
+                    dynamic_lookback,
                 )
+                stages.append(ChapterStageArtifact(
+                    stage_type="outline", round_index=0, outline=outline,
+                ))
 
-                # 写作
+                # 写作（初稿）
                 content, reasoning, messages = await self._run_chapter_writing(
                     outline,
                     chapter_plan,
                     previous_chapters_text,
                     previous_chapter_text,
+                    lookback_chapters_text=dynamic_lookback,
                 )
                 self._writing_messages = messages
                 self._writing_model = self.model
+                stages.append(ChapterStageArtifact(
+                    stage_type="draft", round_index=0, content=content,
+                ))
 
-                # 验证 + 修订循环
+                # 验证 + 强制修改 + 自动修订循环
                 rounds = 0
                 critique = None
                 final_critique = None
+                audit_round = 0  # 审计轮次计数（1,2,3...）
                 if self.config.enable_chapter_verify:
                     critique = await self._run_chapter_verify(
-                        deep_analysis, outline, content
+                        deep_analysis, outline, content,
+                        lookback_chapters_text=dynamic_lookback,
                     )
                     final_critique = critique
-                    while (
-                        self.config.enable_chapter_revise
-                        and critique is not None
-                        and not critique.passed
-                        and rounds < self.config.max_revise_rounds_per_chapter
-                        and not self._stop_event.is_set()
-                    ):
-                        rounds += 1
-                        guidance = await self._run_chapter_revise(
-                            content, critique, outline
-                        )
-                        content, reasoning, messages = (
-                            await self._run_chapter_writing(
-                                outline,
-                                chapter_plan,
-                                previous_chapters_text,
-                                previous_chapter_text,
-                                guidance,
-                                original_content=content,
+                    audit_round += 1
+                    stages.append(ChapterStageArtifact(
+                        stage_type="audit", round_index=audit_round, critique=critique,
+                    ))
+
+                    # 强制第1轮修改（无论审计①是否通过）+ 自动修订循环
+                    if self.config.enable_chapter_revise:
+                        while (
+                            rounds < self.config.max_revise_rounds_per_chapter
+                            and not self._stop_event.is_set()
+                            and (rounds == 0 or (critique is not None and not critique.passed))
+                        ):
+                            rounds += 1
+                            guidance = await self._run_chapter_revise(
+                                content, critique, outline,
+                                lookback_chapters_text=dynamic_lookback,
                             )
-                        )
-                        self._writing_messages = messages
-                        critique = await self._run_chapter_verify(
-                            deep_analysis, outline, content
-                        )
-                        final_critique = critique
+                            content, reasoning, messages = (
+                                await self._run_chapter_writing(
+                                    outline,
+                                    chapter_plan,
+                                    previous_chapters_text,
+                                    previous_chapter_text,
+                                    guidance,
+                                    original_content=content,
+                                    lookback_chapters_text=dynamic_lookback,
+                                )
+                            )
+                            self._writing_messages = messages
+                            stages.append(ChapterStageArtifact(
+                                stage_type="revise", round_index=rounds,
+                                guidance=guidance, content=content,
+                            ))
+                            critique = await self._run_chapter_verify(
+                                deep_analysis, outline, content,
+                                lookback_chapters_text=dynamic_lookback,
+                            )
+                            final_critique = critique
+                            audit_round += 1
+                            stages.append(ChapterStageArtifact(
+                                stage_type="audit", round_index=audit_round,
+                                critique=critique,
+                            ))
+
+                # after_chapter 暂停点（用户确认循环）
+                if self.config.checkpoints.get("after_chapter", False):
+                    user_approved = False
+                    while not user_approved and not self._stop_event.is_set():
+                        # 触发暂停点，等待用户确认
+                        payload = await self._wait_for_resume_with_chapter(i, content)
+                        action = payload.get("action", "approve")
+                        if action == "approve":
+                            user_approved = True
+                        elif action == "cancel":
+                            raise asyncio.CancelledError("用户在每章确认点取消")
+                        else:  # reject
+                            feedback = payload.get("feedback", "")
+                            # 将用户反馈转化为修订指导
+                            user_guidance = {
+                                "revision_strategy": "用户确认不通过，按反馈重写",
+                                "key_changes": [{
+                                    "issue_ref": "用户反馈",
+                                    "revision_action": feedback,
+                                    "target_section": "全文",
+                                }],
+                                "preserve_elements": "",
+                            }
+                            rounds += 1
+                            guidance = await self._run_chapter_revise(
+                                content, None, outline,
+                                lookback_chapters_text=dynamic_lookback,
+                                user_guidance=user_guidance,
+                            )
+                            content, reasoning, messages = await self._run_chapter_writing(
+                                outline, chapter_plan,
+                                previous_chapters_text, previous_chapter_text,
+                                guidance, original_content=content,
+                                lookback_chapters_text=dynamic_lookback,
+                            )
+                            self._writing_messages = messages
+                            stages.append(ChapterStageArtifact(
+                                stage_type="revise", round_index=rounds,
+                                guidance=guidance, content=content,
+                            ))
+                            # 重新验证 + 自动修订循环
+                            if self.config.enable_chapter_verify:
+                                critique = await self._run_chapter_verify(
+                                    deep_analysis, outline, content,
+                                    lookback_chapters_text=dynamic_lookback,
+                                )
+                                final_critique = critique
+                                audit_round += 1
+                                stages.append(ChapterStageArtifact(
+                                    stage_type="audit", round_index=audit_round,
+                                    critique=critique,
+                                ))
+                                while (
+                                    self.config.enable_chapter_revise
+                                    and critique is not None
+                                    and not critique.passed
+                                    and rounds < self.config.max_revise_rounds_per_chapter
+                                    and not self._stop_event.is_set()
+                                ):
+                                    rounds += 1
+                                    guidance = await self._run_chapter_revise(
+                                        content, critique, outline,
+                                        lookback_chapters_text=dynamic_lookback,
+                                    )
+                                    content, reasoning, messages = (
+                                        await self._run_chapter_writing(
+                                            outline, chapter_plan,
+                                            previous_chapters_text, previous_chapter_text,
+                                            guidance, original_content=content,
+                                            lookback_chapters_text=dynamic_lookback,
+                                        )
+                                    )
+                                    self._writing_messages = messages
+                                    stages.append(ChapterStageArtifact(
+                                        stage_type="revise", round_index=rounds,
+                                        guidance=guidance, content=content,
+                                    ))
+                                    critique = await self._run_chapter_verify(
+                                        deep_analysis, outline, content,
+                                        lookback_chapters_text=dynamic_lookback,
+                                    )
+                                    final_critique = critique
+                                    audit_round += 1
+                                    stages.append(ChapterStageArtifact(
+                                        stage_type="audit", round_index=audit_round,
+                                        critique=critique,
+                                    ))
+                            # 循环结束，再次触发 after_chapter 暂停点（外层 while 继续）
 
                 # 追加 ChapterArtifacts
                 chapter_artifacts = ChapterArtifacts(
@@ -511,6 +647,7 @@ class VolumeOrchestrator(QThread):
                     final_critique=final_critique,
                     revision_rounds=rounds,
                     content=content,
+                    stages=stages,
                 )
                 artifacts.chapter_artifacts.append(chapter_artifacts)
 
@@ -637,6 +774,12 @@ class VolumeOrchestrator(QThread):
             if result is not None:
                 accumulated = self._merge_deep_analysis(accumulated, result)
 
+        # 【信息汇总】环节：切分模式下，程序化合并后追加一次 LLM 整合润色
+        if accumulated is not None:
+            accumulated = await self._run_deep_analysis_merge(
+                accumulated, depth, max_tokens
+            )
+
         return accumulated
 
     async def _run_deep_analysis_single(
@@ -670,6 +813,8 @@ class VolumeOrchestrator(QThread):
             "{{synopsis}}": self._get_profile_field("synopsis"),
             "{{world_setting}}": self._get_profile_field("world_setting"),
             "{{writing_style}}": self._get_profile_field("writing_style"),
+            "{{world_ontology}}": self._format_world_ontology(),
+            "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{chapters_text}}": chapters_text,
             "{{analysis_depth}}": depth,
             "{{max_analysis_entries}}": str(max_entries),
@@ -709,6 +854,77 @@ class VolumeOrchestrator(QThread):
                 )
                 continue
         return None
+
+    async def _run_deep_analysis_merge(
+        self,
+        accumulated: DeepAnalysis,
+        depth: str,
+        max_tokens: int,
+    ) -> DeepAnalysis:
+        """【信息汇总】环节：对程序化合并后的 DeepAnalysis 做 LLM 语义整合润色。
+
+        切分模式下，``_merge_deep_analysis`` 仅做字段级合并（字符串取非空、列表去重），
+        本方法追加一次 LLM 调用，消除跨块重复、消解冲突、补全遗漏，产出连贯最终报告。
+
+        失败降级：返回原 ``accumulated``（不阻塞卷续写流程）。
+
+        Args:
+            accumulated: 程序化合并后的 DeepAnalysis
+            depth: 分析深度等级（light/standard/thorough/exhaustive）
+            max_tokens: LLM max_tokens（按深度复用 _ANALYSIS_MAX_TOKENS）
+
+        Returns:
+            整合润色后的 DeepAnalysis，失败时返回原 accumulated
+        """
+        template = self._load_volume_template("deep_analysis_merge")
+        deep_analysis_text = json.dumps(
+            accumulated.model_dump(), ensure_ascii=False, indent=2
+        )
+        macros = {
+            "{{title}}": self._get_profile_field("title"),
+            "{{author}}": self._get_profile_field("author"),
+            "{{protagonist}}": self._get_profile_field("protagonist"),
+            "{{synopsis}}": self._get_profile_field("synopsis"),
+            "{{world_setting}}": self._get_profile_field("world_setting"),
+            "{{writing_style}}": self._get_profile_field("writing_style"),
+            "{{world_ontology}}": self._format_world_ontology(),
+            "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{deep_analysis}}": deep_analysis_text,
+        }
+        system_prompt = self._apply_macros(template, macros)
+        messages = [{"role": "system", "content": system_prompt}]
+
+        # 调试模式确认
+        if not await self._maybe_debug_prompt(messages, "深度分析汇总"):
+            return accumulated
+
+        for attempt in range(2):
+            temperature = 0.2 if attempt == 0 else 0.0
+            try:
+                response = await self._client.chat_completion(
+                    messages,
+                    self.model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                content = response["choices"][0]["message"]["content"]
+                data = parse_json_response(content)
+                merged = DeepAnalysis.model_validate(data)
+                logger.info(
+                    "DeepAnalysis 信息汇总完成 (attempt %d)", attempt + 1
+                )
+                return merged
+            except AuthError:
+                raise
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "DeepAnalysis 信息汇总失败 (attempt %d): %s，降级使用程序化合并结果",
+                    attempt + 1, e,
+                )
+                continue
+        return accumulated
 
     def _split_chapters_by_tokens(
         self, chapters: list[Chapter], chunk_tokens: int
@@ -818,6 +1034,8 @@ class VolumeOrchestrator(QThread):
         chapter_count = self.config.chapter_count
         target_words = self.config.target_words_per_chapter
         macros = {
+            "{{world_ontology}}": self._format_world_ontology(),
+            "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{deep_analysis}}": deep_analysis_text,
             "{{chapters_text}}": chapters_text,
             "{{user_input}}": self.user_input or "",
@@ -914,6 +1132,8 @@ class VolumeOrchestrator(QThread):
         else:
             deep_analysis_text = ""
         macros = {
+            "{{world_ontology}}": self._format_world_ontology(),
+            "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{volume_outline}}": outline_text,
             "{{audit_dimensions}}": dimensions,
             "{{previous_chapters_text}}": previous_chapters_text,
@@ -1004,6 +1224,8 @@ class VolumeOrchestrator(QThread):
             "{{previous_chapters_text}}": lookback_10_text,
             "{{deep_analysis}}": deep_analysis_text,
             "{{pacing_speed}}": self.config.pacing_speed,
+            "{{world_ontology}}": self._format_world_ontology(),
+            "{{protagonist_profile}}": self._format_protagonist_profile(),
         }
         system_prompt = self._apply_macros(template, macros)
         messages = [{"role": "system", "content": system_prompt}]
@@ -1065,6 +1287,7 @@ class VolumeOrchestrator(QThread):
         chapter_plan: Any | None,
         previous_chapters_text: str,
         previous_chapter_text: str = "",
+        lookback_chapters_text: str = "",
     ) -> Outline | None:
         """阶段④-细纲：单章场景级细纲，产出 Outline（3-7 个 Scene）。
 
@@ -1082,9 +1305,11 @@ class VolumeOrchestrator(QThread):
         else:
             plan_text = ""
         macros = {
+            "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{world_ontology}}": self._format_world_ontology(),
             "{{volume_outline}}": outline_text,
             "{{chapter_plan}}": plan_text,
-            "{{lookback_chapters_text}}": self._build_lookback_10_chapters_text(),
+            "{{lookback_chapters_text}}": lookback_chapters_text,
             "{{previous_chapters_text}}": previous_chapters_text,
             "{{previous_chapter_text}}": previous_chapter_text,
             "{{user_input}}": self.user_input or "",
@@ -1127,6 +1352,7 @@ class VolumeOrchestrator(QThread):
         previous_chapter_text: str = "",
         revision_guidance: dict | None = None,
         original_content: str = "",
+        lookback_chapters_text: str = "",
     ) -> tuple[str, str, list[dict[str, Any]]]:
         """阶段④-写作：单章流式写作。
 
@@ -1188,10 +1414,11 @@ class VolumeOrchestrator(QThread):
         else:
             per_chapter_input = self.user_input
 
-        # 组装提示词
+        # 组装提示词（使用有效章节序列，跳过插入点后原章节）
+        effective_chapters = self._get_effective_chapters()
         result = self._prompt_assembler.assemble(
             preset=self.preset,
-            chapters=self.chapters,
+            chapters=effective_chapters,
             current_chapter=self.current_chapter,
             context_entries=all_entries,
             model=self.model,
@@ -1203,6 +1430,8 @@ class VolumeOrchestrator(QThread):
             chapter_metadata=self.chapter_metadata,
             user_input=per_chapter_input,
             lookback_chapters=self.parameters.get("lookback_chapters", 0),
+            world_ontology=self.world_ontology,
+            protagonist_profile=self.protagonist_profile,
         )
         messages = list(result.messages)
 
@@ -1216,6 +1445,13 @@ class VolumeOrchestrator(QThread):
                     "content": f"# 上一章正文（用于衔接）\n{previous_chapter_text}",
                 },
             )
+
+        # 动态前文窗口注入（含本卷已生成章节，供写作参考风格与剧情）
+        if lookback_chapters_text:
+            messages.insert(0, {
+                "role": "system",
+                "content": f"# 最近 10 章正文参考（含本卷已生成）\n{lookback_chapters_text}",
+            })
 
         # Fallback：无 marker 时 prepend 大纲为 system 消息
         if outline is not None and not has_marker:
@@ -1294,6 +1530,7 @@ class VolumeOrchestrator(QThread):
         deep_analysis: DeepAnalysis | None,
         outline: Outline | None,
         written_text: str,
+        lookback_chapters_text: str = "",
     ) -> CritiqueReport | None:
         """阶段④-验证：单章验证，产出 CritiqueReport。
 
@@ -1317,10 +1554,12 @@ class VolumeOrchestrator(QThread):
         else:
             outline_text = "（无大纲）"
         macros = {
+            "{{world_ontology}}": self._format_world_ontology(),
+            "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{snapshot}}": snapshot_text,
             "{{outline}}": outline_text,
             "{{written_text}}": written_text,
-            "{{previous_chapters_text}}": self._build_lookback_10_chapters_text(),
+            "{{previous_chapters_text}}": lookback_chapters_text,
         }
         system_prompt = self._apply_macros(template, macros)
         messages = [{"role": "system", "content": system_prompt}]
@@ -1355,13 +1594,21 @@ class VolumeOrchestrator(QThread):
         written_text: str,
         critique: CritiqueReport | None,
         outline: Outline | None,
+        lookback_chapters_text: str = "",
+        user_guidance: dict | None = None,
     ) -> dict:
         """阶段④-修订：产出修订指导（non-stream JSON，宽松 dict）。
 
         复用 AgentOrchestrator._run_revise 的模式，加载 phase_revise.txt
         （用 get_agent_prompt_path）。
         失败重试一次，再失败返回空 dict。
+
+        Args:
+            user_guidance: 用户确认不通过时直接提供的修订指导。非 None 时跳过 LLM
+                revise 调用，直接返回该 dict（节省一次调用）。
         """
+        if user_guidance is not None:
+            return user_guidance
         template = self._load_agent_template("revise")
         if critique is not None:
             critique_text = json.dumps(
@@ -1376,10 +1623,12 @@ class VolumeOrchestrator(QThread):
         else:
             outline_text = "（无大纲）"
         macros = {
+            "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{world_ontology}}": self._format_world_ontology(),
             "{{written_text}}": written_text,
             "{{critique}}": critique_text,
             "{{outline}}": outline_text,
-            "{{previous_chapters_text}}": self._build_lookback_10_chapters_text(),
+            "{{previous_chapters_text}}": lookback_chapters_text,
             "{{pacing_speed}}": self.config.pacing_speed,
         }
         system_prompt = self._apply_macros(template, macros)
@@ -1431,6 +1680,24 @@ class VolumeOrchestrator(QThread):
             except asyncio.TimeoutError:
                 continue
         raise asyncio.CancelledError("用户在暂停点取消")
+
+    async def _wait_for_resume_with_chapter(
+        self, chapter_index: int, content: str
+    ) -> dict:
+        """触发 after_chapter 检查点，等待用户确认。
+
+        与 _wait_for_resume 类似，但先 emit checkpoint_reached 携带章节正文，
+        供 UI 弹出 ChapterConfirmDialog。返回值为用户操作 dict：
+        {"action": "approve"/"reject"/"cancel", "feedback": "..."}.
+        """
+        self.checkpoint_reached.emit("after_chapter", {
+            "chapter_index": chapter_index,
+            "content": content,
+        })
+        payload = await self._wait_for_resume("after_chapter")
+        if payload is None:
+            return {"action": "approve"}
+        return payload
 
     def _apply_macros(self, template: str, macros: dict[str, str]) -> str:
         """用 str.replace 替换模板占位符（不用 MacroEngine/Jinja2）。
@@ -1489,6 +1756,36 @@ class VolumeOrchestrator(QThread):
         parts = [f"## {ch.title}\n\n{ch.content}" for ch in lookback]
         return "\n\n".join(parts)
 
+    def _get_effective_chapters(self) -> list:
+        """构造有效章节序列：插入点前章节 + 本卷已生成章节。
+
+        从中间续写时 self.chapters = [插入点前 | 插入点后原章节 | 本卷已生成]，
+        其中"插入点后原章节"不应作为前文参考。本方法返回
+        chapters[0:_current_chapter_index+1] + chapters[_original_chapter_count:]，
+        跳过插入点后原章节，供动态前文窗口与 prompt_assembler.assemble 复用。
+        """
+        if self._current_chapter_index >= 0:
+            pre = self.chapters[: self._current_chapter_index + 1]
+        else:
+            pre = list(self.chapters)
+        generated = self.chapters[self._original_chapter_count:]
+        return pre + generated
+
+    def _build_dynamic_lookback_text(self, window: int = 10) -> str:
+        """构建动态前文窗口：插入点前章节 + 本卷已生成章节，取末尾 window 章。
+
+        与 _build_lookback_10_chapters_text() 的区别：随本卷新生成章节动态滑动
+        （含本卷已生成章节），且通过 _get_effective_chapters 跳过插入点后原章节，
+        避免从中间续写时误将全文末尾章节当作前文。
+        """
+        effective = self._get_effective_chapters()
+        if not effective:
+            return ""
+        start = max(0, len(effective) - window)
+        lookback = effective[start:]
+        parts = [f"## {ch.title}\n\n{ch.content}" for ch in lookback]
+        return "\n\n".join(parts)
+
     def _build_context_entries_text(self) -> str:
         """格式化上下文条目为可读 Markdown 文本（按 category 分组，order 升序）。
 
@@ -1524,6 +1821,40 @@ class VolumeOrchestrator(QThread):
                 keys = f"（{','.join(entry.key)}）" if entry.key else ""
                 lines.append(f"- {entry.content}{keys}")
         return "\n".join(lines)
+
+    def _format_world_ontology(self) -> str:
+        """格式化 WorldOntology 为提示词注入文本。
+
+        Returns:
+            格式化 JSON 字符串；无世界观底层时返回占位提示文字。
+        """
+        if not self.world_ontology:
+            return "（无世界观底层元描述，请基于已有前文自行推断世界规则）"
+        try:
+            return json.dumps(
+                self.world_ontology.model_dump(mode="json"),
+                ensure_ascii=False, indent=2,
+            )
+        except Exception as e:
+            logger.warning("WorldOntology 序列化失败: %s", e)
+            return "（世界观底层序列化失败，请基于已有前文自行推断世界规则）"
+
+    def _format_protagonist_profile(self) -> str:
+        """格式化 ProtagonistProfile 为提示词注入文本。
+
+        Returns:
+            格式化 JSON 字符串；无主角形象档案时返回占位提示文字。
+        """
+        if not self.protagonist_profile:
+            return "（无主角形象档案，请基于已有前文自行推断主角性格）"
+        try:
+            return json.dumps(
+                self.protagonist_profile.model_dump(mode="json"),
+                ensure_ascii=False, indent=2,
+            )
+        except Exception as e:
+            logger.warning("ProtagonistProfile 序列化失败: %s", e)
+            return "（主角形象档案序列化失败，请基于已有前文自行推断主角性格）"
 
     def _has_world_info_before_marker(self) -> bool:
         """检测 preset 是否有 worldInfoBefore marker。"""

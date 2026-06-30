@@ -12,7 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # ContextEntry 合法分类
 VALID_CATEGORIES: frozenset[str] = frozenset(
     {"characters", "locations", "events", "style", "plot_state",
-     "relationships", "atmosphere", "foreshadowing"}
+     "relationships", "atmosphere", "foreshadowing",
+     "protagonist_behavior"}  # 主角既有行为（决策/能力/已展现行为模式）
 )
 
 # ContextEntry 合法 position 值（本工具自定义，表示注入位置）

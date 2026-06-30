@@ -545,7 +545,7 @@ class RegexService:
     # ===== 默认正则 =====
 
     def load_default_scripts(self) -> list[RegexScript]:
-        """加载内置默认正则脚本（资源文件，通常为空数组）。"""
+        """加载内置默认正则脚本（资源文件，含思维链隐藏等核心正则）。"""
         from novelforge.utils.paths import get_default_regex_scripts_path
 
         default_path = get_default_regex_scripts_path()
@@ -568,3 +568,39 @@ class RegexService:
         if not global_path.exists():
             save_json_with_backup(global_path, [])
             logger.info("已创建空的全局正则脚本文件: %s", global_path)
+
+    def ensure_default_scripts_exist(self) -> list[RegexScript]:
+        """确保全局正则含默认脚本（首次运行或升级后注入）。
+
+        若 global.json 不存在或为空数组，写入默认正则脚本；
+        已含脚本时不覆盖（保留用户自定义）。
+
+        Returns:
+            全局作用域的正则脚本列表
+        """
+        global_path = self._get_scope_file_path(SCOPE_GLOBAL)
+
+        # 文件不存在：先创建空数组，再写入默认脚本
+        if not global_path.exists():
+            save_json_with_backup(global_path, [])
+            logger.info("已创建空的全局正则脚本文件: %s", global_path)
+
+        # 读取现有脚本，判断是否为空
+        existing = self.load_scripts(SCOPE_GLOBAL)
+        if existing:
+            return existing
+
+        # 空数组：写入默认脚本
+        default_scripts = self.load_default_scripts()
+        if not default_scripts:
+            return []
+
+        data = [
+            s.model_dump(mode="json", by_alias=True)
+            for s in default_scripts
+        ]
+        save_json_with_backup(global_path, data)
+        logger.info(
+            "已注入 %d 条默认正则脚本到全局作用域", len(default_scripts)
+        )
+        return default_scripts

@@ -5,13 +5,21 @@
 
 # 启用的审计维度
 {{audit_dimensions}}
-（逗号分隔的维度名列表，取值 consistency/pacing/engagement/structure/coherence/foreshadowing/characters）
+（逗号分隔的维度名列表，取值 consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency）
 
 # 前文参考（最近 10 章正文）
 {{previous_chapters_text}}
 
 # 深度分析参考（JSON）
 {{deep_analysis}}
+
+# 主角形象档案（JSON，含 8 大维度心理学档案）
+{{protagonist_profile}}
+（若为"（无主角形象档案）"则跳过主角一致性维度审计；否则请严格对照此档案审计大纲中主角的行为/决策/目标是否符合性格铁律、动机优先级、核心恐惧、OOC红线）
+
+# 底层世界观元描述（JSON，含 7 大维度参数化描述）
+{{world_ontology}}
+（若为"（无世界观底层）"则跳过世界观一致性维度审计；否则请严格对照此元规则审计大纲中的事件/设定是否符合因果架构、时空规则、守恒律）
 
 # 用户指定的审计重点
 {{audit_focus}}
@@ -31,13 +39,16 @@
 - coherence（连贯性）：章节衔接、伏笔回收链条
 - foreshadowing（伏笔）：planted 伏笔回收情况、新伏笔埋设
 - characters（人物）：人物弧光、动机一致性、关系发展
+- style（文风）：文风/语言特色/叙事视角是否与前文统一，是否符合卷大纲设定的 writing_style
+- protagonist_consistency（主角一致性）：大纲中主角的行为/决策/目标是否符合 protagonist_profile 中的性格铁律、动机优先级、核心恐惧、OOC红线？**一票否决**：该维度 score ≤ 4 时整体 passed=false。若大纲中主角任何行为违反 OOC 红线（绝对不能做的事），或决策模式不符合校验优先级（性格铁律>动机优先级>核心恐惧>默认防御>剧情需要），该维度直接 0 分，整体 passed=false
+- worldview_consistency（世界观一致性）：大纲中的事件/设定是否符合 world_ontology 中的因果架构、时空规则、守恒律？**严格给分**：违反底层世界观元规则时该维度 score ≤ 3
 
 仅审计上述启用的维度，未启用的维度可跳过。
 
 # 输出格式
 请输出严格的 JSON 对象（OutlineAuditReport），包含以下字段：
 - dimensions：数组，各启用维度的审计结果，每项含：
-  - dimension：字符串，维度名（consistency/pacing/engagement/structure/coherence/foreshadowing/characters）
+  - dimension：字符串，维度名（consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency）
   - score：整数，该维度评分（1-10，10 为最佳）
   - issues：数组，该维度发现的具体问题列表（每项为字符串）
   - suggestions：数组，针对该问题的具体修订建议列表（每项为字符串）

@@ -836,8 +836,8 @@ class TestContextExtractor:
             )
         )
         assert result.status == "completed"
-        # 验证调用了 LLM
-        mock_client.chat_completion.assert_called_once()
+        # 验证调用了 LLM：1 次 8 维度提取 + 1 次主角形象提取（失败被捕获，不阻塞结果）
+        assert mock_client.chat_completion.call_count == 2
 
     def test_extract_cache_hit(self) -> None:
         """测试缓存命中。"""
@@ -921,8 +921,8 @@ class TestContextExtractor:
         assert result.from_cache is False
         # 缓存不应被读取
         storage_service.storage.get_cache.assert_not_called()
-        # LLM 应被调用
-        mock_client.chat_completion.assert_called_once()
+        # LLM 应被调用：1 次 8 维度提取 + 1 次主角形象提取（失败被捕获，不阻塞结果）
+        assert mock_client.chat_completion.call_count == 2
 
     def test_extract_llm_failure(self) -> None:
         """测试 LLM 调用失败。"""
@@ -1135,6 +1135,169 @@ class TestContextExtractor:
         assert result.status == "failed"
         assert "取消" in result.error
 
+    # ===== 7.1 【信息汇总】环节测试 =====
+
+    def test_multi_batch_triggers_merge(self) -> None:
+        """测试多批次独立提取 + 【信息汇总】环节被触发。
+
+        3 章长内容 + token_limit=10 → 每章一批（3 批），
+        第 4 次 LLM 调用为汇总，返回去重合并后的 3 条条目。
+        """
+        extractor = self._make_extractor()
+
+        batch1_resp = json.dumps([{"uid": "char_a", "category": "characters", "content": "主角A", "key": ["A"], "position": "before"}])
+        batch2_resp = json.dumps([{"uid": "char_b", "category": "characters", "content": "配角B", "key": ["B"], "position": "before"}])
+        batch3_resp = json.dumps([{"uid": "loc_c", "category": "locations", "content": "地点C", "key": ["C"], "position": "after"}])
+        merge_resp = json.dumps([
+            {"uid": "char_a", "category": "characters", "content": "主角A", "key": ["A"], "position": "before", "order": 100},
+            {"uid": "char_b", "category": "characters", "content": "配角B", "key": ["B"], "position": "before", "order": 200},
+            {"uid": "loc_c", "category": "locations", "content": "地点C", "key": ["C"], "position": "after", "order": 100},
+        ])
+
+        mock_client = MagicMock()
+        mock_client.chat_completion = AsyncMock(side_effect=[
+            {"choices": [{"message": {"content": batch1_resp}}], "usage": {"total_tokens": 100}},
+            {"choices": [{"message": {"content": batch2_resp}}], "usage": {"total_tokens": 100}},
+            {"choices": [{"message": {"content": batch3_resp}}], "usage": {"total_tokens": 100}},
+            {"choices": [{"message": {"content": merge_resp}}], "usage": {"total_tokens": 200}},
+        ])
+        extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
+
+        long_content = "这是一段测试用的章节内容用于触发多批次拆分。" * 3
+        chapters = [
+            make_chapter(index=0, content=long_content),
+            make_chapter(index=1, content=long_content),
+            make_chapter(index=2, content=long_content),
+        ]
+
+        result = asyncio.run(
+            extractor.extract(
+                project=make_project(),
+                chapters=chapters,
+                current_chapter=None,
+                force_refresh=True,
+                lookback_override=0,
+                token_limit_override=10,
+            )
+        )
+
+        assert result.status == "completed"
+        assert result.merged is True
+        assert result.batch_count == 3
+        assert len(result.entries) == 3
+        # 3 批 8 维度 + 1 次汇总 + 1 次主角形象提取（失败被捕获，不阻塞结果）
+        assert mock_client.chat_completion.call_count == 5
+        # 验证第 4 次调用（汇总）的 prompt 含批次标记
+        merge_call = mock_client.chat_completion.call_args_list[3]
+        merge_prompt = merge_call.kwargs["messages"][0]["content"]
+        assert "## 批次 1/3" in merge_prompt
+        assert "## 批次 2/3" in merge_prompt
+        assert "## 批次 3/3" in merge_prompt
+
+    def test_single_batch_no_merge(self) -> None:
+        """测试单批次不触发【信息汇总】环节。
+
+        2 章 + token_limit=0（不限制）→ 单批次，仅 1 次 LLM 调用。
+        """
+        extractor = self._make_extractor()
+
+        response_content = json.dumps([
+            {"uid": "char_1", "category": "characters", "content": "主角", "position": "before"},
+            {"uid": "loc_1", "category": "locations", "content": "地点", "position": "after"},
+        ])
+        mock_client = MagicMock()
+        mock_client.chat_completion = AsyncMock(
+            return_value={"choices": [{"message": {"content": response_content}}], "usage": {}}
+        )
+        extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
+
+        chapters = [
+            make_chapter(index=0, content="内容1"),
+            make_chapter(index=1, content="内容2"),
+        ]
+
+        result = asyncio.run(
+            extractor.extract(
+                project=make_project(),
+                chapters=chapters,
+                current_chapter=None,
+                force_refresh=True,
+                lookback_override=0,
+                token_limit_override=0,
+            )
+        )
+
+        assert result.status == "completed"
+        assert result.merged is False
+        assert result.batch_count == 1
+        assert len(result.entries) == 2
+        # 1 次 8 维度提取 + 1 次主角形象提取（失败被捕获，不阻塞结果）
+        assert mock_client.chat_completion.call_count == 2
+
+    def test_merge_failure_degrades_to_all_entries(self) -> None:
+        """测试【信息汇总】失败时降级使用 best-effort uid 替换合并结果。
+
+        3 批次提取（含重复 uid 验证降级合并），第 4 次汇总 LLM 抛 LLMError。
+        降级路径：final_entries = all_entries（uid 替换合并后的累计列表）。
+        """
+        from novelforge.services.llm_client import LLMError
+
+        extractor = self._make_extractor()
+
+        batch1_resp = json.dumps([{"uid": "dup_1", "category": "characters", "content": "主角A", "position": "before"}])
+        batch2_resp = json.dumps([{"uid": "dup_1", "category": "characters", "content": "主角A更新", "position": "before"}])
+        batch3_resp = json.dumps([{"uid": "loc_2", "category": "locations", "content": "地点B", "position": "after"}])
+
+        mock_client = MagicMock()
+        mock_client.chat_completion = AsyncMock(side_effect=[
+            {"choices": [{"message": {"content": batch1_resp}}], "usage": {}},
+            {"choices": [{"message": {"content": batch2_resp}}], "usage": {}},
+            {"choices": [{"message": {"content": batch3_resp}}], "usage": {}},
+            LLMError("merge failed"),
+        ])
+        extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
+
+        long_content = "这是一段测试用的章节内容用于触发多批次拆分。" * 3
+        chapters = [
+            make_chapter(index=0, content=long_content),
+            make_chapter(index=1, content=long_content),
+            make_chapter(index=2, content=long_content),
+        ]
+
+        result = asyncio.run(
+            extractor.extract(
+                project=make_project(),
+                chapters=chapters,
+                current_chapter=None,
+                force_refresh=True,
+                lookback_override=0,
+                token_limit_override=10,
+            )
+        )
+
+        assert result.status == "completed"
+        assert result.merged is False
+        assert result.batch_count == 3
+        # best-effort uid 替换合并：dup_1 被更新（2 次），loc_2 新增 → 2 条
+        assert len(result.entries) == 2
+        # 3 批 8 维度 + 1 次汇总失败 + 1 次主角形象提取（StopAsyncIteration 被捕获，不阻塞结果）
+        assert mock_client.chat_completion.call_count == 5
+
+    def test_extract_result_merged_field(self) -> None:
+        """测试 ExtractResult.merged 字段默认值与赋值。"""
+        from novelforge.services.context_extractor import ExtractResult
+
+        result_default = ExtractResult()
+        assert result_default.merged is False
+        assert result_default.batch_count == 1
+
+        result_merged = ExtractResult(batch_count=3, merged=True)
+        assert result_merged.merged is True
+        assert result_merged.batch_count == 3
+
+        assert "merged" in ExtractResult.__dataclass_fields__
+        assert "batch_count" in ExtractResult.__dataclass_fields__
+
 
 # ===== 8. ExtractResult 数据类测试 =====
 
@@ -1171,6 +1334,35 @@ class TestExtractResult:
         assert result.elapsed_seconds == 1.5
         assert result.token_usage["total_tokens"] == 100
         assert result.from_cache is True
+
+    def test_extract_result_protagonist_default_values(self) -> None:
+        """测试 ExtractResult 主角形象字段默认值。"""
+        from novelforge.services.context_extractor import ExtractResult
+
+        result = ExtractResult()
+        assert result.protagonist_profile is None
+        assert result.protagonist_batch_count == 1
+        assert result.protagonist_merged is False
+
+    def test_extract_result_with_protagonist_profile(self) -> None:
+        """测试 ExtractResult 携带 ProtagonistProfile。"""
+        from novelforge.models import ProtagonistProfile
+        from novelforge.services.context_extractor import ExtractResult
+
+        profile = ProtagonistProfile(
+            basic_anchors={"name": "主角"},
+            motivation_system={"core_fear": "失败"},
+        )
+        result = ExtractResult(
+            entries=[],
+            protagonist_profile=profile,
+            protagonist_batch_count=3,
+            protagonist_merged=True,
+        )
+        assert result.protagonist_profile is not None
+        assert result.protagonist_profile.basic_anchors["name"] == "主角"
+        assert result.protagonist_batch_count == 3
+        assert result.protagonist_merged is True
 
 
 # ===== 9. 非流式 LLM 调用测试 =====

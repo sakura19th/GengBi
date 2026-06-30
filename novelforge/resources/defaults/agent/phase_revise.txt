@@ -3,13 +3,19 @@
 # 续写文本
 {{written_text}}
 
+# 世界观底层元描述（全文提取固化，修订指导须确保正文遵守底层规则约束）
+{{world_ontology}}
+
+# 主角形象档案（跟随章节缓存，修订正文须确保主角行为/语言符合其行为指纹/OOC红线）
+{{protagonist_profile}}
+
 # 评审报告（JSON）
 {{critique}}
 
 # 续写大纲（JSON）
 {{outline}}
 
-# 插入点前 10 章正文参考
+# 最近 10 章正文参考（含本卷已生成）
 {{previous_chapters_text}}
 （用于一致性参考，可能为空表示第一章）
 

@@ -1,0 +1,609 @@
+# 更新记录
+
+> 本文件记录 NovelForge 项目每次更新内容，按时间倒序排列。
+
+---
+
+## 2026-06-30：章节切换状态保留机制（后台继续 + UI 按章保留）
+
+### 背景
+
+用户反馈：在「制定章节提取上下文」等流式接收过程中切换到其它章节，操作会被打断——UI 状态丢失、chunk 被丢弃、swipe 存入错误章节。需保证切换出去再切回时仍处于"接收中"状态。经确认采用"后台继续 + UI 按章保留"策略，覆盖全部场景含卷续写：上下文提取 / 世界观提取 / 单章续写 / 单章审计采纳后重写 / 卷续写。
+
+### 核心改动
+
+- **`novelforge/ui/main_window.py`**：
+  - `__init__` 新增 7 个状态缓冲字段：`_extract_stream_text_by_chapter`（dict 按章）/`_ontology_extracting`+`_ontology_stream_text`（项目级单字符串）/`_continuation_chapter_id`+`_continuation_stream_text_by_chapter`（dict 按章）/`_audit_chapter_id`/`_volume_chapter_id`
+  - 章节守卫模式 `on_origin_chapter = bool(self._current_chapter and self._current_chapter.id == origin_cid)` — 仅用户停留在发起章节时刷新 UI；swipe 归档 / 插入点定位始终用发起章节 id
+  - chunk 路由方法 `_on_continuation_chunk_received` / `_on_extract_chunk_received` / `_on_ontology_chunk_received`：总是缓冲到发起章节，UI 更新受守卫
+  - 完成回调 `_on_continuation_finished` / `_on_continuation_error` / `_on_extract_done` / `_on_ontology_done` / `_on_volume_continuation_finished` / `_on_audit_cancelled` 均在所有分支清理对应缓冲字段与发起章节标记
+  - `_on_start_continuation` / `_on_audit_continuation` / `_on_start_volume_continuation` 启动时记录发起章节 id
+  - `_on_audit_accepted` 采纳后 `_audit_chapter_id` 交接给 `_continuation_chapter_id`，由续写链路接管 chunk 路由与 swipe 归档
+  - `_on_chapter_selected` 重构：续写流式态恢复优先于 swipe 显示（`_continuation_chapter_id == chapter.id` 且缓冲存在 → `restore_streaming_state` + `set_streaming_locked(True)`，跳过 `set_current_swipe`/`clear_output`）
+  - `_load_context_entries_for_chapter` 优先恢复提取/世界观态（`_extracting_chapter_id == chapter.id` 或 `_ontology_extracting` → `restore_extraction_state`，return 跳过缓存加载）
+- **`novelforge/ui/context_preview_panel.py`**：新增 `restore_extraction_state(stream_text, is_ontology)` 方法，重建提取中视觉态（loading 动画 + 流式输出区回填 + 按钮态），区分上下文提取与世界观提取
+- **`novelforge/ui/continuation_panel.py`**：新增 `restore_streaming_state(buffered_text)` 方法，复用 `start_streaming` 初始化后回填缓冲文本
+
+### 测试
+
+新增 `tests/test_chapter_switch_state.py` 26 用例 7 测试类：状态字段初值 2 项、续写 chunk 路由 4 项、续写完成归档 4 项、续写出错清理 2 项、提取 chunk 路由 3 项、世界观项目级跟踪 2 项、审计取消清理 2 项、卷续写完成清理 2 项、`_on_chapter_selected` 续写态恢复 5 项。全部通过（0.49s）。
+
+### 文档同步
+
+agent.md 新增 §12「章节切换状态保留（后台继续 + UI 按章保留）」设计决策，含 7 字段 + 章节守卫 + chunk 路由 + 恢复方法 + 恢复入口 + 单例约束 + 完成回调清理 7 要点；架构分层树 `main_window.py` 行追加章节切换状态保留简述；update.md 追加本条目。
+
+### 回归
+
+`python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"` 不破坏现有测试。
+
+---
+
+## 2026-06-29：新增变量与宏调用教程（README）+ agent.md 同步记录
+
+### 背景
+
+自定义预设中可调用的变量（如 `{{world_ontology}}`、`{{protagonist_profile}}`、`{{setvar}}`/`{{getvar}}`、Jinja2 白名单函数）此前仅散见于源码注释与 agent.md 架构描述，用户编写自定义预设时无集中参考。需在 README 编写一份完整调用教程，并在 agent.md 记录变量来源与更新规则，确保后续变更随时同步。
+
+### 核心改动
+
+- **README.md**：新增「变量与宏调用教程」章节（位于「技术栈」与「测试」之间），含替换顺序、三类变量说明（内置宏 11 个 + 额外注入宏 2 个 + ST 风格变量 3 语法 + Jinja2 白名单函数 16 个）、作用域与持久化、安全限制、调试方法，附示例代码
+- **agent.md**：新增「关键设计决策 §10 提示词变量与宏体系（自定义预设可调用）」条目，集中记录变量来源（`MacroContext`/`PromptAssembler._build_macro_context` extra/`VariableStore`/`TemplateEngine` 白名单）与更新规则（任一来源变化时同步更新本条目与 README 教程）
+
+### 文档同步
+
+README.md 新增教程章节；agent.md 新增 §10 设计决策条目；update.md 追加本条目。
+
+### 回归
+
+纯文档改动，无代码变更，无需重跑测试。
+
+---
+
+## 2026-06-29：单章续写新增审计与修正功能
+
+### 背景
+
+单章续写生成后，用户无法对续写内容进行质量审计与基于审计意见的修正。卷续写虽有 10 维度审计（phase_verify.txt），但依赖大纲与卷级上下文，不适用单章场景。新增单章续写审计功能：精简 5 维度审计（仅针对用户输入、底层世界观、主角形象），流式输出审计报告，用户可编辑后采纳，采纳后基于审计意见重写续写内容。
+
+### 核心改动
+
+- **resources/defaults/agent/phase_single_audit.txt**（新建）：精简审计模板，5 维度（consistency/style/coherence/protagonist_consistency/worldview_consistency），4 占位符（written_text/user_input/world_ontology/protagonist_profile），不含 snapshot/outline/previous_chapters_text；protagonist_consistency 一票否决，worldview_consistency 严格给分；输出 JSON（summary/issues/passed），summary 必含【主角一致性审计】与【世界观一致性审计】标记段落
+- **services/audit_worker.py**（新建）：QThread+asyncio 流式审计 worker，流式 stream_chat_completion 输出审计报告，不做正则后处理，finished 信号返回完整文本字符串；temperature 0.2/max_tokens 3000 低温稳定
+- **ui/audit_dialog.py**（新建）：审计对话框，流式输出区（只读）+ 完成后可编辑 + 采纳/取消按钮；accepted_text/cancelled 信号；Esc 键触发取消
+- **ui/continuation_panel.py**：新增"审计"按钮 _audit_btn + audit_continuation 信号，has_swipe 时启用，流式中禁用
+- **ui/main_window.py**：新增 _on_audit_continuation（加载模板+组装宏+AuditWorker+AuditDialog）、_on_audit_accepted（采纳后构造修正 messages=原 messages+原内容+审计意见+修正要求，新建 ContinuationWorker created_by="audit_rewrite" 流式重写为新 swipe）、_format_world_ontology/_format_protagonist_profile 静态方法（JSON 序列化，None 占位）
+- **utils/paths.py**：get_agent_prompt_path docstring 补充 single_audit 阶段名
+
+### 测试
+
+新增 tests/test_single_audit.py 17 用例：模板存在性/占位符完整性/维度正确性/输出格式 4 项、AuditWorker 初始化/信号/停止 3 项、AuditDialog 初始化/追加/完成/采纳信号/取消信号/失败 6 项、格式化辅助方法 None/dict 4 项。
+
+### 文档同步
+
+agent.md 架构分层树新增 audit_worker.py/audit_dialog.py 描述，更新 continuation_panel.py/main_window.py 描述；新增 §11 设计决策记录单章审计与修正流程；update.md 追加本条目。
+
+### 回归
+
+`python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"`：404 passed, 13 skipped, 12 deselected。
+
+---
+
+## 2026-06-29：单章续写改为提升为章节模型 + 新增删除续写功能
+
+### 背景
+
+单章续写原采用链式模型（Continuation.parent_id 形成链，接受仅标记入链不合并正文），不符合用户实际工作流：选定章节续写 → 根据内容决定保留 → 保留则在该章节下方插入一节 → 选中新章节再续写，以此往复。且续写无法删除。改为"提升为章节"模型并增加删除选项。
+
+### 核心改动
+
+- **chapter_list.py**：ChapterTreeModel 回退为扁平单层（仅章节，按 index 排序），移除 _TreeNode/N 级树/internalPointer/swipe_selected 信号/_build_tree/_build_node；续写不在章节列表显示
+- **chapter_service.py**：新增 promote_continuation_to_chapter(chapter, continuation) -> (chapter, new_chapter)——当前章节之后所有章节 index 后移 1 位，创建新 Chapter（index=当前+1，content=续写内容），删除原续写记录（存储与 chapter.continuations）
+- **continuation_panel.py**：新增"删除"按钮 _delete_btn + delete_continuation 信号，有续写时启用
+- **main_window.py**：移除链式残留（_current_continuation/_build_chain_content/_on_swipe_selected/chain 内容拼接/parent_continuation_id 传参）；_on_accept_continuation 重写为调 promote_continuation_to_chapter → _refresh_chapter_list → _on_chapter_selected 自动选中新章节；新增 _on_delete_continuation 调 storage_service.delete_continuation
+- **continuation_worker.py**：parent_continuation_id 参数保留但不再传入（默认 None）
+
+### 测试
+
+删除 tests/test_chain_continuation.py（链式模型废弃）；新增 tests/test_promote_continuation.py 6 用例（promote 创建新章节/后移后续章节 index/删除续写记录/原章节正文不变/从 chapter.continuations 移除/delete_continuation 删除记录）；适配 tests/test_e2e_workflow.py 2 处断言为 promote 模型。
+
+### 文档同步
+
+agent.md §8 更新为"单章续写提升为章节模型"；架构分层 chapter_list.py/chapter.py/continuation_worker.py/main_window.py 描述同步；update.md 追加本条目。
+
+### 回归
+
+`python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"`：387 passed, 13 skipped, 12 deselected。
+
+---
+
+## 2026-06-29：单章续写链式模型重构
+
+### 背景
+
+单章续写生成后，续写直接出现在章节列表【续写】下，且接受时合并到章节正文，不符合"接受后入链、续写链式向下追加"的预期。用户反馈：应在接受后才在章节列表出现，后续续写继续往下加在链上，而非直接加在正文里。
+
+### 核心改动
+
+- **数据模型**：`Continuation` 新增 `parent_id: str | None` 字段形成链式结构（None=章节直接子节点，否则挂在另一续写下）
+- **存储层**：continuations 表新增 `parent_id` 列 + `idx_continuations_parent` 索引；CREATE TABLE 含该列；`_migrate_continuations_columns` 幂等 ALTER TABLE 补列；`save_continuation` INSERT 含 parent_id；`list_continuations`/`load_chapters_with_continuations` 改用显式列名 SELECT（非 `SELECT *`）保证 row 索引与 INSERT 列序一致；`_row_to_continuation` row[6]=parent_id 后续字段顺延 + `len(row)` 防御
+- **接受逻辑**：`ChapterService.accept_continuation` 重写为链式模型——仅标记 `is_accepted=True`，不合并到 `chapter.content`，不互斥取消同父下其他已接受续写
+- **章节树**：`ChapterTreeModel` 重构为 N 级树（`_TreeNode` + `internalPointer`），仅展示 `is_accepted=True` 的续写按 `parent_id` 形成链；未接受续写不在树中
+- **主窗口**：`_current_continuation` 状态跟踪当前选中续写节点；`_build_chain_content` 沿 `parent_id` 回溯拼接链内容供 `PromptAssembler.assemble`；`_on_chapter_selected` 切换章节重置 `_current_continuation=None`（避免跨章节链污染）；`_on_continuation_finished` 不刷新树（未接受续写不在树中）；`_on_accept_continuation` 标记入链+刷新树+不重载编辑器
+- **Worker**：`ContinuationWorker.__init__` 接收 `parent_continuation_id`，构造 `Continuation(parent_id=self.parent_continuation_id)`
+- **面板**：`ContinuationPanel._accept_btn` 文案"接受并追加"→"接受"（链式模型不"追加"到正文）
+
+### 修复的隐藏 Bug
+
+实施过程中发现存储层 `_row_to_continuation` 从未读取 `parent_id`（前序会话声称已完成但实际遗漏），且 `SELECT *` 返回的物理列序在迁移后 parent_id 位于末尾，导致 row 索引错位。修复：CREATE TABLE 显式含 parent_id 列 + SELECT 改用显式列名 + `_row_to_continuation` 正确读取 row[6]。
+
+### 测试
+
+新增 `tests/test_chain_continuation.py` 13 用例：parent_id 默认值/round-trip/嵌套 round-trip、accept 不合并正文/不互斥取消兄弟、N 级树仅展示已接受/链式嵌套/未接受不显示、`_build_chain_content` 链回溯算法（含循环防护）、storage parent_id 持久化（含 None）。适配 `tests/test_e2e_workflow.py` 2 处旧 swipe 合并断言为链式模型断言。
+
+### 文档同步
+
+agent.md 新增"关键设计决策 §8 单章续写链式模型"+ 架构分层 5 处模块描述更新（chapter.py/storage.py/continuation_worker.py/chapter_list.py/main_window.py）；update.md 追加本条目。
+
+### 回归
+
+`python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"`：394 passed, 13 skipped, 12 deselected。
+
+---
+
+## 2026-06-29：修复默认正则未注入引擎导致思维链标签泄漏到正文
+
+### 背景
+
+默认预设的 `nf_cot` 模块要求 LLM 输出 `<novelforge_thinking>` 标签包裹思维链，配套的 `default_regex_scripts.json` 含 `NF-思维链隐藏` 正则（placement=AI_OUTPUT）用于在后处理阶段剔除思维链。但 `RegexService.load_default_scripts()` 方法存在却全代码库无调用方，默认正则从未被编译进 RegexEngine，导致续写生成的正文中思维链标签及内容不会被剔除。
+
+### 根因
+
+`main_window._refresh_regex_scripts` 仅通过 `get_ordered_scripts` 加载 global/preset/scoped 三个作用域脚本，默认正则资源文件不在其中。`ensure_global_scripts_exist` 仅在 global.json 不存在时创建空数组 `[]`，不写入默认脚本。
+
+### 核心改动
+
+- **`regex_service.py`**：新增 `ensure_default_scripts_exist()` 方法（与默认预设的 `ensure_default_preset_exists` 对称），首次运行或 global.json 为空时将 4 条默认正则注入 global.json，已含脚本时不覆盖；更新 `load_default_scripts` docstring
+- **`main_window.py`**：初始化时 `ensure_global_scripts_exist` 替换为 `ensure_default_scripts_exist`（后者已覆盖前者职责）
+- **`tests/test_regex_service_defaults.py`**：新增 4 个单元测试（不存在时注入/空数组时注入/已存在不覆盖/注入后可加载）
+
+### 设计决策
+
+- 默认正则写入 global 作用域而非新增"默认作用域"，复用现有 GLOBAL 加载分支，改动最小
+- `ensure_default_scripts_exist` 仅在 global.json 为空时写入，不覆盖用户已有脚本（与 `ensure_default_preset_exists` 的"不覆盖"语义一致）
+- 用户可在正则管理器中查看/编辑/禁用注入的默认脚本，与全局正则统一管理
+- 不在「恢复默认预设」按钮中联动重置正则，保持单一职责
+
+### 测试
+
+- 新增 4 个单元测试全部通过
+- 全量回归：`python -m pytest tests/ -x -q` → 448 passed, 13 skipped
+
+### 文档同步
+
+- `agent.md`：更新 `regex_service.py` 描述（新增 ensure_default_scripts_exist 说明）
+
+---
+
+## 2026-06-29：预设管理器新增「恢复默认预设」按钮
+
+### 背景
+
+内置默认预设升级为 16 条分层模块化提示后，已运行过软件的用户的本地 `~/.novelforge/presets/default.json` 仍保留旧版本（4 条最小提示）。`ensure_default_preset_exists` 仅在本地文件不存在时写入，不会自动覆盖，需提供主动同步入口。
+
+### 核心改动
+
+- **`preset_service.py`**：新增 `reset_default_preset()` 方法，从 `resources/defaults/default_preset.json` 重新加载并覆盖本地默认预设
+- **`preset_manager.py`**：工具栏新增「恢复默认预设」按钮，点击后弹出确认对话框（警告会覆盖自定义修改且不可撤销），确认后调用 `reset_default_preset` 并刷新预设列表/提示列表/生成参数，发射 `preset_changed` 信号
+
+### 测试
+
+- 全量回归：`python -m pytest tests/ -x -q` → 444 passed, 13 skipped
+
+### 文档同步
+
+- `agent.md`：更新 `preset_service.py`（新增 reset_default_preset 说明）和 `preset_manager.py`（工具栏七按钮）描述
+
+---
+
+## 2026-06-29：为 NovelForge 量身定制默认预设 + 4 条核心正则 + 预设管理面板生成参数增强
+
+### 背景
+
+分析 `预设参考/` 下 5 个 SillyTavern 预设（TGbreak V3.1.1 / Femiris DS特化 / 百家饭 lunareclipse 2.0.1 / 夏瑾 双鱼座 0.40 / 梦鲸思客 V4），提炼分层结构、模块化切换、思维链、抗八股、结构化 XML 输出、emoji 分类等设计，为 NovelForge 量身定制功能丰富的默认预设。原 `default_preset.json` 仅 4 条最小提示，`default_regex_scripts.json` 为空数组。
+
+### 核心改动
+
+- **重写 `default_preset.json`**：4 条 → 16 条分层模块化提示
+  - 系统基础层：`main`（system_prompt，含 `{{world_ontology}}`/`{{protagonist_profile}}`/`{{writing_style}}`/`{{target_words}}` 宏引用，要求 `<novelforge_thinking>` + `<novelforge_chapter>` XML 输出）
+  - 功能模块层（默认开）：`nf_core_rules`（✅基础准则）/ `nf_anti_bagua`（🧊抗八股）/ `nf_anti_repetition`（🧊抗重复）/ `nf_word_count`（📘字数控制）
+  - 文风互斥层：`nf_style_general`（通用网文，默认开）/ `nf_style_classical`（古风白描，默认关）/ `nf_style_lightnovel`（轻小说，默认关）
+  - 推进互斥层：`nf_pacing_medium`（适中，默认开）/ `nf_pacing_conservative`（保守，默认关）/ `nf_pacing_aggressive`（冒险，默认关）
+  - 增强层（默认开）：`nf_cot`（📖思维链 COT）
+  - 可选层（默认关）：`nf_nsfw`（🌸NSFW）
+  - Marker 层：`worldInfoBefore` / `chatHistory` / `worldInfoAfter`（沿用 ST 标准）
+  - generation_params：temperature=1.0 / top_p=0.99 / top_k=0 / max_tokens=32000 / max_context=2000000 / reasoning_effort=high
+- **重写 `default_regex_scripts.json`**：空数组 → 4 条核心正则（placement 均为 AI_OUTPUT=2）
+  - `NF-思维链隐藏`：移除 `<novelforge_thinking>` 标签及内容
+  - `NF-八股抹除`：移除"不容置疑/不易觉察/微不可察/指关节白/一抹弧度"等套话
+  - `NF-破折号规范`：中文字符间的 `——` 改为逗号
+  - `NF-空行清理`：3+ 连续换行压缩为 2 个
+- **增强 `preset_manager.py` 生成参数区**：新增 `top_p`（QSpinBox 0-100 ×0.01）/ `top_k`（QSpinBox 0-1000）/ `reasoning_effort`（QComboBox auto/low/medium/high/max）三个控件，`_refresh_params` 和 `_on_save_params` 同步适配
+
+### 设计决策
+
+- 借鉴百家饭 setvar 三段式模块化 + 梦鲸 XML schema 结构化输出 + 夏瑾 emoji 分类 + TGbreak 分层结构 + Femiris few-shot 思路
+- 八股抹除仅移除"不容置疑/不易觉察/微不可察/指关节白/一抹弧度"等几乎无合法用法的套路词，不盲目移除"而是/突然"等高频通用词
+- temperature=1.0（追求创意）而非 TGbreak 的 0.01（追求稳定），适合小说续写场景
+- NSFW 默认关闭，用户按需在预设管理面板开启
+- 互斥文风/推进仅通过命名约定提示，不强制程序联动（用户可自由开关）
+
+### 测试
+
+- 结构校验：16 prompts / 16 order / character_id=100000 / 5 默认关闭 / 4 regex placement=[2] 全部通过
+- 全量回归：`python -m pytest tests/ -x -q` → 444 passed, 13 skipped
+
+### 文档同步
+
+- `agent.md`：新增 `default_preset.json` / `default_regex_scripts.json` 描述，更新 `preset_manager.py` 描述（生成参数六项）
+
+---
+
+## 2026-06-29：重写 phase_verify.txt 沿用 outline_audit 10 维度并扩展模型
+
+### 背景
+
+用户要求重新修改"小说质量评审员"提示词（phase_verify.txt），着重提示世界观底层和主角信息的审计，反复多次着重强调，每次必须输出对应的审计结果。用户补充：沿用 phase_outline_audit.txt 中对 protagonist_consistency/worldview_consistency 两个维度的详细审计要求，并增加多个审计维度对齐 outline_audit 的 10 维度。
+
+### 核心改动
+
+- `models/agent.py`：扩展 VALID_CRITIQUE_CATEGORIES 从 6 值增至 10 值（新增 pacing/coherence/foreshadowing/characters），对齐 phase_outline_audit 的 10 维度
+- `phase_verify.txt` 重写：
+  - 维度从 6 个扩展为 10 个（沿用 phase_outline_audit.txt 的维度定义）
+  - 7 处反复强调 protagonist_consistency/worldview_consistency 为"必审项"
+  - summary 字段强制要求含 `【主角一致性审计】`/`【世界观一致性审计】` 两个固定标记段落
+  - worldview_consistency 维度检查项从 2 条扩展为 8 条，对齐 WorldOntology 7 大维度
+  - 沿用 outline_audit 的"一票否决"（protagonist_consistency）与"严格给分"（worldview_consistency）规则
+
+### 设计决策
+
+- 扩展 VALID_CRITIQUE_CATEGORIES：用户确认允许模型层改动以支持新增维度的 issues category 值
+- 不在 issues 中输出"已检查无问题"记录：避免干扰下游 _run_chapter_revise 修订逻辑，审计结论通过 summary 固定标记段落承载
+- 保留"档案缺失则跳过审查"降级路径：但要求 summary 明确注明"档案缺失，无法审计"
+
+### 测试
+
+- 回归测试：`377 passed, 13 skipped, 12 deselected`（无新增失败，无测试直接断言 VALID_CRITIQUE_CATEGORIES 具体值）
+
+### 文档同步
+
+- agent.md：更新 agent.py + phase_verify.txt 描述
+
+---
+
+## 2026-06-29：世界观底层 + 主角形象注入全部生成环节
+
+### 背景
+
+用户要求将本次新增的 `world_ontology`（世界观底层）和 `protagonist_profile`（主角形象）注入到单章生成和多章节生成的**各个环节**。前序会话已通过 MacroContext.extra + PromptAssembler.assemble 加参打通单章与卷级 chapter_writing 共享链路，但卷级 5 个阶段模板文件仍缺 `{{world_ontology}}`/`{{protagonist_profile}}` 占位符（macros dict 已补但模板未补，会导致 `{{...}}` 残留）。
+
+### 核心改动
+
+- 5 个阶段模板补全占位符：`phase_deep_analysis.txt`(+protagonist_profile)、`phase_deep_analysis_merge.txt`(+两个)、`phase_outline_final.txt`(+两个)、`phase_chapter_outline.txt`(+world_ontology)、`phase_revise.txt`(+world_ontology)
+- 2 个测试 macros dict 适配：`test_macro_replacement_deep_analysis`/`test_macro_replacement_chapter_outline`
+
+### 前序已完成（本日早些时候）
+
+- `prompt_assembler.py`：`assemble` 加 `world_ontology`/`protagonist_profile` 两参数，`_build_macro_context` 序列化为 JSON 填入 `MacroContext.extra`
+- `main_window.py`：单章 `_on_start_continuation` 的 assemble 调用传 `project.world_ontology` + `_protagonist_profile_by_chapter.get(chapter.id)`
+- `volume_orchestrator.py`：8 个 phase 方法 macros dict 全部补两个宏 + chapter_writing assemble 调用传 `self.world_ontology`/`self.protagonist_profile`
+
+### 测试
+
+- `tests/test_volume_prompts.py`：2 个 macro replacement 测试 macros dict 适配
+- 回归测试：`377 passed, 13 skipped, 12 deselected`（无新增失败）
+
+### 文档同步
+
+- agent.md：更新 `core/prompt_assembler.py`/`services/volume_orchestrator.py`/`ui/main_window.py` + 5 个模板文件描述
+
+---
+
+## 2026-06-29：章节列表自动恢复（从磁盘重建 DB 行）
+
+### 背景
+
+用户反馈"还是不行"——章节列表仍为空。深入调查确认：UPSERT 修复已正确生效（不会再级联删除），但用户 DB 中的 chapters 行在修复前就已被旧的 `INSERT OR REPLACE` 级联删除。SQLite 的 `ON DELETE CASCADE` 只删 DB 行不删磁盘文件，章节正文 `.txt` 文件仍在 `~/.novelforge/projects/{project_id}/chapters/` 目录下。
+
+### 核心修复
+
+- [novelforge/core/storage.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/core/storage.py)：
+  - 新增 `rebuild_chapters_from_disk(project_id)` 方法：扫描 chapters 目录的 `.txt` 文件，为每个文件重建 DB 行（id=文件名、index=按文件名排序、title=正文首行、word_count=内容长度、metadata={}），已存在的 DB 行不覆盖，用 UPSERT 兜底并发冲突
+  - `list_chapters` 增加自动检测恢复：返回空列表时检测磁盘是否有 `.txt` 文件，有则自动调 `rebuild_chapters_from_disk` 重建后重新查询返回
+- [novelforge/services/storage_service.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/services/storage_service.py)：新增 `rebuild_chapters_from_disk` 同步包装方法，供 UI 手动调用
+
+### 恢复机制
+
+用户下次加载项目时，`list_chapters` 自动检测 DB 无章节但磁盘有 `.txt` 文件，自动从磁盘重建 DB 行，章节列表恢复正常。无需手动操作。`continuations` 续写历史已永久丢失，无法恢复。
+
+### 测试
+
+- 恢复场景验证：建项目+章节 → 手动 DELETE FROM chapters（模拟级联删除）→ list_chapters 自动恢复返回 1 章，title/index 正确
+- 幂等性验证：rebuild_chapters_from_disk 对已存在 DB 行返回 0（不覆盖）
+- 回归测试：`377 passed, 13 skipped, 12 deselected`（无新增失败）
+
+### 文档同步
+
+- agent.md：更新 `core/storage.py` 描述（list_chapters 自动恢复 + rebuild_chapters_from_disk）
+
+---
+
+## 2026-06-29：修复 save_project/save_chapter 级联删除章节/续写 bug
+
+### 背景
+
+用户反馈：提取世界观底层后左侧章节列表为空。**根因**：`storage.py` 的 `save_project` 使用 `INSERT OR REPLACE INTO projects`，配合 `PRAGMA foreign_keys=ON` 和 chapters 表的 `ON DELETE CASCADE` 外键，导致每次 `save_project` 时 SQLite 先 DELETE 旧 projects 行（触发级联删除 chapters 表所有匹配行），再 INSERT 新行。结果：projects 更新成功但 chapters 表被清空。同样的 bug 也存在于 `save_chapter`（清空 continuations 续写历史）。
+
+### 核心修复
+
+- [novelforge/core/storage.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/core/storage.py)：
+  - `save_project`（L428）：`INSERT OR REPLACE INTO projects` 改为 `INSERT INTO projects ... ON CONFLICT(id) DO UPDATE SET ...`（UPSERT），主键冲突时执行 UPDATE 而非 DELETE+INSERT，不触发 `ON DELETE CASCADE`，章节元数据保留
+  - `save_chapter`（L562）：同样改为 UPSERT，避免清空 continuations 续写历史
+  - 不修改外键级联设计（`delete_project`/`delete_chapter` 仍需级联语义），仅改 save 的 SQL
+
+### 测试
+
+- 关键场景验证：save_project 后 list_chapters 仍返回 1 章（修复前为 0 章）；save_chapter 后 list_continuations 仍返回 1 条（修复前为 0 条）
+- 回归测试：`377 passed, 13 skipped, 12 deselected`（无新增失败）
+
+### 文档同步
+
+- agent.md：更新 `core/storage.py` 描述（save_project/save_chapter 用 UPSERT 避免级联删除）
+
+---
+
+## 2026-06-29：章节列表为空修复 + 查看世界观底层入口 + world_ontology 类型还原
+
+### 背景
+
+用户反馈：①上轮修复后导入项目，左侧章节列表看不到章节；②需要一个入口查看已提取的世界观底层信息。调研还发现第三个隐藏问题：`project.world_ontology` 从 DB 加载后是 dict 而非 WorldOntology 实例，导致 `VolumeOrchestrator._format_world_ontology` 调 `.model_dump()` 时 AttributeError，世界观无法注入续写提示词。
+
+### 核心修复
+
+#### 1. `_row_to_project` 加 `len(row)` 防御
+
+- [novelforge/core/storage.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/core/storage.py)：`_row_to_project` 读 `row[10]`/`row[11]` 时加 `len(row) > N` 防御（对齐 `_row_to_continuation` 模式），防止旧库 row 不足 12 列时 IndexError
+
+#### 2. `_load_project` 解耦章节加载
+
+- [novelforge/ui/main_window.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/ui/main_window.py)：`_load_project` 将 `load_project` 包裹 try/except，项目元数据加载失败时仍尝试 `list_chapters` 加载章节表（章节表独立，不受 projects 表影响），避免章节列表为空且无错误提示
+
+#### 3. `load_project` 还原 WorldOntology 实例
+
+- [novelforge/services/storage_service.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/services/storage_service.py)：`load_project` 检测 `world_ontology` 为 dict 时用 `WorldOntology.model_validate(wo)` 还原为实例，失败保留 dict。修复下游 `VolumeOrchestrator._format_world_ontology` 的 AttributeError
+
+#### 4. 新增"查看世界观底层"入口
+
+- [novelforge/ui/context_preview_panel.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/ui/context_preview_panel.py)：新增 `view_ontology_requested` 信号 + "查看世界观底层"按钮（位于"提取世界观底层"按钮旁）+ `_on_view_ontology_clicked` 处理器
+- [novelforge/ui/main_window.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/ui/main_window.py)：新增 `_on_view_ontology_requested` 处理器——加载 `project.world_ontology`，弹 QDialog 按 7 维度分节展示（标题 + JSON 内容），兼容 dict/WorldOntology 实例；`_format_ontology_for_display` 静态方法格式化（存在拓扑/因果架构/时空本体论/信息与认识论/价值论基础/生成动力学/叙事本体论 + extracted_at + source_chapter_range）
+
+### 测试
+
+- 导入验证：`StorageService`/`ContextPreviewPanel`/`Storage` 均正常导入
+- 还原验证：`WorldOntology.model_dump(mode='json')` → dict → `model_validate` 还原成功
+- 回归测试：`377 passed, 13 skipped, 12 deselected`（无新增失败）
+
+### 文档同步
+
+- agent.md：更新 `core/storage.py`（_row_to_project len(row) 防御）、`services/storage_service.py`（load_project 还原 WorldOntology）、`ui/main_window.py`（_load_project 解耦 + _on_view_ontology_requested + _format_ontology_for_display）、`ui/context_preview_panel.py`（查看按钮 + 信号）描述
+
+---
+
+## 2026-06-29：世界观提取流式进度窗口 + 保存死锁修复 + DB schema 补全
+
+### 背景
+
+用户反馈：①提取世界观底层没有流式进度窗口（chunk 被丢弃，仅状态栏文本）；②保存时报 `TimeoutError`——`extract_ontology_streaming` 在后台事件循环内调用同步 `storage_service.save_project()`，向同一循环提交协程并阻塞等待，形成重入死锁，30 秒后超时。调研还发现第三个隐藏问题：`projects` 表无 `world_ontology`/`worldbook_id` 列，即使修复死锁，重启后数据丢失。
+
+### 核心修复
+
+#### 1. 流式进度窗口（复用 _stream_view）
+
+- [novelforge/ui/context_preview_panel.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/ui/context_preview_panel.py)：新增 5 个 ontology 流式方法（`start_ontology_extraction`/`update_ontology_progress`/`update_ontology_batch`/`finish_ontology_extraction`/`fail_ontology_extraction`），复用已有的 `_stream_view`（QPlainTextEdit）+ `_stream_group`（QGroupBox）展示世界观提取流式输出，镜像上下文提取的 `start_extraction`/`update_extraction_progress`/`finish_extraction`/`fail_extraction` 模式
+- [novelforge/ui/main_window.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/ui/main_window.py)：4 个 ontology 处理方法改为调用面板流式方法——`_on_extract_ontology_requested` 调 `start_ontology_extraction`、`_on_ontology_chunk_received` 调 `update_ontology_progress`（原 `pass` 丢弃 chunk）、`_on_ontology_batch_done` 调 `update_ontology_batch`、`_on_ontology_done` 调 `finish_ontology_extraction`/`fail_ontology_extraction`
+
+#### 2. 修复重入死锁（协程内 await 异步存储直连）
+
+- [novelforge/services/ontology_extractor.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/services/ontology_extractor.py) L933：将同步 `self.storage_service.save_project(project)` 替换为 `await self.storage_service.storage.save_project(project.model_dump(mode="json"))`，镜像 ContextExtractor 的 `await self.storage_service.storage.set_cache(...)` 模式，绕过同步包装层直接 await 异步存储层，不阻塞事件循环
+- [novelforge/ui/main_window.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/ui/main_window.py) `_on_ontology_done`：移除 UI 线程的重复 `load_project`/`save_project`（死锁补丁，协程内已保存成功），改为根据 status 判断：含"保存失败"则 QMessageBox.warning 警告，否则状态栏提示完成
+
+#### 3. 补全 projects 表 schema（world_ontology + worldbook_id 列）
+
+- [novelforge/core/storage.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/core/storage.py)：
+  - `SCHEMA_SQL` 的 `CREATE TABLE projects` 新增 `world_ontology TEXT` + `worldbook_id TEXT DEFAULT ''` 两列
+  - 新增 `_migrate_projects_columns` 幂等迁移方法（镜像 `_migrate_continuations_columns`），`connect()` 中调用
+  - `save_project` INSERT OR REPLACE 扩展为 12 列含 `world_ontology`/`worldbook_id`
+  - `_row_to_project` 读取 row[10]/row[11] 返回两字段
+
+### 测试
+
+- 导入验证：`OntologyExtractor`/`ContextPreviewPanel`/`Storage` 均正常导入
+- DB 迁移验证：新建库 `PRAGMA table_info(projects)` 含两列 + save/load 往返 `world_ontology={'a':1}`/`worldbook_id='wb_1'` 正确
+- 回归测试：`377 passed, 13 skipped, 12 deselected`（无新增失败）
+
+### 文档同步
+
+- agent.md：更新 `core/storage.py`（SQLite 异步存储层 + _migrate_projects_columns）、`services/ontology_extractor.py`（协程内 await 直连避免死锁）、`ui/main_window.py`（4 个 ontology 处理方法改为面板流式调用 + 移除重复 save_project）、`ui/context_preview_panel.py`（5 个 ontology 流式方法）描述
+
+---
+
+## 2026-06-29：上下文提取改造（世界观底层 + 主角形象一致性）
+
+### 背景
+
+重新优化上下文提取：世界观底层全文拆分分析提取 7 维度 WorldOntology 固化到项目并绑定世界书；主角形象 8 维度 ProtagonistProfile 跟随章节缓存独立提取；审计阶段主角一致性一票否决；其它信息（剧情/物品/伏笔等）剔除世界观底层内容但包含主角既有行为。用户要求两项新功能必须具备按 tokens 自动拆分分段提取、增量更新及合并功能；主角形象提取仅反映至当前章节状态。
+
+### 核心改造
+
+#### 1. 世界观底层提取（OntologyExtractor）
+
+- 新增 [novelforge/services/ontology_extractor.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/services/ontology_extractor.py)：全文拆分分析提取 `WorldOntology` 7 大维度（existential_topology/causal_architecture/spatio_temporal_ontology/information_epistemology/axiological_foundation/becoming_dynamics/narrative_ontology）
+- **三大机制**：
+  - token 拆分：`_split_chapters_by_token_limit` 按章节边界贪婪累积 token 拆批
+  - 增量更新：每批携带 `{{accumulated_ontology}}` 占位符，`_merge_ontology_fields` 程序化字段级合并（空字段取另侧/双侧非空按序列化长度启发式/冲突新批次优先）
+  - 合并：`batch_count > 1` 触发 `_run_ontology_merge`（加载 `extract_ontology_merge_prompt.txt`，2 次重试温度 0.2/0.0，失败降级 accumulated_ontology）
+- 固化到 `Project.world_ontology`（全文提取一次，不随章节变化）
+- `_save_ontology_to_worldbook` 拆 7 维度为 `ContextEntry`（category="plot_state"）绑定 `project.worldbook_id`
+- 后续所有流程（深度分析/卷大纲/审计/验证/修订）引用 `world_ontology` 作为底层规则约束
+
+#### 2. 主角形象一致性（ProtagonistProfile）
+
+- 新增 [novelforge/models/protagonist.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/models/protagonist.py)：8 维度心理学档案（basic_anchors/motivation_system/personality_structure/cognitive_style/defense_mechanisms/behavioral_fingerprint/relationship_coordinates/growth_arc）+ OOC 红线
+- [novelforge/services/context_extractor.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/services/context_extractor.py) 新增 `_extract_protagonist`：与 8 维度共用 `batches`（继承 token 拆分），三大机制完整支持
+- **growth_arc 特殊处理**：合并时新批次直接覆盖旧值（反映弧光演变），不按长度启发式
+- 跟随章节缓存：与 `ContextEntry` 共享 SQLite 缓存键 `ctx_extract:{project_id}:{chapter_id}`，仅反映至当前章节状态
+- 失败不阻塞 8 维度结果（异常被捕获返回 `(None, batch_count, False)`）
+- **一票否决机制**：大纲审计 `protagonist_consistency` 维度 score ≤ 4 → 整体 `passed=false`；章节验证 critical 级主角一致性问题 → `passed=false`
+
+#### 3. 其它信息优化
+
+- `VALID_CATEGORIES` 新增 `protagonist_behavior`（主角既有行为：已做决策/已展能力/已发行为模式/已建关系动态）
+- `extract_prompt.txt` 剔除世界观底层内容（由 OntologyExtractor 独立负责），新增第 9 维度 `protagonist_behavior`
+- 提取提示词边界声明：剔除主角心理档案（由 ProtagonistProfile 独立流程提取）
+
+#### 4. VolumeOrchestrator 注入
+
+- `__init__` 新增 `world_ontology` + `protagonist_profile` 两参数
+- 新增 `_format_world_ontology`/`_format_protagonist_profile` 辅助方法（格式化为 JSON 注入）
+- 6 个 phase 方法 macros 注入占位符：
+  - `_run_deep_analysis_single`：仅 `{{world_ontology}}`
+  - `_run_volume_outline`/`_run_outline_audit`/`_run_chapter_verify`：两者
+  - `_run_chapter_outline`/`_run_chapter_revise`：仅 `{{protagonist_profile}}`
+- 4 个提示词模板新增占位符段落（phase_deep_analysis/volume_outline/chapter_outline/revise）
+
+#### 5. UI 适配
+
+- [novelforge/ui/context_preview_panel.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/ui/context_preview_panel.py)：新增"提取世界观底层"按钮（`extract_ontology_requested` 信号）+ `protagonist_behavior` 维度展示（CATEGORY_DISPLAY_NAMES/CATEGORY_ORDER）
+- [novelforge/ui/volume_panel.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/ui/volume_panel.py)：`_AUDIT_DIMENSION_LABELS` 新增 `protagonist_consistency`/`worldview_consistency`（复选框网格自动迭代 `DEFAULT_AUDIT_DIMENSIONS`）
+- [novelforge/ui/main_window.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/ui/main_window.py)：OntologyExtractor 实例 + `_protagonist_profile_by_chapter` 内存 LRU 缓存 + 4 个 ontology 信号处理方法 + VolumeOrchestrator 传参
+
+#### 6. 审计维度扩展
+
+- `DEFAULT_AUDIT_DIMENSIONS`：8 → 10（+protagonist_consistency +worldview_consistency）
+- `VALID_CRITIQUE_CATEGORIES`：4 → 6（+protagonist_consistency +worldview_consistency）
+- `phase_outline_audit.txt`：主角一致性一票否决（score ≤ 4）+ 世界观一致性严格给分（违反底层世界观元规则时 score ≤ 3）
+- `phase_verify.txt`：critical 级别主角一致性问题 → passed=false
+
+### 测试补全
+
+- 新增 [tests/test_protagonist_extraction.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/tests/test_protagonist_extraction.py)：16 用例 9 测试类，覆盖 `_filter_protagonist_dimensions`/`_parse_protagonist_response`/`_merge_protagonist_fields`(growth_arc覆盖+长度启发式)/`ExtractResult`/`PROTAGONIST_DIMENSIONS`/`ProtagonistProfile`模型/`_safe_serialize_dim`
+- 新增 [tests/test_ontology_extractor.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/tests/test_ontology_extractor.py)：8 用例，覆盖 `_split_chapters_by_token_limit`/`_build_ontology_prompt`/`_merge_ontology_fields`/`_save_ontology_to_worldbook`/`extract_ontology_streaming`(单批+多批合并)
+- 修改 [tests/test_m4_context_extraction.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/tests/test_m4_context_extraction.py)：新增 2 个 `ExtractResult` 主角字段测试 + 4 处 LLM 调用计数断言更新（主角提取增加 1 次调用）
+
+### 文档同步
+
+- [agent.md](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/agent.md) 5 处更新：volume_orchestrator/main_window/volume_panel/context_preview_panel 说明行 + 第 3 节主角形象提取说明
+- [update.md](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/update.md) 新增本次条目
+
+### 涉及文件清单
+
+**生产代码（新增 3 + 修改 9）**：
+- 新增：`novelforge/models/ontology.py`、`novelforge/models/protagonist.py`、`novelforge/services/ontology_extractor.py`
+- 修改：`novelforge/models/project.py`、`novelforge/models/context.py`、`novelforge/models/volume.py`、`novelforge/models/agent.py`、`novelforge/services/context_extractor.py`、`novelforge/services/volume_orchestrator.py`、`novelforge/ui/main_window.py`、`novelforge/ui/context_preview_panel.py`、`novelforge/ui/volume_panel.py`
+- 资源：`extract_prompt.txt`、`extract_ontology_prompt.txt`、`extract_ontology_merge_prompt.txt`、`extract_protagonist_prompt.txt`、`extract_protagonist_merge_prompt.txt`、`phase_deep_analysis.txt`、`phase_volume_outline.txt`、`phase_chapter_outline.txt`、`phase_revise.txt`、`phase_outline_audit.txt`、`phase_verify.txt`
+
+**测试代码（新增 2 + 修改 1）**：
+- 新增：`tests/test_protagonist_extraction.py`、`tests/test_ontology_extractor.py`
+- 修改：`tests/test_m4_context_extraction.py`
+
+**文档（2）**：
+- `agent.md`、`update.md`
+
+---
+
+## 2026-06-29：卷级续写三项增强 + agent.md 同步 + 全量回归验证
+
+### 背景
+
+针对卷级多章节续写系统的三项增强需求完成实现、测试补全、文档同步与回归验证。
+
+### 三项增强（生产代码已落地）
+
+#### 1. 强制修改流程
+
+- **位置**：[novelforge/services/volume_orchestrator.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/services/volume_orchestrator.py#L504-L541)
+- **逻辑**：`enable_chapter_revise=True` 时每章生成后强制1轮修改
+  - 流程：生成 → 审计① → 强制修改(rounds=1) → 审计② → 自动修订循环(至 `max_revise_rounds_per_chapter` 上限) → `after_chapter` 用户决策
+  - while 条件 `rounds==0 or (critique not passed)` 保证审计①即使通过也强制修改1次
+- `enable_chapter_revise=False` 时无强制修改与自动修订
+
+#### 2. 阶段产物阅览
+
+- **数据模型**：[novelforge/models/volume.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/models/volume.py#L231-L276)
+  - 新增 `ChapterStageArtifact` 模型：`stage_type`∈outline/draft/audit/revise + `round_index` + `content`/`critique`/`guidance`/`outline` 四个可选产物字段
+  - `ChapterArtifacts` 新增 `stages: list[ChapterStageArtifact]` 字段（默认空列表，向后兼容）
+- **编排器捕获**：[volume_orchestrator.py L459-641](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/services/volume_orchestrator.py#L459-L641)
+  - 每步 `stages.append(ChapterStageArtifact(...))`，`ChapterArtifacts` 末尾传入 `stages=stages`
+- **UI 展示重构**：[novelforge/ui/volume_panel.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/ui/volume_panel.py#L1252-L1393)
+  - `add_chapter_artifacts`：stages 非空时按次序每阶段一行（QLabel + "查看完整内容"按钮），空时回退 `_build_legacy_summary`
+  - `_format_stage_label`：outline→细纲 / draft→初稿 / audit→审计①②③ / revise→修改正文①②③
+  - `_show_stage_detail`：弹 `ArtifactDetailDialog.exec()`
+- **新增对话框**：[novelforge/ui/artifact_detail_dialog.py](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/ui/artifact_detail_dialog.py)
+  - 只读 `QPlainTextEdit` + 关闭按钮
+  - `_format_content()` 按 `stage_type` 格式化：outline→`format_outline` / audit→`format_critique` / revise→"【修订指导】"+"【修改后正文】" / draft→原文
+
+#### 3. 动态前文修复
+
+- **问题**：从中间续写时动态前文窗口误把全文末尾章节当作前文
+- **修复**：[volume_orchestrator.py L1731-1759](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/novelforge/services/volume_orchestrator.py#L1731-L1759)
+  - `__init__` 记录 `_original_chapter_count = len(self.chapters)`（L180）
+  - `_get_effective_chapters()` 返回 `chapters[0:_current_chapter_index+1] + chapters[_original_chapter_count:]`，跳过插入点后原章节
+  - `_build_dynamic_lookback_text(window=10)` 基于有效章节序列取末尾 window 章拼接
+  - `_run_chapter_writing` 的 `prompt_assembler.assemble` 也使用 `effective_chapters`（L1396-1399）
+- **效果**：生成第 11 章时前文只含刚生成的 10 章，不再混入插入点之后原章节
+
+### 测试补全（已完成）
+
+| 测试文件 | 用例数 | 新增/修改 |
+|---------|-------|----------|
+| `tests/test_volume_e2e.py` | 3 | 修改：A1 加 `enable_chapter_revise=False` 修复降级测试 / A2 加章节2-3强制修改 mock 响应 + 断言 `revision_rounds==1` |
+| `tests/test_volume_models.py` | 32 | +4：`ChapterStageArtifact` 模型（默认值/构造/stages 默认空/stages roundtrip） |
+| `tests/test_volume_orchestrator.py` | 36 | +4：`test_forced_revise_flow_stages_captured` / `test_forced_revise_max_2_auto_loop` / `test_dynamic_lookback_excludes_post_insertion_chapters` / `test_stages_capture_after_chapter_reject` |
+| `tests/test_volume_ui.py` | 23 | +2：`TestAddChapterArtifactsStages`（`test_add_chapter_artifacts_with_stages` / `test_add_chapter_artifacts_legacy_fallback`） |
+| `tests/test_artifact_detail_dialog.py` | 5 | 新文件：覆盖 outline/audit/revise/draft 四类 stage 格式化 + 关闭按钮 |
+
+### 文档同步
+
+- [agent.md](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-context-extraction-merge-DRARZ8/agent.md) 第 8 节"卷级多章节续写"5 处更新：
+  - D1 L171：数据模型段补充 `ChapterStageArtifact` + `stages` 字段
+  - D2 L189：`_async_run` 流程段补充强制修改流程
+  - D3 L194：动态前文窗口段重写为 `_get_effective_chapters` 实现
+  - D4 L212：产物查看段补充 `add_chapter_artifacts` 重构
+  - D5 L200/L203-205：测试计数更新（orchestrator 30→36 / ui +2 / 新增 dialog 5 用例 / 新增 models 4 stage 用例）
+- 目录树 L61：新增 `artifact_detail_dialog.py` 注释
+
+### 回归验证
+
+```powershell
+python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"
+```
+
+结果：**351 passed, 13 skipped, 12 deselected in 5.54s** — 零失败、零回归。
+
+### 涉及文件清单
+
+**生产代码（4 文件）**：
+- `novelforge/models/volume.py`
+- `novelforge/services/volume_orchestrator.py`
+- `novelforge/ui/volume_panel.py`
+- `novelforge/ui/artifact_detail_dialog.py`（新增）
+
+**测试代码（5 文件）**：
+- `tests/test_volume_e2e.py`
+- `tests/test_volume_models.py`
+- `tests/test_volume_orchestrator.py`
+- `tests/test_volume_ui.py`
+- `tests/test_artifact_detail_dialog.py`（新增）
+
+**文档（2 文件）**：
+- `agent.md`
+- `update.md`（新增）

@@ -102,6 +102,14 @@ class StorageService:
         data = self._runner.run(self.storage.load_project(project_id))
         if data is None:
             return None
+        # world_ontology 从 DB 加载为 dict，还原为 WorldOntology 实例
+        wo = data.get("world_ontology")
+        if isinstance(wo, dict):
+            try:
+                from novelforge.models.ontology import WorldOntology
+                data["world_ontology"] = WorldOntology.model_validate(wo)
+            except Exception:
+                logger.warning("world_ontology 还原失败，保留 dict")
         return Project.model_validate(data)
 
     def list_projects(self) -> list[Project]:
@@ -146,6 +154,10 @@ class StorageService:
         """列出项目的所有章节元数据（不含正文，不含续写）。"""
         data_list = self._runner.run(self.storage.list_chapters(project_id))
         return [Chapter.model_validate(d) for d in data_list]
+
+    def rebuild_chapters_from_disk(self, project_id: str) -> int:
+        """从磁盘重建章节 DB 行，返回重建数量。"""
+        return self._runner.run(self.storage.rebuild_chapters_from_disk(project_id))
 
     def load_chapter_contents(self, chapters: list[Chapter]) -> list[Chapter]:
         """批量加载章节正文，返回填充了 content 的章节列表。

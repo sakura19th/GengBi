@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+if TYPE_CHECKING:
+    from novelforge.models.ontology import WorldOntology
 
 
 class ManualOverride(BaseModel):
@@ -66,6 +69,9 @@ class Project(BaseModel):
       字段结构：extractor_model/cache_enabled/cache_ttl_hours/
       extractor_prompt_override/lookback_chapters
     - ``chapter_split_rule``：章节拆分规则
+    - ``worldbook_id``：项目专属世界书 ID（存储世界观底层条目，由 OntologyExtractor 创建）
+    - ``world_ontology``：底层世界观元描述（全文提取一次固化，不随章节变化；
+      底层世界观是世界运行的元规则，核心字段变化率 < 5%）
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -80,3 +86,5 @@ class Project(BaseModel):
     regex_script_ids: list[str] = Field(default_factory=list)
     extract_config: dict[str, Any] | None = None
     chapter_split_rule: ChapterSplitRule = Field(default_factory=ChapterSplitRule)
+    worldbook_id: str = ""  # 项目专属世界书 ID（存储世界观底层条目）
+    world_ontology: Any | None = None  # WorldOntology 模型实例（全文提取一次固化）

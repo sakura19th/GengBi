@@ -739,8 +739,8 @@ class TestE2EContextExtraction:
         assert result1.from_cache is False
         assert result2.status == "completed"
         assert result2.from_cache is True
-        # LLM 应只被调用一次（第二次命中缓存）
-        assert mock_client.chat_completion.call_count == 1
+        # LLM 应只被调用一次（第二次命中缓存）+ 1 次主角形象提取（失败被捕获）
+        assert mock_client.chat_completion.call_count == 2
 
 
 class TestE2EExport:
@@ -931,12 +931,13 @@ class TestE2EContinuationSnapshot:
     def test_swipe_accept_append_to_chapter(
         self, temp_storage: StorageService, sample_project: tuple[Project, list[Chapter]]
     ) -> None:
-        """接受续写应追加到章节正文。"""
+        """接受续写（提升为章节：插入新章节，删除续写记录）。"""
         _, chapters = sample_project
         chapter_service = ChapterService(temp_storage)
         chapter = temp_storage.load_chapter(chapters[0].id)
 
         original_length = len(chapter.content)
+        original_index = chapter.index
 
         # 创建并接受 swipe
         swipe = Continuation(
@@ -956,16 +957,21 @@ class TestE2EContinuationSnapshot:
         )
         temp_storage.save_continuation(swipe, chapter.id)
 
-        # 重新加载并接受
+        # 重新加载并接受（提升为新章节）
         chapter = temp_storage.load_chapter(chapter.id)
         swipe = chapter.continuations[-1]
-        updated_chapter = chapter_service.accept_continuation(chapter, swipe)
+        updated_chapter, new_chapter = (
+            chapter_service.promote_continuation_to_chapter(chapter, swipe)
+        )
 
-        # 章节正文应变长
-        assert len(updated_chapter.content) > original_length
-        assert "这是续写的内容部分。" in updated_chapter.content
-        # swipe 应标记为已接受
-        assert swipe.is_accepted is True
+        # 原章节正文不变
+        assert len(updated_chapter.content) == original_length
+        assert "这是续写的内容部分。" not in updated_chapter.content
+        # 新章节 index = 原 + 1，content = 续写内容
+        assert new_chapter.index == original_index + 1
+        assert new_chapter.content == "这是续写的内容部分。"
+        # 原续写记录已删除（不在 updated_chapter.continuations）
+        assert all(c.id != swipe.id for c in updated_chapter.continuations)
 
 
 class TestE2EFullWorkflow:
@@ -1036,12 +1042,16 @@ class TestE2EFullWorkflow:
         )
         temp_storage.save_continuation(swipe, chapters[-1].id)
 
-        # 5. 接受续写
+        # 5. 接受续写（提升为新章节，删除续写记录）
         chapter_service = ChapterService(temp_storage)
         chapter = temp_storage.load_chapter(chapters[-1].id)
         swipe = chapter.continuations[-1]
-        updated = chapter_service.accept_continuation(chapter, swipe)
-        assert "林风握紧长剑" in updated.content
+        updated, new_chapter = chapter_service.promote_continuation_to_chapter(
+            chapter, swipe
+        )
+        # 新章节 content = 续写内容
+        assert "林风握紧长剑" in new_chapter.content
+        assert new_chapter.index == chapter.index + 1
 
         # 6. 导出完整 TXT
         output_path = tmp_path / "final_export.txt"

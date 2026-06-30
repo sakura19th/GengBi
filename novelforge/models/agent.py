@@ -8,9 +8,12 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-# CritiqueIssue category 合法值（对齐 spec 阶段⑤验证维度）
+# CritiqueIssue category 合法值（对齐 phase_outline_audit.txt 的 10 维度 + phase_verify.txt 沿用）
 VALID_CRITIQUE_CATEGORIES: frozenset[str] = frozenset(
-    {"consistency", "style", "structure", "engagement"}
+    {"consistency", "pacing", "engagement", "structure", "coherence",
+     "foreshadowing", "characters", "style",
+     "protagonist_consistency",  # 主角一致性（一票否决：出现 critical 级别问题时 passed=false）
+     "worldview_consistency"}  # 世界观一致性（严格给分：违反底层世界观元规则时 score ≤ 3）
 )
 
 # CritiqueIssue severity 合法值

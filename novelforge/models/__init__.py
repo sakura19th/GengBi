@@ -17,6 +17,7 @@ from novelforge.models.context import (
     VALID_ROLES,
     ContextEntry,
 )
+from novelforge.models.ontology import WorldOntology
 from novelforge.models.preset import (
     GLOBAL_CHARACTER_ID,
     Prompt,
@@ -30,6 +31,7 @@ from novelforge.models.project import (
     NovelProfile,
     Project,
 )
+from novelforge.models.protagonist import ProtagonistProfile
 from novelforge.models.regex import (
     PLACEMENT_AI_OUTPUT,
     PLACEMENT_USER_INPUT,
@@ -44,6 +46,7 @@ from novelforge.models.volume import (
     AuditDimension,
     ChapterArtifacts,
     ChapterPlan,
+    ChapterStageArtifact,
     DeepAnalysis,
     OutlineAuditReport,
     VolumeArtifacts,
@@ -68,6 +71,7 @@ __all__ = [
     "AuditDimension",
     "OutlineAuditReport",
     "ChapterArtifacts",
+    "ChapterStageArtifact",
     "VolumeArtifacts",
     "VolumeRunConfig",
     "VALID_ANALYSIS_DEPTHS",
@@ -78,6 +82,9 @@ __all__ = [
     "VALID_CATEGORIES",
     "VALID_POSITIONS",
     "VALID_ROLES",
+    # 底层世界观与主角形象
+    "WorldOntology",
+    "ProtagonistProfile",
     # 预设
     "Prompt",
     "PromptOrderEntry",

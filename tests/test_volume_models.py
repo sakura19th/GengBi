@@ -3,8 +3,8 @@
 覆盖：
 1. VolumeRunConfig chapter_count 校验 [2,20]（边界值 1/21 抛错，2/20 正常）
 2. VolumeRunConfig analysis_depth 枚举校验（非法值抛错）
-3. VolumeRunConfig 默认 audit_dimensions 含 7 维度
-4. VolumeRunConfig 默认 checkpoints 含 3 个 key 且皆 False
+3. VolumeRunConfig 默认 audit_dimensions 含 8 维度
+4. VolumeRunConfig 默认 checkpoints 含 5 个 key，before_audit 默认开启，其余关闭
 5. DeepAnalysis 默认所有字段为空
 6. VolumeOutline 含 chapters: list[ChapterPlan]
 7. 旧 Continuation JSON（无 volume_artifacts 字段）能正常反序列化
@@ -28,9 +28,13 @@ from novelforge.models import (
     DEFAULT_AUDIT_DIMENSIONS,
     VALID_ANALYSIS_DEPTHS,
     VALID_PLOT_ROLES,
+    ChapterArtifacts,
     ChapterPlan,
+    ChapterStageArtifact,
     Continuation,
+    CritiqueReport,
     DeepAnalysis,
+    Outline,
     VolumeOutline,
     VolumeRunConfig,
 )
@@ -91,15 +95,15 @@ def test_volume_run_config_analysis_depth_default() -> None:
     assert config.analysis_depth == "standard"
 
 
-# ===== 3. VolumeRunConfig 默认 audit_dimensions 含 7 维度 =====
+# ===== 3. VolumeRunConfig 默认 audit_dimensions 含 8 维度 =====
 
 
 def test_volume_run_config_default_audit_dimensions() -> None:
-    """默认 audit_dimensions 含 7 维度且与 DEFAULT_AUDIT_DIMENSIONS 一致。"""
+    """默认 audit_dimensions 含 10 维度且与 DEFAULT_AUDIT_DIMENSIONS 一致。"""
     config = VolumeRunConfig()
-    assert len(config.audit_dimensions) == 7
+    assert len(config.audit_dimensions) == 10
     assert config.audit_dimensions == DEFAULT_AUDIT_DIMENSIONS
-    # 确认 7 个维度内容
+    # 确认 10 个维度内容
     assert config.audit_dimensions == [
         "consistency",
         "pacing",
@@ -108,6 +112,9 @@ def test_volume_run_config_default_audit_dimensions() -> None:
         "coherence",
         "foreshadowing",
         "characters",
+        "style",
+        "protagonist_consistency",
+        "worldview_consistency",
     ]
 
 
@@ -117,22 +124,23 @@ def test_volume_run_config_audit_dimensions_independent() -> None:
     c2 = VolumeRunConfig()
     c1.audit_dimensions.append("extra")
     # c2 不受影响
-    assert len(c2.audit_dimensions) == 7
+    assert len(c2.audit_dimensions) == 10
     assert "extra" not in c2.audit_dimensions
 
 
-# ===== 4. VolumeRunConfig 默认 checkpoints 含 4 个 key，before_audit 默认开启 =====
+# ===== 4. VolumeRunConfig 默认 checkpoints 含 5 个 key，before_audit 默认开启 =====
 
 
 def test_volume_run_config_default_checkpoints() -> None:
-    """默认 checkpoints 含 4 个 key，before_audit 默认开启，其余关闭。"""
+    """默认 checkpoints 含 5 个 key，before_audit 默认开启，其余关闭。"""
     config = VolumeRunConfig()
-    assert len(config.checkpoints) == 4
+    assert len(config.checkpoints) == 5
     assert config.checkpoints == {
         "after_deep_analysis": False,
         "after_volume_outline": False,
         "before_audit": True,
         "after_audit": False,
+        "after_chapter": False,
     }
     # before_audit 默认开启，其余关闭
     assert config.checkpoints["before_audit"] is True
@@ -427,3 +435,91 @@ def test_continuation_volume_artifacts_none_roundtrip() -> None:
     json_str = cont.model_dump_json()
     restored = Continuation.model_validate_json(json_str)
     assert restored.volume_artifacts is None
+
+
+# ===== 8. ChapterStageArtifact 模型测试 =====
+
+
+def test_chapter_stage_artifact_defaults() -> None:
+    """ChapterStageArtifact 默认值：所有字段为空/None。"""
+    stage = ChapterStageArtifact()
+    assert stage.stage_type == ""
+    assert stage.round_index == 0
+    assert stage.content == ""
+    assert stage.critique is None
+    assert stage.guidance is None
+    assert stage.outline is None
+
+
+def test_chapter_stage_artifact_construction() -> None:
+    """构造完整 ChapterStageArtifact 对象，验证字段赋值。"""
+    outline = Outline(continuation_goals="测试目标", foreshadowing_plan="无", scenes=[])
+    critique = CritiqueReport(summary="通过", issues=[], passed=True)
+    guidance = {"revision_strategy": "润色", "key_changes": [], "preserve_elements": ""}
+
+    stage = ChapterStageArtifact(
+        stage_type="revise",
+        round_index=1,
+        content="修订后正文",
+        critique=critique,
+        guidance=guidance,
+        outline=outline,
+    )
+    assert stage.stage_type == "revise"
+    assert stage.round_index == 1
+    assert stage.content == "修订后正文"
+    assert stage.critique is not None
+    assert stage.critique.passed is True
+    assert stage.guidance is not None
+    assert stage.guidance["revision_strategy"] == "润色"
+    assert stage.outline is not None
+    assert stage.outline.continuation_goals == "测试目标"
+
+
+def test_chapter_artifacts_stages_default_empty() -> None:
+    """ChapterArtifacts 默认 stages 为空列表（向后兼容）。"""
+    artifacts = ChapterArtifacts(chapter_index=0)
+    assert artifacts.stages == []
+    assert isinstance(artifacts.stages, list)
+
+
+def test_chapter_artifacts_stages_roundtrip() -> None:
+    """构造含 stages 的 ChapterArtifacts，model_dump → model_validate 往返一致。"""
+    stages = [
+        ChapterStageArtifact(stage_type="outline", round_index=0),
+        ChapterStageArtifact(stage_type="draft", round_index=0, content="初稿"),
+        ChapterStageArtifact(
+            stage_type="audit",
+            round_index=1,
+            critique=CritiqueReport(summary="通过", issues=[], passed=True),
+        ),
+        ChapterStageArtifact(
+            stage_type="revise",
+            round_index=1,
+            guidance={"revision_strategy": "润色"},
+            content="修订稿",
+        ),
+    ]
+    artifacts = ChapterArtifacts(
+        chapter_index=0,
+        content="修订稿",
+        revision_rounds=1,
+        stages=stages,
+    )
+
+    json_str = artifacts.model_dump_json()
+    restored = ChapterArtifacts.model_validate_json(json_str)
+
+    assert len(restored.stages) == 4
+    assert restored.stages[0].stage_type == "outline"
+    assert restored.stages[1].stage_type == "draft"
+    assert restored.stages[1].content == "初稿"
+    assert restored.stages[2].stage_type == "audit"
+    assert restored.stages[2].critique is not None
+    assert restored.stages[2].critique.passed is True
+    assert restored.stages[3].stage_type == "revise"
+    assert restored.stages[3].content == "修订稿"
+    assert restored.stages[3].guidance is not None
+    assert restored.stages[3].guidance["revision_strategy"] == "润色"
+    assert restored.content == "修订稿"
+    assert restored.revision_rounds == 1

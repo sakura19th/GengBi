@@ -176,6 +176,7 @@ class ContinuationWorker(QThread):
         chapter_metadata: dict[str, Any] | None = None,
         regex_script_ids: list[str] | None = None,
         extracted_context_snapshot: list[dict[str, Any]] | None = None,
+        parent_continuation_id: str | None = None,
         parent=None,
     ) -> None:
         """初始化续写工作线程。
@@ -197,6 +198,7 @@ class ContinuationWorker(QThread):
             chapter_metadata: 章节元数据（用于模板渲染上下文）
             regex_script_ids: 正则脚本 ID 列表快照
             extracted_context_snapshot: 提取的上下文条目快照（M4: 存入 swipe）
+            parent_continuation_id: 链式续写父续写 id（None=章节直接子节点）
             parent: 父 QObject
         """
         super().__init__(parent)
@@ -220,6 +222,8 @@ class ContinuationWorker(QThread):
         self.extracted_context_snapshot: list[dict[str, Any]] = (
             extracted_context_snapshot if extracted_context_snapshot is not None else []
         )
+        # 链式续写：父续写 id（None=章节直接子节点）
+        self.parent_continuation_id = parent_continuation_id
 
         # 线程安全停止标志
         self._stop_event = threading.Event()
@@ -390,6 +394,7 @@ class ContinuationWorker(QThread):
             content=final_content,
             model=self.model,
             is_accepted=False,
+            parent_id=self.parent_continuation_id,
             status=result.status,
             created_by=self.created_by,
             parameters_snapshot=dict(self.parameters),

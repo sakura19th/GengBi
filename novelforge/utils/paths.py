@@ -52,6 +52,48 @@ def get_extract_prompt_path() -> Path:
     return get_resource_path("defaults", "extract_prompt.txt")
 
 
+def get_extract_merge_prompt_path() -> Path:
+    """获取上下文提取【信息汇总】环节提示词路径。
+
+    多批次提取后，由该模板指导 LLM 合并去重为最终 ContextEntry 列表。
+    """
+    return get_resource_path("defaults", "extract_merge_prompt.txt")
+
+
+def get_extract_ontology_prompt_path() -> Path:
+    """获取底层世界观提取提示词路径。
+
+    全文拆分分析提取 WorldOntology 7 大维度参数化描述，
+    支持 token 拆分 + 增量更新（含 ``{{accumulated_ontology}}`` 占位符）。
+    """
+    return get_resource_path("defaults", "extract_ontology_prompt.txt")
+
+
+def get_extract_ontology_merge_prompt_path() -> Path:
+    """获取底层世界观合并提示词路径。
+
+    多批次提取后，由该模板指导 LLM 合并为统一的 WorldOntology JSON 对象。
+    """
+    return get_resource_path("defaults", "extract_ontology_merge_prompt.txt")
+
+
+def get_extract_protagonist_prompt_path() -> Path:
+    """获取主角形象提取提示词路径。
+
+    提取 ProtagonistProfile 8 大维度心理学档案，
+    支持 token 拆分 + 增量更新（含 ``{{accumulated_protagonist}}`` 占位符）。
+    """
+    return get_resource_path("defaults", "extract_protagonist_prompt.txt")
+
+
+def get_extract_protagonist_merge_prompt_path() -> Path:
+    """获取主角形象合并提示词路径。
+
+    多批次提取后，由该模板指导 LLM 合并为统一的 ProtagonistProfile JSON 对象。
+    """
+    return get_resource_path("defaults", "extract_protagonist_merge_prompt.txt")
+
+
 def get_default_regex_scripts_path() -> Path:
     """获取默认正则脚本文件路径。"""
     return get_resource_path("defaults", "default_regex_scripts.json")
@@ -61,7 +103,7 @@ def get_agent_prompt_path(phase: str) -> Path:
     """获取 Agent 阶段提示词路径。
 
     Args:
-        phase: 阶段名（analysis/outline/verify/revise）
+        phase: 阶段名（analysis/outline/verify/revise/single_audit）
 
     Returns:
         提示词文件路径
@@ -71,7 +113,7 @@ def get_agent_prompt_path(phase: str) -> Path:
 
 # 卷级多章节续写支持的阶段名集合
 _VOLUME_PROMPT_PHASES = frozenset(
-    {"deep_analysis", "volume_outline", "outline_audit", "outline_final", "chapter_outline"}
+    {"deep_analysis", "deep_analysis_merge", "volume_outline", "outline_audit", "outline_final", "chapter_outline"}
 )
 
 

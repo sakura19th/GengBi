@@ -1,1 +1,66 @@
-[]
+[
+  {
+    "id": "nf_regex_hide_thinking",
+    "scriptName": "NF-思维链隐藏",
+    "findRegex": "/<novelforge_thinking>[\\s\\S]*?<\\/novelforge_thinking>\\n*/g",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [2],
+    "disabled": false,
+    "markdownOnly": false,
+    "promptOnly": false,
+    "runOnEdit": false,
+    "substituteRegex": false,
+    "minDepth": 0,
+    "maxDepth": 0,
+    "markupSafety": false
+  },
+  {
+    "id": "nf_regex_strip_bagua",
+    "scriptName": "NF-八股抹除",
+    "findRegex": "/(不容置疑|不易觉察|微不可察|指关节白|一抹弧度)/g",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [2],
+    "disabled": false,
+    "markdownOnly": false,
+    "promptOnly": false,
+    "runOnEdit": false,
+    "substituteRegex": false,
+    "minDepth": 0,
+    "maxDepth": 0,
+    "markupSafety": false
+  },
+  {
+    "id": "nf_regex_normalize_dash",
+    "scriptName": "NF-破折号规范",
+    "findRegex": "/([一-鿿])——(?=[一-鿿])/g",
+    "replaceString": "$1，",
+    "trimStrings": [],
+    "placement": [2],
+    "disabled": false,
+    "markdownOnly": false,
+    "promptOnly": false,
+    "runOnEdit": false,
+    "substituteRegex": false,
+    "minDepth": 0,
+    "maxDepth": 0,
+    "markupSafety": false
+  },
+  {
+    "id": "nf_regex_collapse_blanklines",
+    "scriptName": "NF-空行清理",
+    "findRegex": "/\\n{3,}/g",
+    "replaceString": "\\n\\n",
+    "trimStrings": [],
+    "placement": [2],
+    "disabled": false,
+    "markdownOnly": false,
+    "promptOnly": false,
+    "runOnEdit": false,
+    "substituteRegex": false,
+    "minDepth": 0,
+    "maxDepth": 0,
+    "markupSafety": false
+  }
+]

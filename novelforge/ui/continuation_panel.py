@@ -85,6 +85,8 @@ class ContinuationPanel(QWidget):
     accept_and_continue = Signal()
     edit_then_accept = Signal()
     compare_swipes = Signal()
+    delete_continuation = Signal()
+    audit_continuation = Signal()
     # M4 新增：请求上下文提取（force_refresh 参数）
     extract_context_requested = Signal(bool)
     # 查看组装后的续写提示词
@@ -226,12 +228,16 @@ class ContinuationPanel(QWidget):
         self._stop_btn.setEnabled(False)
         self._rewrite_btn = QPushButton("重写")
         self._rewrite_btn.setEnabled(False)
-        self._accept_btn = QPushButton("接受并追加")
+        self._accept_btn = QPushButton("接受")
         self._accept_btn.setEnabled(False)
         self._accept_continue_btn = QPushButton("接受并继续")
         self._accept_continue_btn.setEnabled(False)
         self._edit_accept_btn = QPushButton("编辑后接受")
         self._edit_accept_btn.setEnabled(False)
+        self._delete_btn = QPushButton("删除")
+        self._delete_btn.setEnabled(False)
+        self._audit_btn = QPushButton("审计")
+        self._audit_btn.setEnabled(False)
         self._compare_btn = QPushButton("并排对比")
         self._compare_btn.setEnabled(False)
 
@@ -239,7 +245,7 @@ class ContinuationPanel(QWidget):
         for btn in (
             self._start_btn, self._view_prompt_btn, self._stop_btn, self._rewrite_btn,
             self._accept_btn, self._accept_continue_btn,
-            self._edit_accept_btn, self._compare_btn,
+            self._edit_accept_btn, self._delete_btn, self._audit_btn, self._compare_btn,
         ):
             btn.setMinimumWidth(80)
 
@@ -251,6 +257,8 @@ class ContinuationPanel(QWidget):
         btn_layout.addWidget(self._accept_btn)
         btn_layout.addWidget(self._accept_continue_btn)
         btn_layout.addWidget(self._edit_accept_btn)
+        btn_layout.addWidget(self._delete_btn)
+        btn_layout.addWidget(self._audit_btn)
         btn_layout.addWidget(self._compare_btn)
 
         layout.addLayout(btn_layout)
@@ -284,6 +292,8 @@ class ContinuationPanel(QWidget):
         self._accept_btn.clicked.connect(self.accept_continuation.emit)
         self._accept_continue_btn.clicked.connect(self.accept_and_continue.emit)
         self._edit_accept_btn.clicked.connect(self.edit_then_accept.emit)
+        self._delete_btn.clicked.connect(self.delete_continuation.emit)
+        self._audit_btn.clicked.connect(self.audit_continuation.emit)
         self._compare_btn.clicked.connect(self.compare_swipes.emit)
         # 端点切换时自动更新模型
         self._endpoint_combo.currentIndexChanged.connect(self._on_endpoint_changed)
@@ -373,6 +383,9 @@ class ContinuationPanel(QWidget):
         if visible:
             # 卷模式：隐藏单次参数区
             self._config_group.hide()
+        else:
+            # 单次模式：恢复单次参数区
+            self._config_group.show()
         # 卷模式开启→隐藏输出面板(visible=False)；卷模式关闭→显示输出面板(True)
         self.output_panel_visibility_requested.emit(not visible)
 
@@ -472,6 +485,25 @@ class ContinuationPanel(QWidget):
         # 移除光标
         self._remove_cursor()
         self._update_button_states()
+
+    def restore_streaming_state(self, buffered_text: str) -> None:
+        """恢复续写流式状态（切回发起章节时调用）。
+
+        重建流式输出模式（_is_streaming=True + 节流/光标定时器 + 按钮态），
+        并回填已缓冲的续写文本。后续 chunk 经 append_chunk 追加。
+
+        Args:
+            buffered_text: 已缓冲的续写输出文本
+        """
+        # 复用 start_streaming 完成状态/定时器/按钮态初始化（会清空输出）
+        self.start_streaming()
+        # 回填已缓冲的文本
+        if buffered_text:
+            cursor = self._output_edit.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            cursor.insertText(buffered_text)
+            if self._auto_scroll_check.isChecked():
+                self._output_edit.ensureCursorVisible()
 
     def append_chunk(self, text: str) -> None:
         """追加正文 chunk 到缓冲区（节流刷新）。"""
@@ -573,6 +605,7 @@ class ContinuationPanel(QWidget):
             self._accept_continue_btn.setEnabled(False)
             self._edit_accept_btn.setEnabled(False)
             self._compare_btn.setEnabled(False)
+            self._audit_btn.setEnabled(False)
         else:
             self._start_btn.setEnabled(True)
             self._view_prompt_btn.setEnabled(True)
@@ -582,6 +615,8 @@ class ContinuationPanel(QWidget):
             self._accept_btn.setEnabled(has_swipe)
             self._accept_continue_btn.setEnabled(has_swipe)
             self._edit_accept_btn.setEnabled(has_swipe)
+            self._delete_btn.setEnabled(has_swipe)
+            self._audit_btn.setEnabled(has_swipe)
             self._compare_btn.setEnabled(len(self._all_swipes) >= 2)
 
     # ===== swipe 显示 =====

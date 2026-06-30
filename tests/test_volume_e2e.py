@@ -404,12 +404,13 @@ def test_volume_e2e_full_flow_n3() -> None:
     - phase_logs 字段存在（list）
     - created_by == "volume"
     """
-    # 1. 构建 VolumeRunConfig：N=3，全阶段开启
+    # 1. 构建 VolumeRunConfig：N=3，全阶段开启（修订关闭以测试无修订基础流程）
     config = VolumeRunConfig(chapter_count=3)
     config.checkpoints["before_audit"] = False
+    config.enable_chapter_revise = False
     assert config.enable_outline_audit is True
     assert config.enable_chapter_verify is True
-    assert config.enable_chapter_revise is True
+    assert config.enable_chapter_revise is False
 
     # 2. 构建 VolumeOrchestrator
     orchestrator = _make_orchestrator(config=config)
@@ -535,6 +536,7 @@ def test_volume_e2e_deep_analysis_degradation() -> None:
     """
     config = VolumeRunConfig(chapter_count=3)
     config.checkpoints["before_audit"] = False
+    config.enable_chapter_revise = False
     orchestrator = _make_orchestrator(config=config)
 
     fake = FakeLLMClient()
@@ -647,9 +649,22 @@ def test_volume_e2e_with_revise_loop() -> None:
     )
     fake.add_stream_response([StreamChunk(content="修订稿")])
     fake.add_chat_response(_critique_passed_json())
-    # 第2章、第3章：细纲 + 写作 + 验证通过
+    # 第2章、第3章：细纲 + 写作(初稿) + 验证通过 + 强制修改(修订指导+修订稿+验证通过)
     for i in range(2, 4):
         fake.add_chat_response(_outline_json())
+        fake.add_stream_response([StreamChunk(content=f"第{i}章初稿")])
+        fake.add_chat_response(_critique_passed_json())
+        # 强制修改：审计①通过后仍触发 1 轮修改
+        fake.add_chat_response(
+            json.dumps(
+                {
+                    "revision_strategy": "润色提升",
+                    "key_changes": [],
+                    "preserve_elements": "",
+                },
+                ensure_ascii=False,
+            )
+        )
         fake.add_stream_response([StreamChunk(content=f"第{i}章正文")])
         fake.add_chat_response(_critique_passed_json())
     orchestrator._client = fake
@@ -665,16 +680,17 @@ def test_volume_e2e_with_revise_loop() -> None:
     assert artifacts is not None
     assert len(artifacts.chapter_artifacts) == 3
 
-    # 第1章经过修订
+    # 第1章经过修订（审计失败触发）
     ca1 = artifacts.chapter_artifacts[0]
     assert ca1.revision_rounds == 1
     assert ca1.content == "修订稿"
     assert ca1.final_critique is not None
     assert ca1.final_critique.passed is True
 
-    # 第2、3章无修订
-    for ca in artifacts.chapter_artifacts[1:]:
-        assert ca.revision_rounds == 0
+    # 第2、3章强制修改（审计通过后仍触发 1 轮修改）
+    for idx, ca in enumerate(artifacts.chapter_artifacts[1:], start=2):
+        assert ca.revision_rounds == 1
+        assert ca.content == f"第{idx}章正文"
         assert ca.final_critique is not None
         assert ca.final_critique.passed is True
 

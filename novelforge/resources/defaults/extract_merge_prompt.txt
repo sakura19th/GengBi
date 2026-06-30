@@ -1,0 +1,57 @@
+你是一位资深小说编辑与创意写作分析专家。此前由于前文章节较长，已按 token 限制拆分为多个批次分别提取上下文条目。现在请将下列多批次的提取结果合并为一份**去重、补全、消解冲突**的最终 ContextEntry 列表，以 JSON 数组格式输出。
+
+# 待合并的批次提取结果
+{{entries_blocks}}
+
+# 合并任务
+请跨批次整合上述 ContextEntry，产出一份连贯、完整、无重复的最终列表。具体要求：
+
+## 1. 去重与合并
+- **同实体合并**：若多个批次描述同一人物/地点/事件/伏笔等（uid 相同，或 category+key 高度重叠），合并为单一条目：
+  - uid 优先保留首次出现的稳定标识（如 char_1、loc_1）；不同 uid 但明显指向同一实体时，择优保留并合并 content
+  - content 字段整合各批次信息，取最完整、最准确的描述，去除重复表述，控制在 500 字以内
+  - key 字段取并集去重
+  - comment 字段择优保留最具概括性的一条
+- **完全重复条目**：内容高度雷同的直接丢弃多余副本
+
+## 2. 冲突消解
+- 同一实体在不同批次中描述矛盾时（如人物状态变化），以**较新批次**（批次序号更大）为准，并在 content 中体现演变
+- 事实性冲突无法判定时，保留信息更详尽的版本
+
+## 3. 字段补全与规范化
+- 所有条目必须包含完整字段：uid/category/key/comment/content/order/position/depth/role
+- category 取值限定：characters/relationships/locations/events/atmosphere/style/foreshadowing/plot_state
+- position 取值限定：before/after/at_depth
+- role 取值限定：system/user/assistant
+- order 为整数（关键信息设较低值，默认 100）
+- 缺失字段用合理默认值补全
+
+## 4. 排序与重要性
+- 关键信息（主角、核心冲突、当前剧情状态、关键伏笔）设较低 order 值（如 10-30）
+- 次要信息（次要场景、辅助人物）设较高 order 值（如 100-200）
+
+# 输出格式
+请输出严格的 JSON 数组，每个元素为一个 ContextEntry 对象，字段如下：
+- uid：字符串，唯一标识
+- category：字符串，取值 characters/relationships/locations/events/atmosphere/style/foreshadowing/plot_state
+- key：字符串数组，关键词列表
+- comment：字符串，简短说明
+- content：字符串，详细内容（最长 500 字）
+- order：整数，排序权重（数字越小越优先）
+- position：字符串，注入位置（before/after/at_depth）
+- depth：整数，仅 at_depth 时有效（默认 4）
+- role：字符串，消息角色（system/user/assistant，默认 system）
+
+# 合并原则
+- **信息完整**：不丢失任何批次中的关键信息，宁可保留也不可遗漏
+- **去重彻底**：同一实体不可出现多条重复条目
+- **连贯一致**：合并后的 content 应语句通顺、逻辑连贯，非简单拼接
+- **忠于原文**：不得编造各批次中不存在的内容
+- **创作导向**：合并结果应直接服务于续写质量（人物一致性、情节连贯、风格统一）
+
+注意：
+- 只输出 JSON 数组，不要包含任何解释性文字
+- 不要使用 markdown 代码块标记
+- content 字段控制在 500 字以内
+- 确保所有 uid 唯一，无重复
+- 目标：产出一份精炼但信息完整的最终上下文条目集

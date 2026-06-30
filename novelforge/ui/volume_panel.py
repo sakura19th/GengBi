@@ -47,17 +47,30 @@ from novelforge.models import (
     DEFAULT_AUDIT_DIMENSIONS,
     ChapterArtifacts,
     ChapterPlan,
+    ChapterStageArtifact,
     DeepAnalysis,
     OutlineAuditReport,
     VALID_ANALYSIS_DEPTHS,
     VolumeOutline,
     VolumeRunConfig,
 )
+from novelforge.ui.artifact_detail_dialog import ArtifactDetailDialog
 from novelforge.ui.helpers import parse_token_limit, select_combo_by_id, set_label_state
 from novelforge.ui.wheel_filter import WheelEventFilter
 from novelforge.utils.outline_serializer import format_critique, format_outline
 
 logger = logging.getLogger(__name__)
+
+# 轮次序号转中文圆圈数字后缀（1→①, 2→②, ...）
+_ROUND_CIRCLES = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+
+
+def _round_suffix(round_index: int) -> str:
+    """轮次序号转中文圆圈数字后缀（1→①），超出范围回退阿拉伯数字。"""
+    if 1 <= round_index <= len(_ROUND_CIRCLES):
+        return _ROUND_CIRCLES[round_index - 1]
+    return str(round_index)
+
 
 # 卷阶段顺序（深度分析 → 卷大纲 → 审计 → 逐章）
 VOLUME_PHASES: list[str] = [
@@ -111,6 +124,9 @@ _AUDIT_DIMENSION_LABELS: dict[str, str] = {
     "coherence": "连贯性",
     "foreshadowing": "伏笔",
     "characters": "人物",
+    "style": "文风",
+    "protagonist_consistency": "主角一致性",
+    "worldview_consistency": "世界观一致性",
 }
 
 # 进度指示器状态对象名（由全局 QSS 接管样式，镜像 AgentPanel）
@@ -602,10 +618,13 @@ class VolumePanel(QWidget):
         self._before_audit_check.setChecked(True)
         self._after_audit_check = QCheckBox("审计后")
         self._after_audit_check.setChecked(False)
+        self._after_chapter_check = QCheckBox("每章后")
+        self._after_chapter_check.setChecked(False)
         checkpoint_row.addWidget(self._after_deep_analysis_check)
         checkpoint_row.addWidget(self._after_volume_outline_check)
         checkpoint_row.addWidget(self._before_audit_check)
         checkpoint_row.addWidget(self._after_audit_check)
+        checkpoint_row.addWidget(self._after_chapter_check)
         checkpoint_row.addStretch(1)
         layout.addLayout(checkpoint_row)
 
@@ -852,6 +871,7 @@ class VolumePanel(QWidget):
         self._after_volume_outline_check.toggled.connect(self._on_config_changed)
         self._before_audit_check.toggled.connect(self._on_config_changed)
         self._after_audit_check.toggled.connect(self._on_config_changed)
+        self._after_chapter_check.toggled.connect(self._on_config_changed)
 
     # ------------------------------------------------------------------
     # 配置变更处理
@@ -914,6 +934,7 @@ class VolumePanel(QWidget):
             "after_volume_outline": self._after_volume_outline_check.isChecked(),
             "before_audit": self._before_audit_check.isChecked(),
             "after_audit": self._after_audit_check.isChecked(),
+            "after_chapter": self._after_chapter_check.isChecked(),
         }
         return VolumeRunConfig(
             chapter_count=self._chapter_count_spin.value(),
@@ -971,6 +992,7 @@ class VolumePanel(QWidget):
             self._after_volume_outline_check.setChecked(cps.get("after_volume_outline", False))
             self._before_audit_check.setChecked(cps.get("before_audit", True))
             self._after_audit_check.setChecked(cps.get("after_audit", False))
+            self._after_chapter_check.setChecked(cps.get("after_chapter", False))
             # 联动状态与提示更新
             self._update_linkage_state()
             self._update_depth_hint()
@@ -1234,6 +1256,10 @@ class VolumePanel(QWidget):
     ) -> None:
         """动态添加单章产物到折叠列表。
 
+        当 artifacts.stages 非空时，按阶段次序（细纲/初稿/审计①/修改正文①/审计②/...）
+        排列，每阶段一个"查看完整内容"按钮，点击弹出 ArtifactDetailDialog。
+        stages 为空（旧数据兼容）时回退到原三块摘要布局。
+
         Args:
             chapter_index: 章节序号（1 基）
             artifacts: 单章产物聚合
@@ -1257,6 +1283,79 @@ class VolumePanel(QWidget):
         content_layout.setContentsMargins(4, 4, 4, 4)
         content_layout.setSpacing(4)
 
+        if artifacts.stages:
+            # 新模式：按阶段次序展示 + 查看完整内容按钮
+            for idx, stage in enumerate(artifacts.stages, start=1):
+                stage_label = self._format_stage_label(stage)
+                row = QHBoxLayout()
+                row.setContentsMargins(0, 0, 0, 0)
+                row.addWidget(QLabel(f"阶段 {idx}：{stage_label}"), 1)
+                view_btn = QPushButton("查看完整内容")
+                view_btn.clicked.connect(
+                    lambda _checked=False, s=stage, ci=chapter_index, si=idx:
+                    self._show_stage_detail(ci, si, s)
+                )
+                row.addWidget(view_btn)
+                content_layout.addLayout(row)
+        else:
+            # 旧数据兼容：回退到原三块摘要布局
+            self._build_legacy_summary(content_layout, artifacts)
+
+        if artifacts.revision_rounds > 0:
+            content_layout.addWidget(
+                QLabel(f"修订轮次：{artifacts.revision_rounds}")
+            )
+
+        chapter_group_layout = QVBoxLayout(chapter_group)
+        chapter_group_layout.setContentsMargins(4, 4, 4, 4)
+        chapter_group_layout.addWidget(content)
+        # 折叠联动：勾选=展开，取消勾选=折叠
+        chapter_group.toggled.connect(
+            lambda checked, w=content: w.setVisible(checked)
+        )
+        content.setVisible(False)  # 默认折叠
+
+        # 插入到 stretch 之前
+        self._chapters_scroll_layout.insertWidget(
+            self._chapters_scroll_layout.count() - 1, chapter_group
+        )
+        self._chapter_groups[chapter_index] = chapter_group
+
+    @staticmethod
+    def _format_stage_label(stage: ChapterStageArtifact) -> str:
+        """根据 stage_type 与 round_index 生成阶段展示名。"""
+        if stage.stage_type == "outline":
+            return "细纲"
+        if stage.stage_type == "draft":
+            return "初稿"
+        if stage.stage_type == "audit":
+            suffix = _round_suffix(stage.round_index)
+            return f"审计{suffix}"
+        if stage.stage_type == "revise":
+            suffix = _round_suffix(stage.round_index)
+            return f"修改正文{suffix}"
+        return stage.stage_type or "未知阶段"
+
+    def _show_stage_detail(
+        self, chapter_index: int, stage_index: int, stage: ChapterStageArtifact
+    ) -> None:
+        """弹出 ArtifactDetailDialog 展示阶段产物完整内容。"""
+        stage_label = self._format_stage_label(stage)
+        title = f"第 {chapter_index} 章 · 阶段 {stage_index}：{stage_label}"
+        dialog = ArtifactDetailDialog(
+            title=title,
+            stage_type=stage.stage_type,
+            content=stage.content,
+            critique=stage.critique,
+            guidance=stage.guidance,
+            outline=stage.outline,
+            parent=self,
+        )
+        dialog.exec()
+
+    @staticmethod
+    def _build_legacy_summary(content_layout: QVBoxLayout, artifacts: ChapterArtifacts) -> None:
+        """旧数据兼容：stages 为空时回退到原三块摘要布局。"""
         # 细纲摘要
         content_layout.addWidget(QLabel("细纲摘要:"))
         outline_edit = QPlainTextEdit()
@@ -1294,26 +1393,6 @@ class VolumePanel(QWidget):
         else:
             content_edit.setPlainText(body if body else "（无）")
         content_layout.addWidget(content_edit)
-
-        if artifacts.revision_rounds > 0:
-            content_layout.addWidget(
-                QLabel(f"修订轮次：{artifacts.revision_rounds}")
-            )
-
-        chapter_group_layout = QVBoxLayout(chapter_group)
-        chapter_group_layout.setContentsMargins(4, 4, 4, 4)
-        chapter_group_layout.addWidget(content)
-        # 折叠联动：勾选=展开，取消勾选=折叠
-        chapter_group.toggled.connect(
-            lambda checked, w=content: w.setVisible(checked)
-        )
-        content.setVisible(False)  # 默认折叠
-
-        # 插入到 stretch 之前
-        self._chapters_scroll_layout.insertWidget(
-            self._chapters_scroll_layout.count() - 1, chapter_group
-        )
-        self._chapter_groups[chapter_index] = chapter_group
 
     # ------------------------------------------------------------------
     # 编辑回读

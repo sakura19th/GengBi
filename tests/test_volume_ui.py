@@ -20,12 +20,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton
 
 from novelforge.ui.continuation_panel import ContinuationPanel
 from novelforge.ui.helpers import select_combo_by_id
 from novelforge.ui.volume_panel import VolumePanel
-from novelforge.models import VolumeRunConfig
+from novelforge.models import (
+    ChapterArtifacts,
+    ChapterStageArtifact,
+    CritiqueReport,
+    Outline,
+    VolumeRunConfig,
+)
 
 
 @pytest.fixture(scope="module")
@@ -175,6 +181,7 @@ class TestVolumePanelSetConfig:
                 "after_volume_outline": False,
                 "before_audit": True,
                 "after_audit": False,
+                "after_chapter": False,
             },
         )
         volume_panel.set_config(config)
@@ -196,6 +203,7 @@ class TestVolumePanelSetConfig:
             "after_volume_outline": False,
             "before_audit": True,
             "after_audit": False,
+            "after_chapter": False,
         }
 
     def test_set_config_does_not_emit_config_changed(self, volume_panel) -> None:
@@ -342,3 +350,91 @@ class TestVolumePanelContinueButton:
 
         volume_panel.hide_continue_button()
         assert volume_panel._continue_btn.isHidden()
+
+
+# ===== 5. add_chapter_artifacts 阶段产物展示 =====
+
+
+class TestAddChapterArtifactsStages:
+    """add_chapter_artifacts 阶段次序展示测试。"""
+
+    def test_add_chapter_artifacts_with_stages(self, volume_panel) -> None:
+        """stages 非空时按阶段次序生成"查看完整内容"按钮，标签依次为细纲/初稿/审计①/修改正文①/审计②。"""
+        outline = Outline(continuation_goals="目标", foreshadowing_plan="无", scenes=[])
+        critique1 = CritiqueReport(summary="通过", issues=[], passed=True)
+        critique2 = CritiqueReport(summary="通过2", issues=[], passed=True)
+        stages = [
+            ChapterStageArtifact(stage_type="outline", round_index=0, outline=outline),
+            ChapterStageArtifact(stage_type="draft", round_index=0, content="初稿"),
+            ChapterStageArtifact(stage_type="audit", round_index=1, critique=critique1),
+            ChapterStageArtifact(
+                stage_type="revise", round_index=1,
+                guidance={"revision_strategy": "润色"}, content="修订稿",
+            ),
+            ChapterStageArtifact(stage_type="audit", round_index=2, critique=critique2),
+        ]
+        artifacts = ChapterArtifacts(
+            chapter_index=0, content="修订稿", revision_rounds=1, stages=stages,
+        )
+
+        volume_panel.add_chapter_artifacts(1, artifacts, "测试章")
+
+        # 找到刚添加的 QGroupBox
+        groups = volume_panel.findChildren(QGroupBox)
+        target_group = None
+        for g in groups:
+            if "第 1 章" in g.title():
+                target_group = g
+                break
+        assert target_group is not None, "未找到第 1 章 QGroupBox"
+
+        # 验证有 5 个"查看完整内容"按钮
+        buttons = target_group.findChildren(QPushButton)
+        view_buttons = [b for b in buttons if b.text() == "查看完整内容"]
+        assert len(view_buttons) == 5
+
+        # 验证阶段标签依次为：细纲/初稿/审计①/修改正文①/审计②
+        labels = target_group.findChildren(QLabel)
+        stage_labels = [l.text() for l in labels if l.text().startswith("阶段 ")]
+        assert len(stage_labels) == 5
+        assert "细纲" in stage_labels[0]
+        assert "初稿" in stage_labels[1]
+        assert "审计①" in stage_labels[2]
+        assert "修改正文①" in stage_labels[3]
+        assert "审计②" in stage_labels[4]
+
+    def test_add_chapter_artifacts_legacy_fallback(self, volume_panel) -> None:
+        """stages 为空时回退到三块摘要布局（细纲摘要/评审摘要/正文摘要）。"""
+        outline = Outline(continuation_goals="目标", foreshadowing_plan="无", scenes=[])
+        critique = CritiqueReport(summary="通过", issues=[], passed=True)
+        artifacts = ChapterArtifacts(
+            chapter_index=0,
+            outline=outline,
+            critique=critique,
+            final_critique=critique,
+            content="正文内容",
+            revision_rounds=0,
+            stages=[],  # 空 stages 触发 legacy 回退
+        )
+
+        volume_panel.add_chapter_artifacts(1, artifacts, "旧数据章")
+
+        # 找到 QGroupBox
+        groups = volume_panel.findChildren(QGroupBox)
+        target_group = None
+        for g in groups:
+            if "第 1 章" in g.title():
+                target_group = g
+                break
+        assert target_group is not None
+
+        # 验证三块摘要 QLabel 存在
+        labels = target_group.findChildren(QLabel)
+        label_texts = [l.text() for l in labels]
+        assert any("细纲摘要" in t for t in label_texts)
+        assert any("评审摘要" in t for t in label_texts)
+        assert any("正文摘要" in t for t in label_texts)
+        # 不应有"查看完整内容"按钮
+        buttons = target_group.findChildren(QPushButton)
+        view_buttons = [b for b in buttons if b.text() == "查看完整内容"]
+        assert len(view_buttons) == 0

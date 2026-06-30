@@ -317,10 +317,22 @@ def test_basic_assembly_structure(result: TestResult) -> None:
         "main 提示中 {{target_words}} 宏应被替换为 2000",
     )
 
-    # 验证 4：worldInfoBefore 是单条 system 消息（两条 before 条目用 \n 拼接）
+    # 验证 4：worldInfoBefore 是单条 system 消息（按 category 分组为 Markdown）
     # messages[1] 应该是 worldInfoBefore
     result.assert_equal(messages[1]["role"], "system", "worldInfoBefore 消息 role 应为 system")
     wi_before_content = messages[1]["content"]
+    result.assert_true(
+        "# 上下文条目（自动提取）" in wi_before_content,
+        "worldInfoBefore 应含 Markdown 标题行",
+    )
+    result.assert_true(
+        "## 人物" in wi_before_content,
+        "worldInfoBefore 应含 characters 分组标题（## 人物）",
+    )
+    result.assert_true(
+        "## 地点" in wi_before_content,
+        "worldInfoBefore 应含 locations 分组标题（## 地点）",
+    )
     result.assert_true(
         "主角张三" in wi_before_content,
         "worldInfoBefore 应包含第一条 before 条目内容",
@@ -331,7 +343,7 @@ def test_basic_assembly_structure(result: TestResult) -> None:
     )
     result.assert_true(
         "\n" in wi_before_content,
-        "worldInfoBefore 多条目应用 \\n 拼接为单条消息",
+        "worldInfoBefore 多条目应为多行 Markdown",
     )
 
     # 验证 5：历史消息为 user role，格式为 {title}\n{content}
@@ -340,6 +352,14 @@ def test_basic_assembly_structure(result: TestResult) -> None:
     # 末尾应为 worldInfoAfter
     last_msg = messages[-1]
     result.assert_equal(last_msg["role"], "system", "最后一条消息 role 应为 system（worldInfoAfter）")
+    result.assert_true(
+        "## 剧情状态" in last_msg["content"],
+        "worldInfoAfter 应含 plot_state 分组标题（## 剧情状态）",
+    )
+    result.assert_true(
+        "## 风格" in last_msg["content"],
+        "worldInfoAfter 应含 style 分组标题（## 风格）",
+    )
     result.assert_true(
         "当前剧情" in last_msg["content"],
         "worldInfoAfter 应包含 after 条目内容",

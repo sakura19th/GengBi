@@ -29,6 +29,7 @@ chatHistory 消息 role：
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -60,6 +61,19 @@ SINGLE_CHAPTER_MIN_TOKENS: int = 500
 
 # 渲染后容忍超限比例（10%）
 RENDER_TOLERANCE_RATIO: float = 0.1
+
+# ContextEntry category 中文标签映射（worldInfoBefore/After 格式化用）
+_CATEGORY_LABELS: dict[str, str] = {
+    "characters": "人物",
+    "locations": "地点",
+    "events": "事件",
+    "style": "风格",
+    "plot_state": "剧情状态",
+    "relationships": "关系",
+    "atmosphere": "氛围",
+    "foreshadowing": "伏笔",
+    "other": "其他",
+}
 
 
 @dataclass
@@ -342,6 +356,8 @@ class PromptAssembler:
         chapter_metadata: dict[str, Any] | None = None,
         user_input: str = "",
         lookback_chapters: int = 0,
+        world_ontology: Any = None,
+        protagonist_profile: Any = None,
     ) -> AssembleResult:
         """组装提示词 messages。
 
@@ -371,6 +387,7 @@ class PromptAssembler:
         macro_context = self._build_macro_context(
             current_chapter, novel_profile, target_words,
             project_id=project_id, chapter_metadata=chapter_metadata,
+            world_ontology=world_ontology, protagonist_profile=protagonist_profile,
         )
 
         # M3: 构建模板渲染上下文（局部变量，线程安全；供 _process_content 使用）
@@ -573,6 +590,8 @@ class PromptAssembler:
         target_words: int,
         project_id: str = "",
         chapter_metadata: dict[str, Any] | None = None,
+        world_ontology: Any = None,
+        protagonist_profile: Any = None,
     ) -> MacroContext:
         """构建宏替换上下文。"""
         # 获取章节标题和序号
@@ -596,13 +615,41 @@ class PromptAssembler:
             except Exception as e:
                 logger.debug("获取变量函数失败（ST 宏 setvar/getvar 将不可用）: %s", e)
 
-        return MacroContext.from_novel_profile(
+        ctx = MacroContext.from_novel_profile(
             novel_profile=novel_profile,
             chapter_title=chapter_title,
             chapter_index=chapter_index,
             target_words=target_words,
             variable_funcs=variable_funcs,
         )
+        # 注入 world_ontology / protagonist_profile 到 extra（供 {{world_ontology}} / {{protagonist_profile}} 宏替换）
+        if world_ontology is not None:
+            try:
+                if hasattr(world_ontology, "model_dump"):
+                    ctx.extra["world_ontology"] = json.dumps(
+                        world_ontology.model_dump(mode="json"),
+                        ensure_ascii=False, indent=2,
+                    )
+                elif isinstance(world_ontology, dict):
+                    ctx.extra["world_ontology"] = json.dumps(
+                        world_ontology, ensure_ascii=False, indent=2,
+                    )
+            except Exception as e:
+                logger.debug("world_ontology 序列化失败: %s", e)
+        if protagonist_profile is not None:
+            try:
+                if hasattr(protagonist_profile, "model_dump"):
+                    ctx.extra["protagonist_profile"] = json.dumps(
+                        protagonist_profile.model_dump(mode="json"),
+                        ensure_ascii=False, indent=2,
+                    )
+                elif isinstance(protagonist_profile, dict):
+                    ctx.extra["protagonist_profile"] = json.dumps(
+                        protagonist_profile, ensure_ascii=False, indent=2,
+                    )
+            except Exception as e:
+                logger.debug("protagonist_profile 序列化失败: %s", e)
+        return ctx
 
     def _stage1_sort(
         self, preset: WritingPreset
@@ -1039,8 +1086,9 @@ class PromptAssembler:
     ) -> dict[str, Any] | None:
         """构建 worldInfoBefore/After marker 的注入消息。
 
-        所有条目内容（无论 role）用 ``\\n`` 拼接为单一字符串，
-        作为单条 system role 消息。无条目时返回 None（跳过 marker）。
+        过滤 ``position == before/after`` 且 content 非空的条目，按 category 分组
+        格式化为 Markdown（镜像 ``_build_context_entries_text`` 风格），作为单条
+        system role 消息。无条目时返回 None（跳过 marker）。
 
         Args:
             entries: 所有上下文条目
@@ -1060,7 +1108,21 @@ class PromptAssembler:
         # 按 order 升序排序
         filtered.sort(key=lambda e: e.order)
 
-        # 用 \n 拼接所有内容
-        combined = "\n".join(e.content for e in filtered)
+        # 按 category 分组，组内按 order 升序
+        grouped: dict[str, list[ContextEntry]] = {}
+        for entry in filtered:
+            category = entry.category or "other"
+            grouped.setdefault(category, []).append(entry)
 
+        # 构造 Markdown：首行标题，每 category 一段，每条列表项
+        lines: list[str] = ["# 上下文条目（自动提取）"]
+        for category in sorted(grouped.keys()):
+            entries_in_group = sorted(grouped[category], key=lambda e: e.order)
+            label = _CATEGORY_LABELS.get(category, category)
+            lines.append(f"## {label}")
+            for entry in entries_in_group:
+                keys = f"（{','.join(entry.key)}）" if entry.key else ""
+                lines.append(f"- {entry.content}{keys}")
+
+        combined = "\n".join(lines)
         return {"role": "system", "content": combined}

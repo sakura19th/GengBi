@@ -17,7 +17,7 @@ VALID_ANALYSIS_DEPTHS: frozenset[str] = frozenset(
     {"light", "standard", "thorough", "exhaustive"}
 )
 
-# 默认大纲审计维度（7 维度）
+# 默认大纲审计维度（10 维度：原 8 维度 + 主角一致性 + 世界观一致性）
 DEFAULT_AUDIT_DIMENSIONS: list[str] = [
     "consistency",
     "pacing",
@@ -26,6 +26,9 @@ DEFAULT_AUDIT_DIMENSIONS: list[str] = [
     "coherence",
     "foreshadowing",
     "characters",
+    "style",
+    "protagonist_consistency",  # 主角一致性（一票否决：score ≤ 4 时整体 passed=false）
+    "worldview_consistency",  # 世界观一致性（严格给分：违反底层世界观元规则时 score ≤ 3）
 ]
 
 # ChapterPlan.plot_role 合法值（起承转合 + 高潮 + 过渡）
@@ -227,6 +230,30 @@ class OutlineAuditReport(BaseModel):
     revised_outline: VolumeOutline | None = None
 
 
+class ChapterStageArtifact(BaseModel):
+    """单章节单阶段产物。
+
+    按阶段次序记录每一步产物，供 UI 按次序展示与完整内容查看。
+
+    字段说明：
+    - ``stage_type``：阶段类型（"outline"=细纲 / "draft"=初稿 / "audit"=审计 / "revise"=修改正文）
+    - ``round_index``：轮次索引（outline/draft=0；audit/revise 按轮次 1,2,3...）
+    - ``content``：正文（draft/revise 阶段保存重写后正文）
+    - ``critique``：审计报告（audit 阶段）
+    - ``guidance``：修订指导 dict（revise 阶段）
+    - ``outline``：细纲对象（outline 阶段）
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    stage_type: str = ""
+    round_index: int = 0
+    content: str = ""
+    critique: CritiqueReport | None = None
+    guidance: dict[str, Any] | None = None
+    outline: Outline | None = None
+
+
 class ChapterArtifacts(BaseModel):
     """单章节产物聚合。
 
@@ -236,7 +263,8 @@ class ChapterArtifacts(BaseModel):
     - ``critique``：首次验证报告
     - ``final_critique``：最终验证报告
     - ``revision_rounds``：修订轮次
-    - ``content``：章节正文
+    - ``content``：章节正文（最终版）
+    - ``stages``：完整阶段产物序列（细纲/初稿/审计①/修改正文①/审计②/...），向后兼容默认空列表
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -247,6 +275,7 @@ class ChapterArtifacts(BaseModel):
     final_critique: CritiqueReport | None = None
     revision_rounds: int = 0
     content: str = ""
+    stages: list[ChapterStageArtifact] = Field(default_factory=list)
 
 
 class VolumeArtifacts(BaseModel):
@@ -316,6 +345,7 @@ class VolumeRunConfig(BaseModel):
             "after_volume_outline": False,
             "before_audit": True,
             "after_audit": False,
+            "after_chapter": False,
         }
     )
 

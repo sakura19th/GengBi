@@ -15,11 +15,12 @@ from novelforge.models.volume import VolumeArtifacts
 
 
 class Continuation(BaseModel):
-    """续写版本（swipe）。
+    """续写版本（链式续写节点）。
 
     记录单次续写的完整快照，含参数、预设、正则、上下文、提示词等。
     字段说明：
-    - ``is_accepted``：是否被接受（接受后追加到章节正文），默认 false
+    - ``is_accepted``：是否被接受（接受后作为链上节点出现在章节列表），默认 false
+    - ``parent_id``：父续写 id（None=直接挂在章节下；否则挂在另一续写下，形成链）
     - ``status``：完成状态（completed/interrupted/failed）
     - ``created_by``：创建方式（continuation=续写/rewrite=重写）
     - ``parameters_snapshot``：生成参数快照（temperature/max_tokens 等）
@@ -37,6 +38,7 @@ class Continuation(BaseModel):
     content: str = ""
     model: str = ""
     is_accepted: bool = False
+    parent_id: str | None = None
     status: str = "completed"
     created_by: str = "continuation"
     parameters_snapshot: dict[str, Any] = Field(default_factory=dict)
@@ -57,9 +59,12 @@ class Chapter(BaseModel):
     - ``index``：章节序号，从 0 开始
     - ``content``：正文（存文件系统，内存中按需加载）
     - ``word_count``：字数
-    - ``continuations``：续写版本列表，空列表表示尚无续写
+    - ``continuations``：续写节点列表（链式模型，未接受的不在章节列表显示）
     - ``metadata``：元数据（notes、tags 等）
-    - 不包含 ``is_original`` 字段（续写内容追加到章节末尾，不创建新章节）
+
+    续写采用链式模型：续写内容存于 ``Continuation.content``，不合并到
+    ``chapter.content``；``Continuation.parent_id`` 形成续写链
+    （None=章节直接子节点，否则挂在另一续写下）。
 
     章节正文作为消息注入 chatHistory 时，role 统一为 user，
     content 格式为 ``{章节标题}\\n{章节正文}``。

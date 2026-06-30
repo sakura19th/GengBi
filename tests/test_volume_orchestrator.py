@@ -45,6 +45,7 @@ from novelforge.models import (
     VolumeOutline,
     VolumeRunConfig,
     WritingPreset,
+    ChapterStageArtifact,
 )
 from novelforge.services.llm_client import StreamChunk
 from novelforge.services.volume_orchestrator import VolumeOrchestrator
@@ -695,11 +696,11 @@ def test_outline_audit_degradation() -> None:
 
 
 def test_chapter_loop_n2() -> None:
-    """逐章循环 N=2，每章细纲→写作→验证通过，无修订。"""
+    """逐章循环 N=2，每章细纲→写作→验证通过，无修订（关闭修订开关）。"""
     config = VolumeRunConfig(chapter_count=2)
     config.enable_outline_audit = False
     config.enable_chapter_verify = True
-    config.enable_chapter_revise = True
+    config.enable_chapter_revise = False
     orchestrator = make_orchestrator(config=config)
     fake = FakeLLMClient()
     fake.add_chat_response(DEEP_ANALYSIS_JSON)
@@ -1214,6 +1215,13 @@ def test_deep_analysis_chunked_incremental() -> None:
     fake.add_chat_response(
         json.dumps({"structure_position": "中段"}, ensure_ascii=False)
     )
+    # 【信息汇总】环节：返回整合后的 DeepAnalysis（两字段均存在）
+    fake.add_chat_response(
+        json.dumps(
+            {"tone": "紧张", "structure_position": "中段"},
+            ensure_ascii=False,
+        )
+    )
     # 卷大纲
     fake.add_chat_response(make_volume_outline_json(2))
     # 逐章：细纲 + 写作（2 章）
@@ -1233,18 +1241,23 @@ def test_deep_analysis_chunked_incremental() -> None:
     assert cont.volume_artifacts is not None
     da = cont.volume_artifacts.deep_analysis
     assert da is not None
-    # 合并后两个字段都存在（分别来自两块）
+    # 汇总后两个字段都存在（来自【信息汇总】LLM 整合结果）
     assert da.tone == "紧张"
     assert da.structure_position == "中段"
 
-    # chat 调用顺序：da_chunk1(0) → da_chunk2(1) → volume_outline(2) → ch1_outline(3) → ch2_outline(4)
-    # 验证深度分析阶段调用了 >=2 次 chat_completion
-    assert len(fake.chat_messages_history) >= 3
+    # chat 调用顺序：da_chunk1(0) → da_chunk2(1) → da_merge(2) → volume_outline(3) → ch1_outline(4) → ch2_outline(5)
+    # 验证深度分析阶段调用了 >=3 次 chat_completion（含信息汇总）
+    assert len(fake.chat_messages_history) >= 4
     # 第2块（索引1）的 messages 应含第1块的分析内容（增量携带）
     chunk2_messages = fake.chat_messages_history[1]
     chunk2_prompt = chunk2_messages[0]["content"]
     assert "已有分析内容" in chunk2_prompt
     assert "紧张" in chunk2_prompt  # 第1块的 tone 值被携带
+    # 信息汇总（索引2）的 messages 应含程序化合并后的 DeepAnalysis
+    merge_messages = fake.chat_messages_history[2]
+    merge_prompt = merge_messages[0]["content"]
+    assert "紧张" in merge_prompt  # 合并后的 deep_analysis JSON 被注入
+    assert "中段" in merge_prompt
 
 
 # ===== 18. _current_chapter_index 计算（Task 5）=====
@@ -1441,3 +1454,517 @@ def test_volume_outline_uses_lookback_text() -> None:
     assert "# 续写点前文内容" in outline_prompt
     # 无残留占位符
     assert "{{chapters_text}}" not in outline_prompt
+
+
+# ===== 11. 动态前文窗口（含本卷已生成章节）=====
+
+
+def test_dynamic_lookback_includes_generated_chapters() -> None:
+    """动态前文：第 2 章 verify prompt 含第 1 章本卷已生成正文。"""
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = True
+    config.enable_chapter_revise = False
+    orchestrator = make_orchestrator(config=config)
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 第 1 章：细纲 + 写作 + 验证（通过）
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="VOL_CH1_UNIQUE_MARK")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    # 第 2 章：细纲 + 写作 + 验证（通过）
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="VOL_CH2_UNIQUE_MARK")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    orchestrator._client = fake
+
+    run_async(orchestrator._async_run())
+
+    # chat_messages_history 顺序：
+    # [0]=deep_analysis, [1]=volume_outline,
+    # [2]=ch1_outline, [3]=ch1_verify, [4]=ch2_outline, [5]=ch2_verify
+    assert len(fake.chat_messages_history) >= 6
+    ch2_verify_messages = fake.chat_messages_history[5]
+    ch2_verify_prompt = ch2_verify_messages[0]["content"]
+    # 第 2 章 verify 的前文应含第 1 章本卷已生成正文（动态前文）
+    assert "VOL_CH1_UNIQUE_MARK" in ch2_verify_prompt
+    # 标签应为"最近 10 章正文参考（含本卷已生成）"
+    assert "最近 10 章正文参考（含本卷已生成）" in ch2_verify_prompt
+
+
+def test_dynamic_lookback_window_size() -> None:
+    """动态前文窗口恰好 10 章：15 章前文 + 生成第 6 章，lookback=chapters[10:20]。"""
+    config = VolumeRunConfig(chapter_count=6)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = True
+    config.enable_chapter_revise = False
+    # 预置 15 章，current_chapter 为第 15 章（index=14）
+    pre_chapters = [
+        make_chapter(
+            index=i, chapter_id=f"pre_{i}",
+            title=f"前文第{i+1}章", content=f"PRE_MARK_{i:02d}",
+        )
+        for i in range(15)
+    ]
+    orchestrator = make_orchestrator(
+        config=config, chapters=pre_chapters, current_chapter=pre_chapters[-1],
+    )
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(6))
+    # 6 章：每章细纲 + 写作 + 验证（通过）
+    for _ in range(6):
+        fake.add_chat_response(make_outline_json())
+        fake.add_stream_response([StreamChunk(content=f"VOL_MARK_{_}")])
+        fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    orchestrator._client = fake
+
+    run_async(orchestrator._async_run())
+
+    # 第 6 章 verify 是最后一个 chat 调用
+    ch6_verify_messages = fake.chat_messages_history[-1]
+    ch6_verify_prompt = ch6_verify_messages[0]["content"]
+    # 生成第 6 章时 self.chapters 长度 = 15+5=20，lookback=chapters[10:20]
+    # 含索引 10-14（前文第 11-15 章）+ 索引 15-19（本卷第 1-5 章）
+    assert "PRE_MARK_10" in ch6_verify_prompt
+    assert "PRE_MARK_14" in ch6_verify_prompt
+    assert "VOL_MARK_0" in ch6_verify_prompt
+    assert "VOL_MARK_4" in ch6_verify_prompt
+    # 不含索引 9（窗口外）
+    assert "PRE_MARK_09" not in ch6_verify_prompt
+    assert "PRE_MARK_00" not in ch6_verify_prompt
+
+
+# ===== 12. 每章后暂停点（after_chapter）=====
+
+
+def test_after_chapter_checkpoint_approved() -> None:
+    """after_chapter 开启：每章后触发暂停点，approve 后继续下一章。"""
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = False
+    config.enable_chapter_revise = False
+    config.checkpoints["after_chapter"] = True
+    orchestrator = make_orchestrator(config=config)
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(2))
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第一章正文")])
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第二章正文")])
+    orchestrator._client = fake
+
+    finished_results: list[Continuation] = []
+    orchestrator.finished.connect(lambda cont: finished_results.append(cont))
+
+    async def run() -> None:
+        checkpoint_count = 0
+        checkpoint_event = asyncio.Event()
+
+        def on_checkpoint(name, payload):
+            nonlocal checkpoint_count
+            if name == "after_chapter":
+                checkpoint_count += 1
+                checkpoint_event.set()
+
+        orchestrator.checkpoint_reached.connect(on_checkpoint)
+
+        task = asyncio.create_task(orchestrator._async_run())
+        # 第 1 章后暂停
+        await asyncio.wait_for(checkpoint_event.wait(), timeout=5.0)
+        checkpoint_event.clear()
+        assert checkpoint_count == 1
+        orchestrator.resume({"action": "approve"})
+        # 第 2 章后暂停
+        await asyncio.wait_for(checkpoint_event.wait(), timeout=5.0)
+        assert checkpoint_count == 2
+        orchestrator.resume({"action": "approve"})
+        await task
+
+    run_async(run())
+
+    assert len(finished_results) == 1
+    assert finished_results[0].volume_artifacts is not None
+
+
+def test_after_chapter_checkpoint_rejected_then_approved() -> None:
+    """after_chapter reject 后重写，再次暂停 approve 通过。"""
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = False
+    config.enable_chapter_revise = False
+    config.checkpoints["after_chapter"] = True
+    orchestrator = make_orchestrator(config=config)
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 第 1 章：细纲 + 写作
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第一章初稿")])
+    # reject 后：_run_chapter_revise(user_guidance) 短路无 LLM 调用，
+    # _run_chapter_writing 流式重写（无 verify，跳过验证环节）
+    fake.add_stream_response([StreamChunk(content="第一章重写稿")])
+    # 第 2 章：细纲 + 写作
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第二章正文")])
+    orchestrator._client = fake
+
+    finished_results: list[Continuation] = []
+    orchestrator.finished.connect(lambda cont: finished_results.append(cont))
+
+    async def run() -> None:
+        checkpoint_count = 0
+        checkpoint_event = asyncio.Event()
+
+        def on_checkpoint(name, payload):
+            nonlocal checkpoint_count
+            if name == "after_chapter":
+                checkpoint_count += 1
+                checkpoint_event.set()
+
+        orchestrator.checkpoint_reached.connect(on_checkpoint)
+
+        task = asyncio.create_task(orchestrator._async_run())
+        # 第 1 章第一次暂停：reject 触发重写
+        await asyncio.wait_for(checkpoint_event.wait(), timeout=5.0)
+        checkpoint_event.clear()
+        assert checkpoint_count == 1
+        orchestrator.resume({"action": "reject", "feedback": "加强冲突"})
+        # 第 1 章第二次暂停：approve 通过，进入第 2 章
+        await asyncio.wait_for(checkpoint_event.wait(), timeout=5.0)
+        checkpoint_event.clear()
+        assert checkpoint_count == 2
+        orchestrator.resume({"action": "approve"})
+        # 第 2 章暂停：approve 通过
+        await asyncio.wait_for(checkpoint_event.wait(), timeout=5.0)
+        assert checkpoint_count == 3
+        orchestrator.resume({"action": "approve"})
+        await task
+
+    run_async(run())
+
+    assert len(finished_results) == 1
+    cont = finished_results[0]
+    assert cont.volume_artifacts is not None
+    # 第 1 章最终正文为重写稿（reject 后重写覆盖初稿）
+    assert "重写稿" in cont.content
+
+
+def test_after_chapter_disabled_no_checkpoint() -> None:
+    """after_chapter 未开启：逐章循环无 checkpoint_reached emit。"""
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = False
+    config.enable_chapter_revise = False
+    # after_chapter 默认 False
+    orchestrator = make_orchestrator(config=config)
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(2))
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第一章正文")])
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第二章正文")])
+    orchestrator._client = fake
+
+    checkpoints: list[tuple[str, object]] = []
+    orchestrator.checkpoint_reached.connect(lambda n, p: checkpoints.append((n, p)))
+
+    run_async(orchestrator._async_run())
+
+    # 无任何 after_chapter 检查点触发
+    after_chapter_count = sum(1 for n, _ in checkpoints if n == "after_chapter")
+    assert after_chapter_count == 0
+
+
+# ===== 13. 文风审计维度 =====
+
+
+def test_style_audit_dimension() -> None:
+    """文风审计维度：DEFAULT_AUDIT_DIMENSIONS 含 style，审计模板含 style 定义。"""
+    from novelforge.models.volume import DEFAULT_AUDIT_DIMENSIONS
+    from novelforge.utils.paths import get_volume_prompt_path, load_text_resource
+
+    assert "style" in DEFAULT_AUDIT_DIMENSIONS
+    assert len(DEFAULT_AUDIT_DIMENSIONS) == 10
+
+    audit_template = load_text_resource(get_volume_prompt_path("outline_audit"))
+    assert "style" in audit_template
+    assert "文风" in audit_template
+
+
+# ===== 14. 强制修改流程：stages 捕获 =====
+
+
+def test_forced_revise_flow_stages_captured() -> None:
+    """强制修改流程：审计①通过后仍触发 1 轮修改，stages 含 5 阶段。
+
+    流程：outline → draft → audit①(passed=True) → revise① → audit②
+    断言：revision_rounds==1，content 为修订稿（非初稿），stages 次序与类型正确。
+    """
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = True
+    config.enable_chapter_revise = True
+    config.max_revise_rounds_per_chapter = 1
+    orchestrator = make_orchestrator(config=config)
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 第 1 章：细纲 + 写作(初稿) + 验证(通过) + 强制修改(修订指导 + 修订稿 + 验证通过)
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="初稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    fake.add_chat_response(REVISE_JSON)
+    fake.add_stream_response([StreamChunk(content="修订稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    # 第 2 章：细纲 + 写作 + 验证(通过) + 强制修改(修订指导 + 修订稿 + 验证通过)
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第2章初稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    fake.add_chat_response(REVISE_JSON)
+    fake.add_stream_response([StreamChunk(content="第2章修订稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    orchestrator._client = fake
+
+    finished_results: list[Continuation] = []
+    orchestrator.finished.connect(lambda cont: finished_results.append(cont))
+
+    run_async(orchestrator._async_run())
+
+    assert len(finished_results) == 1
+    cont = finished_results[0]
+    artifacts = cont.volume_artifacts
+    assert artifacts is not None
+    assert len(artifacts.chapter_artifacts) == 2
+    ca = artifacts.chapter_artifacts[0]
+
+    # 强制修改触发 1 轮，content 为修订稿
+    assert ca.revision_rounds == 1
+    assert ca.content == "修订稿"
+    assert ca.final_critique is not None
+    assert ca.final_critique.passed is True
+
+    # stages 次序：outline, draft, audit①, revise①, audit②
+    assert len(ca.stages) == 5
+    expected_types = ["outline", "draft", "audit", "revise", "audit"]
+    assert [s.stage_type for s in ca.stages] == expected_types
+    # audit① round_index=1（passed=True），audit② round_index=2
+    assert ca.stages[2].round_index == 1
+    assert ca.stages[2].critique is not None
+    assert ca.stages[2].critique.passed is True
+    assert ca.stages[3].round_index == 1
+    assert ca.stages[3].content == "修订稿"
+    assert ca.stages[4].round_index == 2
+    assert ca.stages[4].critique is not None
+    assert ca.stages[4].critique.passed is True
+
+
+def test_forced_revise_max_2_auto_loop() -> None:
+    """max=2 时：审计①通过→强制修改→审计②失败→自动修改→审计③失败→退出。
+
+    断言：revision_rounds==2，stages 含 2 个 revise + 3 个 audit。
+    """
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = True
+    config.enable_chapter_revise = True
+    config.max_revise_rounds_per_chapter = 2
+    orchestrator = make_orchestrator(config=config)
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 第 1 章：细纲 + 写作(初稿) + 验证(通过)
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="初稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    # 强制修改轮1：修订指导 + 修订稿 + 验证(失败)
+    fake.add_chat_response(REVISE_JSON)
+    fake.add_stream_response([StreamChunk(content="修订1")])
+    fake.add_chat_response(CRITIQUE_FAILED_JSON)
+    # 自动修改轮2：修订指导 + 修订稿 + 验证(失败)
+    fake.add_chat_response(REVISE_JSON)
+    fake.add_stream_response([StreamChunk(content="修订2")])
+    fake.add_chat_response(CRITIQUE_FAILED_JSON)
+    # 第 2 章：细纲 + 写作 + 验证(通过) + 强制修改(修订指导 + 修订稿 + 验证通过)
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第2章初稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    fake.add_chat_response(REVISE_JSON)
+    fake.add_stream_response([StreamChunk(content="第2章修订稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    orchestrator._client = fake
+
+    finished_results: list[Continuation] = []
+    orchestrator.finished.connect(lambda cont: finished_results.append(cont))
+
+    run_async(orchestrator._async_run())
+
+    assert len(finished_results) == 1
+    cont = finished_results[0]
+    ca = cont.volume_artifacts.chapter_artifacts[0]
+    assert ca.revision_rounds == 2
+    assert ca.content == "修订2"
+    assert ca.final_critique is not None
+    assert ca.final_critique.passed is False
+
+    # stages: outline, draft, audit①, revise①, audit②, revise②, audit③
+    assert len(ca.stages) == 7
+    expected_types = ["outline", "draft", "audit", "revise", "audit", "revise", "audit"]
+    assert [s.stage_type for s in ca.stages] == expected_types
+    # 3 个 audit 的 round_index 依次为 1, 2, 3
+    audits = [s for s in ca.stages if s.stage_type == "audit"]
+    assert len(audits) == 3
+    assert [s.round_index for s in audits] == [1, 2, 3]
+    # 2 个 revise 的 round_index 依次为 1, 2
+    revises = [s for s in ca.stages if s.stage_type == "revise"]
+    assert len(revises) == 2
+    assert [s.round_index for s in revises] == [1, 2]
+
+
+# ===== 15. 动态前文排除插入点后章节 =====
+
+
+def test_dynamic_lookback_excludes_post_insertion_chapters() -> None:
+    """从中间续写时，动态前文窗口排除插入点后原章节。
+
+    构造 20 章项目从第 10 章续写（current_chapter_index=9，
+    _original_chapter_count=20），生成 2 章。断言第 2 章 verify 的
+    前文窗口含 ch1..ch10 + 第 1 章生成内容，不含 ch11..ch20 标记。
+    """
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = True
+    config.enable_chapter_revise = False
+    # 预置 20 章，current_chapter 为第 10 章（index=9）
+    pre_chapters = [
+        make_chapter(
+            index=i, chapter_id=f"ch_{i}",
+            title=f"第{i + 1}章",
+            content=f"PRE_MARK_{i:02d}" if i < 10 else f"POST_MARK_{i:02d}",
+        )
+        for i in range(20)
+    ]
+    orchestrator = make_orchestrator(
+        config=config, chapters=pre_chapters, current_chapter=pre_chapters[9],
+    )
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 2 章：每章细纲 + 写作 + 验证（通过）
+    for _ in range(2):
+        fake.add_chat_response(make_outline_json())
+        fake.add_stream_response([StreamChunk(content=f"VOL_MARK_{_}")])
+        fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    orchestrator._client = fake
+
+    run_async(orchestrator._async_run())
+
+    # 第 2 章 verify 是最后一个 chat 调用
+    ch2_verify_messages = fake.chat_messages_history[-1]
+    ch2_verify_prompt = ch2_verify_messages[0]["content"]
+    # 应含插入点前章节（PRE_MARK_00..PRE_MARK_09）与第 1 章生成内容（VOL_MARK_0）
+    assert "PRE_MARK_09" in ch2_verify_prompt
+    assert "VOL_MARK_0" in ch2_verify_prompt
+    # 不应含插入点后原章节（POST_MARK_10..POST_MARK_19）
+    assert "POST_MARK_10" not in ch2_verify_prompt
+    assert "POST_MARK_19" not in ch2_verify_prompt
+
+
+# ===== 16. after_chapter reject 的 stages 捕获 =====
+
+
+def test_stages_capture_after_chapter_reject() -> None:
+    """after_chapter reject 后 stages 含 reject 的 revise+audit，round_index 续接。
+
+    流程：outline → draft → audit①(passed) → revise①(forced) → audit②(passed)
+          → after_chapter reject → revise②(用户反馈) → audit③(passed) → approve
+    断言：stages 含 7 阶段，reject 的 revise round_index=2（续接非重置）。
+    """
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = True
+    config.enable_chapter_revise = True
+    config.max_revise_rounds_per_chapter = 1
+    config.checkpoints["after_chapter"] = True
+    orchestrator = make_orchestrator(config=config)
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 第 1 章：细纲 + 写作(初稿) + 验证(通过) + 强制修改(修订指导 + 修订稿 + 验证通过)
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="初稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    fake.add_chat_response(REVISE_JSON)
+    fake.add_stream_response([StreamChunk(content="修订稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    # reject 后：_run_chapter_revise(user_guidance) 短路无 LLM 调用，
+    # _run_chapter_writing 流式重写 + 验证(通过)
+    fake.add_stream_response([StreamChunk(content="重写稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    # 第 2 章：细纲 + 写作 + 验证(通过) + 强制修改(修订指导 + 修订稿 + 验证通过)
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第2章初稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    fake.add_chat_response(REVISE_JSON)
+    fake.add_stream_response([StreamChunk(content="第2章修订稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    orchestrator._client = fake
+
+    finished_results: list[Continuation] = []
+    orchestrator.finished.connect(lambda cont: finished_results.append(cont))
+
+    async def run() -> None:
+        checkpoint_count = 0
+        checkpoint_event = asyncio.Event()
+
+        def on_checkpoint(name, payload):
+            nonlocal checkpoint_count
+            if name == "after_chapter":
+                checkpoint_count += 1
+                checkpoint_event.set()
+
+        orchestrator.checkpoint_reached.connect(on_checkpoint)
+
+        task = asyncio.create_task(orchestrator._async_run())
+        # 第 1 章第 1 次暂停：reject
+        await asyncio.wait_for(checkpoint_event.wait(), timeout=5.0)
+        checkpoint_event.clear()
+        assert checkpoint_count == 1
+        orchestrator.resume({"action": "reject", "feedback": "加强冲突"})
+        # 第 1 章第 2 次暂停：approve
+        await asyncio.wait_for(checkpoint_event.wait(), timeout=5.0)
+        checkpoint_event.clear()
+        assert checkpoint_count == 2
+        orchestrator.resume({"action": "approve"})
+        # 第 2 章暂停：approve
+        await asyncio.wait_for(checkpoint_event.wait(), timeout=5.0)
+        checkpoint_event.clear()
+        assert checkpoint_count == 3
+        orchestrator.resume({"action": "approve"})
+        await task
+
+    run_async(run())
+
+    assert len(finished_results) == 1
+    cont = finished_results[0]
+    ca = cont.volume_artifacts.chapter_artifacts[0]
+    # reject 后重写，最终 content 为重写稿
+    assert ca.content == "重写稿"
+    assert ca.revision_rounds == 2  # 强制1 + reject1
+
+    # stages: outline, draft, audit①, revise①, audit②, revise②, audit③
+    assert len(ca.stages) == 7
+    expected_types = ["outline", "draft", "audit", "revise", "audit", "revise", "audit"]
+    assert [s.stage_type for s in ca.stages] == expected_types
+    # reject 的 revise round_index=2（续接强制修改的 round_index=1）
+    reject_revise = ca.stages[5]
+    assert reject_revise.stage_type == "revise"
+    assert reject_revise.round_index == 2
+    assert reject_revise.content == "重写稿"
+    # reject 后的 audit round_index=3
+    reject_audit = ca.stages[6]
+    assert reject_audit.stage_type == "audit"
+    assert reject_audit.round_index == 3

@@ -98,6 +98,31 @@ def test_phase_deep_analysis_placeholders() -> None:
     )
 
 
+def test_phase_deep_analysis_merge_template_exists() -> None:
+    """深度分析【信息汇总】阶段模板文件存在且非空。"""
+    path = get_volume_prompt_path("deep_analysis_merge")
+    assert path.exists(), f"模板文件不存在: {path}"
+    content = load_text_resource(path)
+    assert content, "模板内容为空"
+    assert "DeepAnalysis" in content or "深度分析" in content or "整合" in content
+
+
+def test_phase_deep_analysis_merge_placeholders() -> None:
+    """深度分析汇总模板包含 {{deep_analysis}} + 6 个 profile 宏占位符。"""
+    content = load_text_resource(get_volume_prompt_path("deep_analysis_merge"))
+    expected = [
+        "{{title}}",
+        "{{author}}",
+        "{{protagonist}}",
+        "{{synopsis}}",
+        "{{world_setting}}",
+        "{{writing_style}}",
+        "{{deep_analysis}}",
+    ]
+    for ph in expected:
+        assert ph in content, f"深度分析汇总模板缺少占位符: {ph}"
+
+
 def test_phase_volume_outline_placeholders() -> None:
     """卷大纲模板包含 6 个预期占位符，且前文段落标签为 # 续写点前文内容。"""
     content = load_text_resource(get_volume_prompt_path("volume_outline"))
@@ -222,7 +247,7 @@ def test_volume_outline_chapter_count_injection() -> None:
 
 
 def test_outline_audit_dimensions_definition() -> None:
-    """审计模板含 7 维度定义（consistency/pacing/engagement/structure/coherence/foreshadowing/characters）。"""
+    """审计模板含 8 维度定义（consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style）。"""
     content = load_text_resource(get_volume_prompt_path("outline_audit"))
     expected_dimensions = [
         "consistency",
@@ -232,15 +257,16 @@ def test_outline_audit_dimensions_definition() -> None:
         "coherence",
         "foreshadowing",
         "characters",
+        "style",
     ]
     for dim in expected_dimensions:
         assert dim in content, f"审计模板缺少维度定义: {dim}"
 
 
 def test_outline_audit_dimensions_count() -> None:
-    """审计模板至少出现 7 个维度关键词（覆盖定义区与字段说明区）。"""
+    """审计模板至少出现 8 个维度关键词（覆盖定义区与字段说明区）。"""
     content = load_text_resource(get_volume_prompt_path("outline_audit"))
-    dims = ["consistency", "pacing", "engagement", "structure", "coherence", "foreshadowing", "characters"]
+    dims = ["consistency", "pacing", "engagement", "structure", "coherence", "foreshadowing", "characters", "style"]
     for d in dims:
         # 每个维度至少出现 1 次
         assert content.count(d) >= 1, f"维度 {d} 在模板中未出现"
@@ -322,6 +348,8 @@ def test_macro_replacement_deep_analysis() -> None:
         "{{chapters_text}}": "## 第一章\n\n飞船起飞了。\n\n## 第二章\n\n抵达火星。",
         "{{analysis_depth}}": "thorough",
         "{{max_analysis_entries}}": "30",
+        "{{world_ontology}}": '{"existential_topology": {}}',
+        "{{protagonist_profile}}": '{"basic_anchors": {}}',
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -346,6 +374,8 @@ def test_macro_replacement_volume_outline() -> None:
         "{{target_words_per_chapter}}": "2500",
         "{{pacing_speed}}": "medium",
         "{{context_entries}}": "## 人物\n- 主角林晨",
+        "{{world_ontology}}": '{"existential_topology": {}}',
+        "{{protagonist_profile}}": '{"basic_anchors": {}}',
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -368,6 +398,8 @@ def test_macro_replacement_outline_audit() -> None:
         "{{round_idx}}": "1",
         "{{total_rounds}}": "2",
         "{{audit_focus}}": "第3章人物动机不一致",
+        "{{world_ontology}}": '{"existential_topology": {}}',
+        "{{protagonist_profile}}": '{"basic_anchors": {}}',
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -390,6 +422,8 @@ def test_macro_replacement_chapter_outline() -> None:
         "{{user_input}}": "续写第一章",
         "{{pacing_speed}}": "medium",
         "{{context_entries}}": "## 人物\n- 主角林晨",
+        "{{world_ontology}}": '{"existential_topology": {}}',
+        "{{protagonist_profile}}": '{"basic_anchors": {}}',
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)

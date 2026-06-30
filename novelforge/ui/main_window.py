@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections import OrderedDict
 from datetime import datetime
@@ -47,13 +48,14 @@ from novelforge.core.regex_engine import RegexEngine
 from novelforge.core.template_engine import TemplateEngine
 from novelforge.core.token_counter import TokenCounter
 from novelforge.core.variable_store import VariableStore
-from novelforge.models import Chapter, Continuation, VolumeRunConfig
+from novelforge.models import Chapter, Continuation, ProtagonistProfile, VolumeRunConfig
 from novelforge.services.chapter_service import ChapterOperation, ChapterService
 from novelforge.services.context_extractor import ContextExtractor, ExtractResult
 from novelforge.services.continuation_worker import (
     ContinuationWorker,
     assemble_simple_messages,
 )
+from novelforge.services.audit_worker import AuditWorker
 from novelforge.services.exporter import (
     export_full_txt,
     export_project_backup,
@@ -61,6 +63,7 @@ from novelforge.services.exporter import (
 )
 from novelforge.services.history_service import HistoryService
 from novelforge.services.importer import TxtImporter
+from novelforge.services.ontology_extractor import OntologyExtractor
 from novelforge.services.preset_service import PresetService
 from novelforge.services.regex_service import RegexService
 from novelforge.services.storage_service import StorageService
@@ -69,6 +72,7 @@ from novelforge.services.worldbook_service import WorldBookService
 from novelforge.ui.chapter_editor import ChapterEditor
 from novelforge.ui.chapter_list import ChapterListWidget
 from novelforge.ui.checkpoint_dialog import CheckpointDialog
+from novelforge.ui.chapter_confirm_dialog import ChapterConfirmDialog
 from novelforge.ui.continuation_panel import ContinuationPanel
 from novelforge.ui.debug_prompt_dialog import DebugPromptDialog
 from novelforge.ui.dialogs import PrivacyDialog
@@ -81,7 +85,8 @@ from novelforge.ui.regex_manager import RegexManager
 from novelforge.ui.settings_dialog import SettingsDialog
 from novelforge.ui.template_editor import TemplateEditor
 from novelforge.ui.worldbook_manager import WorldBookManager
-from novelforge.utils.paths import get_theme_path
+from novelforge.ui.audit_dialog import AuditDialog
+from novelforge.utils.paths import get_agent_prompt_path, get_theme_path, load_text_resource
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +178,9 @@ class MainWindow(QMainWindow):
     _extract_chunk_received = Signal(str)   # 流式提取 chunk（跨线程）
     _extract_done = Signal(object)          # 流式提取完成（跨线程）
     _extract_batch_done = Signal(list, int, int)  # 流式提取批次完成（跨线程）
+    _ontology_chunk_received = Signal(str)  # 世界观提取 chunk（跨线程）
+    _ontology_done = Signal(object, str)    # 世界观提取完成（跨线程）：ontology, status
+    _ontology_batch_done = Signal(int, int) # 世界观提取批次完成（跨线程）
 
     def __init__(self, config_manager: ConfigManager) -> None:
         """初始化主窗口。
@@ -196,8 +204,8 @@ class MainWindow(QMainWindow):
         self.regex_engine = RegexEngine()
         self.variable_store = VariableStore(config_manager.get_storage_path())
         self.template_engine = TemplateEngine(variable_store=self.variable_store)
-        # 确保全局正则文件存在
-        self.regex_service.ensure_global_scripts_exist()
+        # 确保全局正则含默认脚本（首次运行注入，已存在则不覆盖）
+        self.regex_service.ensure_default_scripts_exist()
         # 提示词组装器（注入正则引擎与模板引擎）
         self.prompt_assembler = PromptAssembler(
             self.token_counter,
@@ -209,10 +217,16 @@ class MainWindow(QMainWindow):
         self.context_extractor = ContextExtractor(
             self.storage_service, config_manager, token_counter=self.token_counter
         )
+        # 世界观底层提取器（全文拆分分析提取 7 维度 WorldOntology）
+        self.ontology_extractor = OntologyExtractor(
+            self.storage_service, config_manager, token_counter=self.token_counter
+        )
         # M4: 当前续写使用的上下文条目（提取后存入，供 worker 快照使用）
         self._current_context_entries: list = []
         # 按章节绑定的上下文条目内存缓存（chapter_id -> entries），使用 OrderedDict 实现 LRU 淘汰
         self._context_entries_by_chapter: OrderedDict[str, list] = OrderedDict()
+        # 主角形象档案内存 LRU 缓存（chapter_id -> ProtagonistProfile），跟随章节缓存
+        self._protagonist_profile_by_chapter: OrderedDict[str, ProtagonistProfile] = OrderedDict()
         # 正在提取的章节 ID（用于提取完成时正确归档）
         self._extracting_chapter_id: str | None = None
         # M5: 历史日志服务
@@ -240,12 +254,25 @@ class MainWindow(QMainWindow):
         self._current_chapters: list[Chapter] = []
         self._undo_stack: list[ChapterOperation] = []
         self._continuation_worker: ContinuationWorker | None = None
+        # 单章续写审计 worker（与 _continuation_worker 互斥使用）
+        self._audit_worker: AuditWorker | None = None
+        self._audit_dialog: AuditDialog | None = None
         # Volume 卷级多章节续写编排器（与 _continuation_worker 互斥使用）
         self._volume_orchestrator: VolumeOrchestrator | None = None
         # Volume 已完成卷阶段列表（用于进度指示器）
         self._volume_completed_phases: list[str] = []
 
-        self.setWindowTitle("赓笔 - 小说续写器")
+        # 章节切换状态保留：按章节缓冲流式输出，切回时恢复"接收中"态
+        # 后台 worker 不因章节切换停止；UI 仅在当前章节 == 操作发起章节时更新
+        self._extract_stream_text_by_chapter: dict[str, str] = {}  # 上下文提取流式文本
+        self._ontology_extracting: bool = False  # 世界观提取中标志（项目级）
+        self._ontology_stream_text: str = ""  # 世界观提取流式文本缓冲
+        self._continuation_chapter_id: str | None = None  # 单章续写发起章节
+        self._continuation_stream_text_by_chapter: dict[str, str] = {}  # 续写流式文本
+        self._audit_chapter_id: str | None = None  # 审计发起章节
+        self._volume_chapter_id: str | None = None  # 卷续写发起章节（插入点）
+
+        self.setWindowTitle("赕笔 - 小说续写器")
         self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         # 设置初始窗口大小为足以容纳所有面板的宽度
         self.resize(1600, 900)
@@ -266,6 +293,10 @@ class MainWindow(QMainWindow):
         self._extract_chunk_received.connect(self._on_extract_chunk_received)
         self._extract_done.connect(self._on_extract_done)
         self._extract_batch_done.connect(self._on_extract_batch_done)
+        # 连接世界观提取信号（跨线程安全传递）
+        self._ontology_chunk_received.connect(self._on_ontology_chunk_received)
+        self._ontology_done.connect(self._on_ontology_done)
+        self._ontology_batch_done.connect(self._on_ontology_batch_done)
 
         # 创建菜单栏
         self._setup_menu_bar()
@@ -358,7 +389,6 @@ class MainWindow(QMainWindow):
         """连接组件信号。"""
         # 章节列表信号
         self.chapter_list.chapter_selected.connect(self._on_chapter_selected)
-        self.chapter_list.swipe_selected.connect(self._on_swipe_selected)
         self.chapter_list.rename_requested.connect(self._on_rename_chapter)
         self.chapter_list.delete_requested.connect(self._on_delete_chapter)
         self.chapter_list.merge_requested.connect(self._on_merge_chapter)
@@ -381,6 +411,8 @@ class MainWindow(QMainWindow):
         )
         self.continuation_panel.edit_then_accept.connect(self._on_edit_then_accept)
         self.continuation_panel.compare_swipes.connect(self._on_compare_swipes)
+        self.continuation_panel.delete_continuation.connect(self._on_delete_continuation)
+        self.continuation_panel.audit_continuation.connect(self._on_audit_continuation)
         self.continuation_panel.view_prompt_requested.connect(
             self._on_view_continuation_prompt
         )
@@ -409,6 +441,8 @@ class MainWindow(QMainWindow):
         context_panel.cancel_requested.connect(self._on_cancel_extraction)
         context_panel.entries_changed.connect(self._on_context_entries_changed)
         context_panel.extract_requested.connect(self._on_extract_requested)
+        context_panel.extract_ontology_requested.connect(self._on_extract_ontology_requested)
+        context_panel.view_ontology_requested.connect(self._on_view_ontology_requested)
         context_panel.view_extract_prompt_requested.connect(
             self._on_view_extract_prompt
         )
@@ -984,9 +1018,33 @@ class MainWindow(QMainWindow):
         # 保存当前项目状态
         self._save_current_state()
 
-        project = self.storage_service.load_project(project_id)
+        project = None
+        try:
+            project = self.storage_service.load_project(project_id)
+        except Exception as e:
+            logger.error("加载项目元数据失败: %s", e, exc_info=True)
+            # 项目元数据加载失败，仍尝试加载章节（章节表独立）
+            project = None
+
         if project is None:
-            QMessageBox.warning(self, "错误", f"项目不存在: {project_id}")
+            # 仍尝试加载章节列表（避免项目元数据损坏导致章节不可见）
+            try:
+                chapters = self.storage_service.list_chapters(project_id)
+                self._current_chapters = chapters
+                self.chapter_list.set_chapters(chapters)
+                self._current_project_id = project_id
+                self._context_entries_by_chapter.clear()
+                self._current_context_entries = []
+                self.chapter_editor.clear()
+                self.continuation_panel.clear_output()
+                QMessageBox.warning(
+                    self, "警告",
+                    f"项目元数据加载失败，但已加载 {len(chapters)} 章。\n"
+                    f"建议检查数据库或重新导入项目。"
+                )
+            except Exception as e2:
+                logger.error("加载章节也失败: %s", e2, exc_info=True)
+                QMessageBox.critical(self, "错误", f"项目加载失败: {e2}")
             return
 
         self._current_project_id = project_id
@@ -1075,13 +1133,20 @@ class MainWindow(QMainWindow):
         # 更新章节列表中的章节数据（含 continuations）
         self._update_chapter_in_list(chapter)
 
-        # 显示续写信息
-        if chapter.continuations:
-            # 显示最后一个 swipe
-            last_swipe = chapter.continuations[-1]
-            self.continuation_panel.set_current_swipe(last_swipe, chapter.continuations)
+        # 续写流式态恢复优先：若切回的是续写发起章节且仍有缓冲，恢复"接收中"态
+        if (self._continuation_chapter_id == chapter.id
+                and chapter.id in self._continuation_stream_text_by_chapter):
+            buffered = self._continuation_stream_text_by_chapter[chapter.id]
+            self.continuation_panel.restore_streaming_state(buffered)
+            self.chapter_editor.set_streaming_locked(True)
         else:
-            self.continuation_panel.clear_output()
+            # 否则：正常显示已有 swipe 或清空输出
+            if chapter.continuations:
+                # 显示最后一个 swipe
+                last_swipe = chapter.continuations[-1]
+                self.continuation_panel.set_current_swipe(last_swipe, chapter.continuations)
+            else:
+                self.continuation_panel.clear_output()
 
         # 切换后：加载新章节的上下文提取结果
         self._load_context_entries_for_chapter(chapter)
@@ -1091,10 +1156,27 @@ class MainWindow(QMainWindow):
     def _load_context_entries_for_chapter(self, chapter: Chapter) -> None:
         """加载章节对应的上下文提取结果（内存缓存优先，其次 SQLite 缓存）。
 
+        状态恢复优先级：若该章节正在提取（切回发起章节），或世界观提取进行中
+        （项目级，任意章节切回均恢复），优先恢复"接收中" UI 态，跳过缓存加载。
+
         Args:
             chapter: 新选中的章节
         """
         context_panel = self.continuation_panel.context_preview_panel
+
+        # 0. 优先恢复提取中状态（切回发起章节）
+        if (self._extracting_chapter_id == chapter.id
+                and chapter.id in self._extract_stream_text_by_chapter):
+            context_panel.restore_extraction_state(
+                self._extract_stream_text_by_chapter[chapter.id], is_ontology=False
+            )
+            return
+        # 世界观提取为项目级，任意章节切回均恢复
+        if self._ontology_extracting and self._ontology_stream_text:
+            context_panel.restore_extraction_state(
+                self._ontology_stream_text, is_ontology=True
+            )
+            return
 
         # 1. 内存缓存优先
         if chapter.id in self._context_entries_by_chapter:
@@ -1135,6 +1217,17 @@ class MainWindow(QMainWindow):
                     if len(self._context_entries_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
                         oldest = next(iter(self._context_entries_by_chapter))
                         del self._context_entries_by_chapter[oldest]
+                    # 从 SQLite 缓存恢复主角形象档案到内存 LRU
+                    cached_protagonist = cached_data.get("protagonist_profile")
+                    if cached_protagonist:
+                        try:
+                            profile = ProtagonistProfile.model_validate(cached_protagonist)
+                            self._protagonist_profile_by_chapter[chapter.id] = profile
+                            self._protagonist_profile_by_chapter.move_to_end(chapter.id)
+                            if len(self._protagonist_profile_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+                                self._protagonist_profile_by_chapter.popitem(last=False)
+                        except Exception as e:
+                            logger.warning("从缓存恢复 protagonist_profile 失败: %s", e)
                     self._current_context_entries = entries
                     context_panel.load_entries_for_chapter(entries, meta=meta)
                     return
@@ -1144,23 +1237,6 @@ class MainWindow(QMainWindow):
         # 3. 无缓存：清空面板
         self._current_context_entries = []
         context_panel.load_entries_for_chapter([], meta=None)
-
-    def _on_swipe_selected(self, chapter_id: str, continuation_id: str) -> None:
-        """swipe 被选中。"""
-        chapter = self.storage_service.load_chapter(chapter_id)
-        if chapter is None:
-            return
-
-        self._current_chapter = chapter
-
-        # 找到选中的 swipe
-        for cont in chapter.continuations:
-            if cont.id == continuation_id:
-                self.continuation_panel.set_current_swipe(cont, chapter.continuations)
-                self._set_status_message(
-                    f"查看续写: 模型={cont.model}, 字数={len(cont.content)}"
-                )
-                break
 
     def _on_chapter_saved(self) -> None:
         """章节已保存。"""
@@ -1439,10 +1515,11 @@ class MainWindow(QMainWindow):
         try:
             user_input = self.continuation_panel.get_user_input()
             lookback_chapters = params.get("lookback_chapters", 0)
+            chapter_for_assemble = self._current_chapter
             assemble_result = self.prompt_assembler.assemble(
                 preset=preset,
                 chapters=self._current_chapters,
-                current_chapter=self._current_chapter,
+                current_chapter=chapter_for_assemble,
                 context_entries=entries,
                 model=model,
                 max_context=max_context,
@@ -1453,6 +1530,10 @@ class MainWindow(QMainWindow):
                 chapter_metadata=chapter_metadata,
                 user_input=user_input,
                 lookback_chapters=lookback_chapters,
+                world_ontology=project.world_ontology if project else None,
+                protagonist_profile=self._protagonist_profile_by_chapter.get(
+                    self._current_chapter.id if self._current_chapter else ""
+                ),
             )
         except Exception as e:
             logger.error("提示词组装失败: %s", e, exc_info=True)
@@ -1523,6 +1604,11 @@ class MainWindow(QMainWindow):
                 pass  # 信号可能已断开或对象已删除
             old_worker.deleteLater()
 
+        # 记录续写发起章节（完成回调用此 id 归档，避免章节切换后存错章节）
+        self._continuation_chapter_id = self._current_chapter.id
+        # 初始化按章节缓冲的流式输出（切回时恢复 UI）
+        self._continuation_stream_text_by_chapter[self._continuation_chapter_id] = ""
+
         # 创建并启动 worker（M4: 注入 extracted_context_snapshot）
         self._continuation_worker = ContinuationWorker(
             base_url=endpoint["base_url"],
@@ -1544,8 +1630,9 @@ class MainWindow(QMainWindow):
             parent=self,
         )
 
+        # chunk 路由：按章节缓冲，仅当前章节匹配时更新 UI（避免污染新章节视图）
         self._continuation_worker.chunk_received.connect(
-            self.continuation_panel.append_chunk
+            self._on_continuation_chunk_received
         )
         self._continuation_worker.token_count.connect(
             lambda count: self._token_count_label.setText(
@@ -1749,6 +1836,8 @@ class MainWindow(QMainWindow):
             preset_id=preset.id,
             preset_snapshot=preset.model_dump(mode="json"),
             chapter_id=self._current_chapter.id,
+            world_ontology=project.world_ontology if project else None,
+            protagonist_profile=self._protagonist_profile_by_chapter.get(self._current_chapter.id),
             parent=self,
         )
         self._volume_orchestrator.debug_mode = self._debug_mode
@@ -1785,6 +1874,9 @@ class MainWindow(QMainWindow):
         self._volume_orchestrator.prompt_debug_requested.connect(
             self._on_prompt_debug_requested
         )
+
+        # 记录卷续写发起章节（完成回调用此 id 定位插入点，避免切换章节后插入错误位置）
+        self._volume_chapter_id = self._current_chapter.id if self._current_chapter else None
 
         self._volume_orchestrator.start()
         self._set_status_message("卷续写中...")
@@ -1885,10 +1977,26 @@ class MainWindow(QMainWindow):
 
         Args:
             checkpoint_name: 检查点名
-                （after_deep_analysis/after_volume_outline/before_audit/after_audit）
-            payload: 检查点产物（DeepAnalysis/VolumeOutline）
+                （after_deep_analysis/after_volume_outline/before_audit/after_audit/after_chapter）
+            payload: 检查点产物（DeepAnalysis/VolumeOutline/章节正文 dict）
         """
         panel = self.continuation_panel.volume_panel
+
+        if checkpoint_name == "after_chapter":
+            # after_chapter：弹出 ChapterConfirmDialog 显示正文，用户选择通过/不通过
+            chapter_index = payload.get("chapter_index", 0) if isinstance(payload, dict) else 0
+            content = payload.get("content", "") if isinstance(payload, dict) else ""
+            dialog = ChapterConfirmDialog(chapter_index, content, self)
+            dialog.exec()
+            action, feedback = dialog.get_result()
+            if action == "approve":
+                self._volume_orchestrator.resume({"action": "approve"})
+            elif action == "reject":
+                self._volume_orchestrator.resume({"action": "reject", "feedback": feedback})
+            else:  # cancel
+                panel.hide_continue_button()
+                self._volume_orchestrator.stop()
+            return
 
         if checkpoint_name == "before_audit":
             # before_audit：面板内嵌输入，不弹对话框
@@ -1975,14 +2083,30 @@ class MainWindow(QMainWindow):
         写作阶段的 model 与 messages 快照，更新 _continuation_prompt_messages
         后再记录历史日志。
 
-        每章作为新章节插入到当前章节之后（后续章节 index 后移）。
+        每章作为新章节插入到发起章节之后（后续章节 index 后移）。
+        使用 _volume_chapter_id 定位插入点，避免用户切换章节后插入错误位置。
         VolumePanel 流式区显示完整卷正文（保持现有行为）。
         """
         from novelforge.services.storage_service import _generate_id
         from novelforge.models import Chapter
 
-        self.continuation_panel.stop_streaming()
-        self.chapter_editor.set_streaming_locked(False)
+        # 使用发起章节 id 定位插入点（加载章节对象取 index/project_id）
+        volume_cid = self._volume_chapter_id
+        origin_chapter = None
+        if volume_cid:
+            origin_chapter = self.storage_service.load_chapter(volume_cid)
+        # 回退：若未记录或加载失败，用当前章节
+        if origin_chapter is None and self._current_chapter:
+            origin_chapter = self._current_chapter
+        on_origin_chapter = bool(
+            self._current_chapter
+            and origin_chapter
+            and self._current_chapter.id == origin_chapter.id
+        )
+
+        if on_origin_chapter:
+            self.continuation_panel.stop_streaming()
+            self.chapter_editor.set_streaming_locked(False)
 
         # 从 volume orchestrator 获取写作阶段的 model 与 messages 快照
         if self._volume_orchestrator is not None:
@@ -1993,11 +2117,11 @@ class MainWindow(QMainWindow):
                 self._volume_orchestrator.get_writing_messages()
             )
 
-        # 拆分每章为新章节，插入到当前章节之后
-        if self._current_chapter and continuation.volume_artifacts:
+        # 拆分每章为新章节，插入到发起章节之后
+        if origin_chapter and continuation.volume_artifacts:
             chapter_artifacts = continuation.volume_artifacts.chapter_artifacts
-            current_index = self._current_chapter.index
-            project_id = self._current_chapter.project_id
+            current_index = origin_chapter.index
+            project_id = origin_chapter.project_id
 
             # 从终稿大纲获取章节标题（按 chapter_index 匹配）
             final_outline = continuation.volume_artifacts.final_outline
@@ -2009,7 +2133,7 @@ class MainWindow(QMainWindow):
             # 计算新章节数量
             n_new = sum(1 for ca in chapter_artifacts if ca.content)
             if n_new > 0:
-                # 将当前章节之后的所有章节 index 后移 n_new 位
+                # 将发起章节之后的所有章节 index 后移 n_new 位
                 later_chapters = [
                     ch for ch in self._current_chapters
                     if ch.index > current_index
@@ -2055,8 +2179,9 @@ class MainWindow(QMainWindow):
             error_message="",
         )
 
-        # 清理 volume orchestrator 引用
+        # 清理 volume orchestrator 引用与发起章节标记
         self._volume_orchestrator = None
+        self._volume_chapter_id = None
 
         self._set_status_message(
             f"卷续写完成: {len(continuation.content)} 字, 状态: {continuation.status}"
@@ -2364,58 +2489,96 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_extract_chunk_received(self, text: str) -> None:
-        """流式提取 chunk 回调（UI 线程执行，由 Signal 触发）。"""
-        context_panel = self.continuation_panel.context_preview_panel
-        context_panel.update_extraction_progress(text)
+        """流式提取 chunk 回调：按章节缓冲，仅当前章节匹配时更新 UI。
+
+        后台 worker 不因章节切换停止；chunk 总是缓冲到发起章节，
+        UI 仅在用户停留在发起章节时更新，避免污染新章节视图。
+        """
+        cid = self._extracting_chapter_id
+        if cid is None:
+            return
+        # 总是缓冲到发起章节
+        self._extract_stream_text_by_chapter[cid] = (
+            self._extract_stream_text_by_chapter.get(cid, "") + text
+        )
+        # 仅当用户停留在发起章节时更新 UI
+        if self._current_chapter and self._current_chapter.id == cid:
+            self.continuation_panel.context_preview_panel.update_extraction_progress(text)
 
     @Slot(list, int, int)
     def _on_extract_batch_done(
         self, entries: list, batch_idx: int, total_batches: int
     ) -> None:
-        """流式提取批次完成回调（UI 线程执行，由 Signal 触发）。
+        """流式提取批次完成回调：按章节守卫，仅当前章节匹配时增量更新 UI。
 
-        多批次提取时，每批完成后增量更新 UI 显示。
+        多批次提取时，每批完成后增量更新 UI 显示。批次条目仍由
+        `_on_extract_done` 归档到正确章节（_extracting_chapter_id）。
         """
-        context_panel = self.continuation_panel.context_preview_panel
-        context_panel.update_entries_incremental(entries, batch_idx, total_batches)
+        cid = self._extracting_chapter_id
+        if cid is None:
+            return
+        # 仅当用户停留在发起章节时更新 UI
+        if self._current_chapter and self._current_chapter.id == cid:
+            context_panel = self.continuation_panel.context_preview_panel
+            context_panel.update_entries_incremental(entries, batch_idx, total_batches)
 
     def _on_extract_done(self, result) -> None:
-        """流式提取完成回调（在 UI 线程执行）。"""
+        """流式提取完成回调（在 UI 线程执行）。
+
+        使用发起时记录的 _extracting_chapter_id 归档，避免用户切换章节后
+        覆盖当前章节；仅当用户仍停留在发起章节时刷新 UI。
+        """
         context_panel = self.continuation_panel.context_preview_panel
+        # 按章节绑定存储（使用提取开始时记录的章节 ID）
+        chapter_id = self._extracting_chapter_id or (
+            self._current_chapter.id if self._current_chapter else None
+        )
+        on_origin_chapter = bool(
+            self._current_chapter and self._current_chapter.id == chapter_id
+        )
 
         if result.status == "completed":
-            context_panel.finish_extraction(
-                entries=result.entries,
-                elapsed_seconds=result.elapsed_seconds,
-                token_usage=result.token_usage,
-                from_cache=result.from_cache,
-                batch_count=result.batch_count,
-            )
-            self._current_context_entries = result.entries
-            # 按章节绑定存储（使用提取开始时记录的章节 ID）
-            chapter_id = self._extracting_chapter_id or (
-                self._current_chapter.id if self._current_chapter else None
-            )
+            if on_origin_chapter:
+                context_panel.finish_extraction(
+                    entries=result.entries,
+                    elapsed_seconds=result.elapsed_seconds,
+                    token_usage=result.token_usage,
+                    from_cache=result.from_cache,
+                    batch_count=result.batch_count,
+                )
+                self._current_context_entries = result.entries
+            # 归档到发起章节（无论用户是否切走）
             if chapter_id:
                 self._context_entries_by_chapter[chapter_id] = list(result.entries)
                 # 容量上限检查：淘汰最旧条目
                 if len(self._context_entries_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
                     oldest = next(iter(self._context_entries_by_chapter))
                     del self._context_entries_by_chapter[oldest]
-            self._extracting_chapter_id = None
+                # 捕获主角形象档案到内存 LRU 缓存（跟随章节，仅反映至当前章节状态）
+                if result.protagonist_profile:
+                    self._protagonist_profile_by_chapter[chapter_id] = result.protagonist_profile
+                    self._protagonist_profile_by_chapter.move_to_end(chapter_id)
+                    if len(self._protagonist_profile_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+                        self._protagonist_profile_by_chapter.popitem(last=False)
             self._set_status_message(
                 f"上下文提取完成: {len(result.entries)} 条 "
                 f"(耗时 {result.elapsed_seconds:.2f}s)"
             )
         elif result.status == "skipped":
-            context_panel.cancel_extraction()
-            self._current_context_entries = []
-            self._extracting_chapter_id = None
+            if on_origin_chapter:
+                context_panel.cancel_extraction()
+            if on_origin_chapter:
+                self._current_context_entries = []
             self._set_status_message("无前文可提取")
         else:
-            context_panel.fail_extraction(result.error)
-            self._extracting_chapter_id = None
+            if on_origin_chapter:
+                context_panel.fail_extraction(result.error)
             self._set_status_message(f"上下文提取失败: {result.error}")
+
+        # 清理缓冲与发起章节标记（所有分支均清理）
+        if chapter_id:
+            self._extract_stream_text_by_chapter.pop(chapter_id, None)
+        self._extracting_chapter_id = None
 
     def _on_view_continuation_prompt(self) -> None:
         """展示续写组装后的完整提示词。"""
@@ -2522,6 +2685,208 @@ class MainWindow(QMainWindow):
             [{"role": "user", "content": prompt}],
         )
 
+    def _on_extract_ontology_requested(self) -> None:
+        """提取世界观底层（非阻塞，流式进度）。
+
+        用户在上下文预览面板点击"提取世界观底层"按钮时触发。
+        全文拆分分析提取 7 维度 WorldOntology，固化到 Project.world_ontology。
+        """
+        if not self._current_chapter:
+            QMessageBox.warning(self, "提示", "请先选择章节")
+            return
+
+        # 确保章节正文已加载（list_chapters 只加载元数据）
+        self._ensure_chapter_contents()
+
+        endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            self._on_open_settings()
+            return
+
+        if not self._current_chapters:
+            QMessageBox.warning(self, "提示", "无章节可提取世界观")
+            return
+
+        # 加载项目对象
+        project = None
+        if self._current_project_id:
+            project = self.storage_service.load_project(self._current_project_id)
+        if project is None:
+            QMessageBox.warning(self, "提示", "项目加载失败")
+            return
+
+        # 读取 token_limit 配置（与上下文提取一致）
+        config = self.continuation_panel.context_preview_panel.get_lookback_config()
+        token_limit_override = config.get("token_limit", 0)
+
+        # 禁用按钮防止重复点击 + 启动流式进度展示
+        context_panel = self.continuation_panel.context_preview_panel
+        # 标记世界观提取进行中（项目级，章节切换后切回任意章节均恢复 UI）
+        self._ontology_extracting = True
+        self._ontology_stream_text = ""
+        context_panel.start_ontology_extraction()
+        self._set_status_message("正在提取世界观底层（流式）...")
+
+        # 非阻塞提交：用 run_coroutine_threadsafe + 回调
+        from novelforge.services.async_runner import AsyncLoopRunner
+
+        runner = AsyncLoopRunner.instance()
+        loop = runner._loop
+
+        def on_chunk(text: str) -> None:
+            self._ontology_chunk_received.emit(text)
+
+        def on_batch_complete(batch_idx: int, total_batches: int) -> None:
+            self._ontology_batch_done.emit(batch_idx, total_batches)
+
+        future = asyncio.run_coroutine_threadsafe(
+            self.ontology_extractor.extract_ontology_streaming(
+                project=project,
+                chapters=self._current_chapters,
+                token_limit=token_limit_override,
+                on_chunk=on_chunk,
+                on_batch_complete=on_batch_complete,
+            ),
+            loop,
+        )
+
+        def on_done(fut) -> None:
+            try:
+                ontology, status = fut.result()
+                self._ontology_done.emit(ontology, status)
+            except Exception as e:
+                logger.error("世界观提取异常: %s", e, exc_info=True)
+                self._ontology_done.emit(None, f"failed: {e}")
+
+        future.add_done_callback(on_done)
+
+    @Slot(str)
+    def _on_ontology_chunk_received(self, text: str) -> None:
+        """世界观提取 chunk 回调：缓冲，面板处于提取态时更新 UI。
+
+        世界观为项目级，章节切换后面板 _is_extracting 被重置；切回任意章节时
+        由 _load_context_entries_for_chapter 调 restore_extraction_state 恢复，
+        此处仅当面板仍处于提取态时更新 UI，避免污染新章节视图。
+        """
+        self._ontology_stream_text += text
+        context_panel = self.continuation_panel.context_preview_panel
+        if context_panel._is_extracting:
+            context_panel.update_ontology_progress(text)
+
+    @Slot(int, int)
+    def _on_ontology_batch_done(self, batch_idx: int, total_batches: int) -> None:
+        """世界观提取批次完成回调（UI 线程执行，由 Signal 触发）。"""
+        context_panel = self.continuation_panel.context_preview_panel
+        context_panel.update_ontology_batch(batch_idx, total_batches)
+        self._set_status_message(
+            f"世界观提取进度: 第 {batch_idx}/{total_batches} 批次完成"
+        )
+
+    @Slot(object, str)
+    def _on_ontology_done(self, ontology, status: str) -> None:
+        """世界观提取完成回调：清理状态标记，面板处于提取态时更新 UI。"""
+        context_panel = self.continuation_panel.context_preview_panel
+        # 面板处于提取态（用户未切走，或切回发起章节已恢复）时更新 UI
+        panel_active = context_panel._is_extracting
+
+        if ontology is None:
+            if panel_active:
+                context_panel.fail_ontology_extraction(status)
+            self._set_status_message(f"世界观提取失败: {status}")
+            QMessageBox.critical(self, "提取失败", f"世界观提取失败: {status}")
+        else:
+            # 协程内已通过 await 异步存储直连保存（避免重入死锁）
+            if panel_active:
+                context_panel.finish_ontology_extraction(status)
+            if "保存失败" in status:
+                self._set_status_message(f"世界观提取完成但保存失败: {status}")
+                QMessageBox.warning(self, "保存警告", f"世界观已提取但保存失败: {status}")
+            else:
+                self._set_status_message("世界观底层提取完成，已固化到项目")
+
+        # 清理状态标记与缓冲（所有分支均清理）
+        self._ontology_extracting = False
+        self._ontology_stream_text = ""
+
+    def _on_view_ontology_requested(self) -> None:
+        """查看已提取的世界观底层。"""
+        if not self._current_project_id:
+            QMessageBox.warning(self, "提示", "请先选择项目")
+            return
+        try:
+            project = self.storage_service.load_project(self._current_project_id)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"加载项目失败: {e}")
+            return
+        if project is None or project.world_ontology is None:
+            QMessageBox.information(
+                self, "提示", "尚未提取世界观底层，请先点击「提取世界观底层」按钮"
+            )
+            return
+        # 格式化展示：兼容 dict 与 WorldOntology 实例
+        wo = project.world_ontology
+        if isinstance(wo, dict):
+            try:
+                from novelforge.models.ontology import WorldOntology
+                wo = WorldOntology.model_validate(wo)
+            except Exception:
+                pass
+        text = self._format_ontology_for_display(wo)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("世界观底层")
+        dialog.resize(800, 600)
+        layout = QVBoxLayout(dialog)
+        edit = QPlainTextEdit()
+        edit.setReadOnly(True)
+        edit.setPlainText(text)
+        layout.addWidget(edit)
+        btn = QPushButton("关闭")
+        btn.clicked.connect(dialog.accept)
+        layout.addWidget(btn)
+        dialog.exec()
+
+    @staticmethod
+    def _format_ontology_for_display(wo) -> str:
+        """格式化 WorldOntology 为可读文本（按 7 维度分节）。"""
+        import json as _json
+        labels = {
+            "existential_topology": "存在拓扑",
+            "causal_architecture": "因果架构",
+            "spatio_temporal_ontology": "时空本体论",
+            "information_epistemology": "信息与认识论",
+            "axiological_foundation": "价值论基础",
+            "becoming_dynamics": "生成动力学",
+            "narrative_ontology": "叙事本体论",
+        }
+        lines = []
+        # 元信息
+        extracted_at = getattr(wo, "extracted_at", None) or (
+            wo.get("extracted_at") if isinstance(wo, dict) else None
+        )
+        if extracted_at:
+            lines.append(f"提取时间: {extracted_at}")
+        src_range = getattr(wo, "source_chapter_range", None) or (
+            wo.get("source_chapter_range") if isinstance(wo, dict) else None
+        )
+        if src_range:
+            r = src_range
+            lines.append(f"来源章节范围: 第{r[0]}章 - 第{r[1]}章")
+        if lines:
+            lines.append("")
+        # 7 维度
+        for dim, label in labels.items():
+            value = getattr(wo, dim, None) if hasattr(wo, dim) else (
+                wo.get(dim) if isinstance(wo, dict) else None
+            )
+            lines.append(f"【{label}】({dim})")
+            if value:
+                lines.append(_json.dumps(value, ensure_ascii=False, indent=2))
+            else:
+                lines.append("（空）")
+            lines.append("")
+        return "\n".join(lines)
+
     def _show_prompt_dialog(
         self, title: str, messages: list[dict], token_usage: dict | None = None
     ) -> None:
@@ -2609,27 +2974,56 @@ class MainWindow(QMainWindow):
             self._volume_orchestrator.stop()
             self._set_status_message("正在停止卷续写流程...")
 
-    def _on_continuation_finished(self, continuation: Continuation) -> None:
-        """续写完成（单次续写流程）。"""
-        self.continuation_panel.stop_streaming()
-        self.chapter_editor.set_streaming_locked(False)
+    def _on_continuation_chunk_received(self, chunk: str) -> None:
+        """续写 chunk 路由：按章节缓冲，仅当前章节匹配时更新 UI。
 
-        # 保存 swipe
-        if self._current_chapter:
-            self.chapter_service.storage.save_continuation(
-                continuation, self._current_chapter.id
-            )
-            # 更新当前章节的 continuations
-            chapter = self.storage_service.load_chapter(self._current_chapter.id)
-            if chapter:
-                self._current_chapter = chapter
-                self._update_chapter_in_list(chapter)
-
-        # 显示 swipe
-        all_swipes = (
-            self._current_chapter.continuations if self._current_chapter else []
+        后台 worker 不因章节切换停止；chunk 总是缓冲到发起章节，
+        UI 仅在用户停留在发起章节时更新，避免污染新章节输出框。
+        """
+        cid = self._continuation_chapter_id
+        if cid is None:
+            return
+        self._continuation_stream_text_by_chapter[cid] = (
+            self._continuation_stream_text_by_chapter.get(cid, "") + chunk
         )
-        self.continuation_panel.set_current_swipe(continuation, all_swipes)
+        if self._current_chapter and self._current_chapter.id == cid:
+            self.continuation_panel.append_chunk(chunk)
+
+    def _on_continuation_finished(self, continuation: Continuation) -> None:
+        """续写完成（单次续写流程）。
+
+        使用发起时记录的 _continuation_chapter_id 归档 swipe，避免用户切换
+        章节后存入错误章节；仅当用户仍停留在发起章节时刷新 UI。
+        """
+        cid = self._continuation_chapter_id or (
+            self._current_chapter.id if self._current_chapter else None
+        )
+        on_origin_chapter = bool(
+            self._current_chapter and self._current_chapter.id == cid
+        )
+
+        if on_origin_chapter:
+            self.continuation_panel.stop_streaming()
+            self.chapter_editor.set_streaming_locked(False)
+
+        # 保存 swipe 到发起章节（无论用户是否切走）
+        if cid:
+            self.chapter_service.storage.save_continuation(continuation, cid)
+            if on_origin_chapter:
+                # 更新当前章节的 continuations（供面板显示），不刷新章节列表
+                chapter = self.storage_service.load_chapter(cid)
+                if chapter:
+                    self._current_chapter = chapter
+                # 显示 swipe
+                all_swipes = (
+                    self._current_chapter.continuations if self._current_chapter else []
+                )
+                self.continuation_panel.set_current_swipe(continuation, all_swipes)
+
+        # 清理缓冲与发起章节标记
+        if cid:
+            self._continuation_stream_text_by_chapter.pop(cid, None)
+        self._continuation_chapter_id = None
 
         # M5: 记录历史日志
         self._record_history(
@@ -2644,10 +3038,21 @@ class MainWindow(QMainWindow):
         )
 
     def _on_continuation_error(self, error: str) -> None:
-        """续写出错。"""
-        self.continuation_panel.stop_streaming()
-        self.chapter_editor.set_streaming_locked(False)
-        self.continuation_panel.show_error(error)
+        """续写出错：仅当用户停留在发起章节时刷新 UI，清理状态标记。"""
+        cid = self._continuation_chapter_id
+        on_origin_chapter = bool(
+            self._current_chapter and self._current_chapter.id == cid
+        )
+
+        if on_origin_chapter:
+            self.continuation_panel.stop_streaming()
+            self.chapter_editor.set_streaming_locked(False)
+            self.continuation_panel.show_error(error)
+
+        # 清理缓冲与发起章节标记
+        if cid:
+            self._continuation_stream_text_by_chapter.pop(cid, None)
+        self._continuation_chapter_id = None
 
         # M5: 记录历史日志（失败）
         self._record_history(
@@ -2709,7 +3114,7 @@ class MainWindow(QMainWindow):
         self._on_start_continuation_routed(params)
 
     def _on_accept_continuation(self) -> None:
-        """接受续写。"""
+        """接受续写：提升为独立章节插入到当前章节之后。"""
         swipe = self.continuation_panel.current_swipe
         if not swipe or not self._current_chapter:
             return
@@ -2717,8 +3122,7 @@ class MainWindow(QMainWindow):
         reply = QMessageBox.question(
             self,
             "接受续写",
-            "确定接受当前续写版本？\n"
-            "续写内容将追加到章节正文末尾。",
+            "确定接受当前续写？\n续写将作为新章节插入到当前章节之后。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
 
@@ -2731,25 +3135,370 @@ class MainWindow(QMainWindow):
             if chapter is None:
                 return
 
-            # 找到当前 swipe 并更新
+            # 找到当前续写并更新
             for c in chapter.continuations:
                 if c.id == swipe.id:
                     swipe = c
                     break
 
-            updated_chapter = self.chapter_service.accept_continuation(chapter, swipe)
-            self._current_chapter = updated_chapter
-            self._update_chapter_in_list(updated_chapter)
-            self.chapter_editor.load_chapter(
-                chapter_id=updated_chapter.id,
-                project_id=updated_chapter.project_id,
-                title=f"第{updated_chapter.index + 1}章 {updated_chapter.title}",
-                content=updated_chapter.content,
+            # 提升为新章节（index 后移 + 建章 + 删续写记录）
+            updated_chapter, new_chapter = (
+                self.chapter_service.promote_continuation_to_chapter(chapter, swipe)
             )
-            self._set_status_message("已接受续写，内容已追加到章节")
+            self._current_chapter = updated_chapter
+            # 刷新章节列表（新增章节）
+            self._refresh_chapter_list()
+            # 自动选中新章节，加载到编辑器
+            self._on_chapter_selected(new_chapter.id)
+            self._set_status_message(f"已接受续写，已插入新章节: {new_chapter.title}")
         except Exception as e:
             logger.error("接受续写失败: %s", e, exc_info=True)
             QMessageBox.critical(self, "接受失败", str(e))
+
+    def _on_delete_continuation(self) -> None:
+        """删除当前续写。"""
+        swipe = self.continuation_panel.current_swipe
+        if not swipe or not self._current_chapter:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "删除续写",
+            "确定删除当前续写？此操作不可撤销。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self.storage_service.delete_continuation(swipe.id)
+            chapter = self.storage_service.load_chapter(self._current_chapter.id)
+            if chapter:
+                self._current_chapter = chapter
+            self.continuation_panel.clear_output()
+            self._set_status_message("已删除续写")
+        except Exception as e:
+            logger.error("删除续写失败: %s", e, exc_info=True)
+            QMessageBox.critical(self, "删除失败", str(e))
+
+    # ===== 单章续写审计与修正 =====
+
+    @staticmethod
+    def _format_world_ontology(wo) -> str:
+        """格式化世界观底层为 JSON 字符串。"""
+        if wo is None:
+            return "（无世界观底层）"
+        try:
+            if hasattr(wo, "model_dump"):
+                return json.dumps(wo.model_dump(mode="json"), ensure_ascii=False, indent=2)
+            if isinstance(wo, dict):
+                return json.dumps(wo, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return "（无世界观底层）"
+
+    @staticmethod
+    def _format_protagonist_profile(pp) -> str:
+        """格式化主角形象档案为 JSON 字符串。"""
+        if pp is None:
+            return "（无主角形象档案）"
+        try:
+            if hasattr(pp, "model_dump"):
+                return json.dumps(pp.model_dump(mode="json"), ensure_ascii=False, indent=2)
+            if isinstance(pp, dict):
+                return json.dumps(pp, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return "（无主角形象档案）"
+
+    def _on_audit_continuation(self) -> None:
+        """审计当前续写：流式生成审计报告。
+
+        组装 phase_single_audit.txt 模板（5 维度精简审计），流式输出到
+        AuditDialog，完成后用户可编辑并采纳，采纳后触发修正流程。
+        """
+        if not self._current_chapter:
+            QMessageBox.warning(self, "提示", "请先选择章节")
+            return
+
+        swipe = self.continuation_panel.current_swipe
+        if not swipe:
+            QMessageBox.warning(self, "提示", "请先生成续写后再审计")
+            return
+
+        # 获取 endpoint/api_key/model
+        endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            self._on_open_settings()
+            return
+
+        api_key = self.config_manager.decrypt_api_key(endpoint.get("id", ""))
+        if not api_key:
+            QMessageBox.warning(self, "提示", "API Key 无效，请检查设置")
+            self._on_open_settings()
+            return
+
+        model = self._continuation_model or endpoint.get("default_model", "")
+        if not model:
+            QMessageBox.warning(self, "提示", "请选择模型")
+            return
+
+        # 加载审计提示词模板
+        try:
+            template_path = get_agent_prompt_path("single_audit")
+            template = load_text_resource(template_path)
+        except Exception as e:
+            logger.error("加载审计模板失败: %s", e, exc_info=True)
+            QMessageBox.critical(self, "审计失败", f"加载审计模板失败: {e}")
+            return
+
+        # 加载项目（取 world_ontology）
+        project = None
+        if self._current_project_id:
+            project = self.storage_service.load_project(self._current_project_id)
+
+        # 组装宏
+        user_input = self.continuation_panel.get_user_input() or "（无用户额外指令）"
+        world_ontology_str = self._format_world_ontology(
+            project.world_ontology if project else None
+        )
+        protagonist_profile_str = self._format_protagonist_profile(
+            self._protagonist_profile_by_chapter.get(self._current_chapter.id)
+        )
+
+        # 简单字符串替换（与 VolumeOrchestrator 一致，不用 MacroEngine）
+        rendered = template.replace("{{user_input}}", user_input)
+        rendered = rendered.replace("{{written_text}}", swipe.content)
+        rendered = rendered.replace("{{world_ontology}}", world_ontology_str)
+        rendered = rendered.replace("{{protagonist_profile}}", protagonist_profile_str)
+
+        messages = [{"role": "system", "content": rendered}]
+
+        # 清理旧审计 worker
+        old_audit_worker = getattr(self, "_audit_worker", None)
+        if old_audit_worker is not None:
+            try:
+                old_audit_worker.chunk_received.disconnect()
+                old_audit_worker.finished.disconnect()
+                old_audit_worker.error.disconnect()
+                old_audit_worker.rate_limit_warning.disconnect()
+                old_audit_worker.auth_error.disconnect()
+                old_audit_worker.token_count.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            old_audit_worker.deleteLater()
+        self._audit_worker = None
+
+        # 创建审计 worker
+        self._audit_worker = AuditWorker(
+            base_url=endpoint["base_url"],
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=3000,
+            parent=self,
+        )
+
+        # 记录审计发起章节（采纳后 rewrite worker 用此 id 归档，避免切换章节后存错章节）
+        self._audit_chapter_id = self._current_chapter.id
+
+        # 创建审计对话框
+        self._audit_dialog = AuditDialog(self)
+
+        # 存储原 swipe 引用（采纳后修正时用）
+        self._audit_original_swipe = swipe
+
+        # 连接 worker 信号
+        self._audit_worker.chunk_received.connect(self._audit_dialog.append_chunk)
+        self._audit_worker.token_count.connect(
+            lambda count: self._token_count_label.setText(
+                f"Token: {count} (审计中)"
+            )
+        )
+        self._audit_worker.finished.connect(self._on_audit_worker_finished)
+        self._audit_worker.error.connect(self._on_audit_worker_error)
+        self._audit_worker.rate_limit_warning.connect(
+            lambda msg: self.continuation_panel.show_toast(msg)
+        )
+        self._audit_worker.auth_error.connect(self._on_auth_error)
+
+        # 连接对话框信号
+        self._audit_dialog.accepted_text.connect(self._on_audit_accepted)
+        self._audit_dialog.cancelled.connect(self._on_audit_cancelled)
+
+        self._audit_dialog.show()
+        self._audit_worker.start()
+        self._set_status_message("审计中...")
+
+    def _on_audit_worker_finished(self, full_text: str) -> None:
+        """审计 worker 流式完成。"""
+        if self._audit_dialog is not None:
+            self._audit_dialog.finish_streaming(full_text)
+        self._set_status_message("审计完成，请审阅报告")
+
+    def _on_audit_worker_error(self, error: str) -> None:
+        """审计 worker 出错。"""
+        if self._audit_dialog is not None:
+            self._audit_dialog.fail(error)
+        self._set_status_message(f"审计失败: {error}")
+
+    def _on_audit_cancelled(self) -> None:
+        """用户取消审计：停止 worker，清理发起章节标记。"""
+        if self._audit_worker is not None:
+            self._audit_worker.stop()
+        self._audit_chapter_id = None
+        self._set_status_message("已取消审计")
+
+    def _on_audit_accepted(self, audit_text: str) -> None:
+        """用户采纳审计报告：基于审计意见重写续写内容。
+
+        构造修正 messages = 原续写 messages + 原续写内容 + 审计意见 + 修正要求，
+        新建 ContinuationWorker 流式输出修正后正文，作为新 swipe 保存到审计发起章节。
+        """
+        # 使用审计发起章节（避免用户切换章节后 rewrite 存入错误章节）
+        audit_cid = self._audit_chapter_id
+        if not audit_cid:
+            return
+
+        original_swipe = getattr(self, "_audit_original_swipe", None)
+        if not original_swipe:
+            return
+
+        # 清理审计 worker 与对话框引用
+        self._audit_worker = None
+        self._audit_dialog = None
+
+        # 获取原续写的 messages 快照（上次续写时记录）
+        original_messages = list(self._continuation_prompt_messages)
+        if not original_messages:
+            QMessageBox.warning(self, "修正失败", "无法获取原续写提示词，请重新续写后再审计")
+            return
+
+        # 构造修正 messages：追加原内容 + 审计意见 + 修正要求
+        revision_messages = list(original_messages)
+        revision_messages.append({
+            "role": "user",
+            "content": f"【原续写内容（需修正）】\n{original_swipe.content}",
+        })
+        revision_messages.append({
+            "role": "user",
+            "content": (
+                f"【审计报告】\n{audit_text}\n\n"
+                "【修正要求】\n请基于上述审计报告的修改意见，重写原续写内容。"
+                "保留优点，修正指出的问题，保持字数与风格基本一致。"
+                "直接输出修正后的完整正文，不要包含解释。"
+            ),
+        })
+
+        # 获取生成参数（复用上次续写参数）
+        params = dict(self._continuation_parameters) if self._continuation_parameters else {}
+        if not params:
+            params = self.continuation_panel.get_parameters()
+            params["model"] = self._continuation_model
+
+        # 获取 endpoint/api_key
+        endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            return
+        api_key = self.config_manager.decrypt_api_key(endpoint.get("id", ""))
+        if not api_key:
+            QMessageBox.warning(self, "提示", "API Key 无效，请检查设置")
+            self._on_open_settings()
+            return
+
+        # 判断用户是否仍停留在审计发起章节
+        on_origin_chapter = bool(
+            self._current_chapter and self._current_chapter.id == audit_cid
+        )
+
+        # 仅当用户停留在发起章节时清空输出并进入流式状态
+        if on_origin_chapter:
+            self.chapter_editor.set_streaming_locked(True)
+            self.continuation_panel.start_streaming()
+
+        # 记录续写发起章节（rewrite worker 完成回调用此 id 归档 swipe）
+        self._continuation_chapter_id = audit_cid
+        self._continuation_stream_text_by_chapter[audit_cid] = ""
+
+        # 记录续写会话追踪信息
+        self._continuation_started_at = self.history_service.now_iso()
+        self._continuation_prompt_messages = list(revision_messages)
+        self._continuation_model = params.get("model", self._continuation_model)
+        self._continuation_parameters = dict(params)
+
+        # 断开旧 worker 的信号连接
+        old_worker = getattr(self, "_continuation_worker", None)
+        if old_worker is not None:
+            try:
+                old_worker.chunk_received.disconnect()
+                old_worker.reasoning_received.disconnect()
+                old_worker.token_count.disconnect()
+                old_worker.finished.disconnect()
+                old_worker.error.disconnect()
+                old_worker.rate_limit_warning.disconnect()
+                old_worker.auth_error.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            old_worker.deleteLater()
+
+        # 加载预设与正则快照（用于 swipe 记录）
+        preset_id = params.get("preset_id", "default")
+        preset = self.preset_service.load_preset(preset_id)
+        if preset is None:
+            preset = self.preset_service.load_default_preset()
+        ordered_scripts = self.regex_service.get_ordered_scripts(
+            project_id=self._current_project_id or "",
+            preset_id=preset.id,
+            include_disabled=False,
+        )
+        regex_script_ids = [s.id for s, _ in ordered_scripts]
+        # 加载审计发起章节以取 metadata（避免用错章节元数据）
+        origin_chapter = self.storage_service.load_chapter(audit_cid)
+        chapter_metadata = dict(origin_chapter.metadata) if origin_chapter else {}
+
+        # 创建修正 worker（created_by 标记为 audit_rewrite）
+        self._continuation_worker = ContinuationWorker(
+            base_url=endpoint["base_url"],
+            api_key=api_key,
+            model=self._continuation_model,
+            messages=revision_messages,
+            parameters=params,
+            chapter_id=audit_cid,
+            created_by="audit_rewrite",
+            preset_id=preset.id,
+            preset_snapshot=preset.model_dump(mode="json"),
+            regex_engine=self.regex_engine,
+            template_engine=self.template_engine,
+            project_id=self._current_project_id or "",
+            chapter_metadata=chapter_metadata,
+            regex_script_ids=regex_script_ids,
+            parent=self,
+        )
+
+        # chunk 路由：按章节缓冲，仅当前章节匹配时更新 UI
+        self._continuation_worker.chunk_received.connect(
+            self._on_continuation_chunk_received
+        )
+        self._continuation_worker.token_count.connect(
+            lambda count: self._token_count_label.setText(
+                f"Token: {count} (修正中)"
+            )
+        )
+        self._continuation_worker.finished.connect(self._on_continuation_finished)
+        self._continuation_worker.error.connect(self._on_continuation_error)
+        self._continuation_worker.rate_limit_warning.connect(
+            lambda msg: self.continuation_panel.show_toast(msg)
+        )
+        self._continuation_worker.auth_error.connect(self._on_auth_error)
+
+        self._continuation_worker.start()
+        # 清理审计发起章节标记（rewrite 已交接给 _continuation_chapter_id）
+        self._audit_chapter_id = None
+        self._set_status_message("修正中...")
 
     def _on_accept_and_continue(self) -> None:
         """接受并继续续写。"""

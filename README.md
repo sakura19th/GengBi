@@ -92,6 +92,160 @@ API Key 使用 PBKDF2HMAC + Fernet 加密存储，不明文落盘。
 - **加密**：cryptography
 - **测试**：pytest
 
+## 变量与宏调用教程
+
+赓笔在续写提示词中支持三类可调用变量：**内置宏**（`{{name}}` 简单替换）、**ST 风格变量**（`{{setvar}}`/`{{getvar}}`/注释）和 **Jinja2 模板表达式**（`{% %}` / `{{ func(...) }}`）。自定义预设的任何 prompt 条目 `content` 中均可使用，发送前由宏引擎与模板引擎依次替换。
+
+### 替换顺序
+
+发送前对每条 prompt `content` 的处理顺序（不递归）：
+
+1. `{{// comment}}` 注释 → 空字符串
+2. `{{setvar::name::value}}` / `{{getvar::name}}` → 变量读写（副作用，不缓存）
+3. `{{name}}` 简单宏 → 上下文取值，未知宏保留原样
+4. Jinja2 `{{ expr }}` / `{% stmt %}` → 沙箱渲染
+
+接收后（AI 输出）也会对输出文本再跑一遍模板渲染，便于在输出中 `setvar` 回写变量。
+
+### 一、内置宏（`{{name}}`）
+
+直接替换为字符串，无需调用函数。来自 `MacroContext`，由小说档案 + 当前章节 + 续写参数自动填充。
+
+| 宏 | 说明 | 来源 |
+|---|---|---|
+| `{{book}}` | 小说标题 | 项目档案 `title` |
+| `{{author}}` | 作者 | 项目档案 `author` |
+| `{{protagonist}}` | 主角姓名 | 项目档案 `protagonist` |
+| `{{synopsis}}` | 小说简介 | 项目档案 `synopsis` |
+| `{{world_setting}}` | 世界观设定 | 项目档案 `world_setting` |
+| `{{writing_style}}` | 写作风格 | 项目档案 `writing_style` |
+| `{{chapter_title}}` | 当前章节标题 | 当前章节 |
+| `{{chapter_index}}` | 当前章节序号（从 1 开始） | 当前章节 |
+| `{{target_words}}` | 目标续写字数 | 续写参数 |
+| `{{user}}` | 用户名（ST 兼容，默认 `User`） | 全局配置 |
+| `{{char}}` | 角色名（ST 兼容，默认 `Assistant`） | 全局配置 |
+
+**额外注入宏**（由主窗口在续写时动态注入，非 `MacroContext` 字段）：
+
+| 宏 | 说明 | 来源 |
+|---|---|---|
+| `{{world_ontology}}` | 世界观底层 7 维度 JSON（格式化缩进） | `OntologyExtractor` 提取，固化到 `Project.world_ontology` |
+| `{{protagonist_profile}}` | 主角形象 8 维度心理学档案 JSON（格式化缩进） | `ContextExtractor._extract_protagonist`，按章节缓存 |
+
+> 这两个宏在卷续写的各阶段模板中也同样可用（深度分析、卷大纲、章节细纲、验证、修订）。
+
+示例（默认预设 main 条目片段）：
+
+```text
+【世界观底层】
+{{world_ontology}}
+
+【主角信息】
+{{protagonist_profile}}
+
+【写作风格】
+{{writing_style}}
+
+目标字数约 {{target_words}} 字。
+```
+
+### 二、ST 风格变量（`{{setvar}}` / `{{getvar}}`）
+
+兼容 SillyTavern 变量语法，配合分层变量存储（`VariableStore`，global/project/chapter/cache 四作用域）。
+
+| 语法 | 作用 |
+|---|---|
+| `{{setvar::name::value}}` | 设置变量 `name=value`，替换为空字符串。默认写入 chapter 作用域 |
+| `{{getvar::name}}` | 读取变量 `name`，不存在返回空字符串 |
+| `{{// comment}}` | 注释，替换为空字符串 |
+
+变量作用域与持久化：
+
+- `global`：`~/.novelforge/variables/global_variables.json`，跨项目持久化
+- `project`：`~/.novelforge/projects/{project_id}/variables.json`，项目内持久化
+- `chapter`（默认）：章节元数据 `chapter.metadata['variables']`，随章节持久化
+- `cache`：内存，进程结束失效
+
+> 注：`{{setvar::x::v}}` / `{{getvar::x}}` 默认操作 chapter 作用域。如需跨作用域读写，请改用下文 Jinja2 的 `setvar(..., scope='global')` 调用形式。
+
+示例：在提示词中累加计数器
+
+```text
+{{setvar::scene_count::1}}
+当前是第 {{getvar::scene_count}} 个场景。
+```
+
+### 三、Jinja2 模板表达式（`{{ func() }}` / `{% %}`）
+
+沙箱环境（`ImmutableSandboxedEnvironment`），5 秒超时保护，递归深度限制 50。可调用白名单函数：
+
+**变量读写（支持指定作用域）**
+
+| 函数 | 说明 |
+|---|---|
+| `getvar(name, scope='chapter', default=None)` | 读取变量，可指定作用域 |
+| `setvar(name, value, scope='chapter')` | 写入变量 |
+| `hasvar(name, scope='chapter')` | 判断变量是否存在 |
+| `delvar(name, scope='chapter')` | 删除变量 |
+
+**章节访问**
+
+| 函数 | 说明 |
+|---|---|
+| `get_chapter(index)` | 获取第 index 章（0 基） |
+| `get_chapters()` | 获取所有章节列表 |
+| `get_current_chapter()` | 获取当前章节对象 |
+| `get_chapter_count()` | 获取章节总数 |
+
+**小说档案**
+
+| 函数 | 说明 |
+|---|---|
+| `get_book()` | 小说标题 |
+| `get_protagonist()` | 主角姓名 |
+| `get_novel_profile()` | 小说档案对象 |
+| `get_writing_style()` | 写作风格 |
+| `get_context_entries()` | 当前章节的上下文条目列表 |
+
+**工具与正则**
+
+| 函数 | 说明 |
+|---|---|
+| `regex_apply(text, placement=1)` | 对文本应用正则脚本（placement: 1=USER_INPUT / 2=AI_OUTPUT / 5=WORLD_INFO） |
+| `substitute_macros(text)` | 对文本再跑一次 `{{name}}` 宏替换 |
+| `now(format='%Y-%m-%d %H:%M:%S')` | 当前时间字符串 |
+| `word_count(text)` | 计算字数 |
+| `truncate(text, length=200, suffix='...')` | 截断文本 |
+
+示例：
+
+```jinja
+{% if get_current_chapter() %}
+当前章节：{{ get_current_chapter().title }}（共 {{ get_chapter_count() }} 章）
+{% endif %}
+
+上一章末尾：{{ truncate(get_chapter(get_chapter_count() - 2).content, 500) }}
+
+主角：{{ get_protagonist() }}
+写作风格：{{ get_writing_style() }}
+
+{% set scene_count = getvar('scene_count', scope='project', default=0) + 1 %}
+{{ setvar('scene_count', scene_count, scope='project') }}
+本卷已完成 {{ scene_count }} 个场景。
+```
+
+### 安全限制
+
+- 自定义 `is_safe_attribute` 拒绝所有以 `_` 开头的属性
+- `attr` 过滤器已禁用
+- 仅 `WHITELIST_FUNCTION_NAMES` 中的函数可调用
+- 递归超限或超时时跳过模板渲染，使用原始文本（记 ERROR 日志）
+- 模板语法错误跳过渲染，使用原始文本（记 ERROR 日志）
+
+### 调试
+
+在主窗口菜单栏「调试」勾选「调试模式」，可在每个 LLM 调用前预览组装后的完整 messages（含宏替换与模板渲染后的最终文本），确认变量是否正确注入。
+
 ## 测试
 
 ```bash

@@ -1,0 +1,68 @@
+你是一位精通计算叙事学与世界观架构的资深分析师。请深入分析以下小说全文，提取底层世界观元描述（World Ontology Layer），即世界本身运行的元规则。
+
+# 重要原则
+- 不包含任何具体实体（人名、地名、组织名、具体事件名、具体物品名）
+- 只描述世界本身的运行律、存在结构和认知框架
+- 它是所有上层设定（魔法体系、社会结构、历史事件）的底层操作系统
+
+# 小说档案
+标题：{{title}}
+作者：{{author}}
+主角：{{protagonist}}
+简介：{{synopsis}}
+世界观设定：{{world_setting}}
+写作风格：{{writing_style}}
+
+# 前序批次累积的世界观认知（增量上下文）
+{{accumulated_ontology}}
+（若为"（首批提取，无前序参考）"则本批次为首次提取，独立分析；否则请基于前序累积认知深化/修正/补全各维度参数，后文更能反映世界全貌）
+
+# 本批次章节内容
+{{chapters_text}}
+
+# 提取任务
+请从以下 7 大维度提取底层世界观参数，每个维度基于本批次章节实际内容反推（参考提取方法：通过角色对死亡、命运、知识、道德的态度反推底层世界观；通过事件因果链反推因果架构；通过时空描述反推时空本体论）：
+
+## 1. existential_topology（存在拓扑）
+- being_hierarchy：存在层级结构（物理层/生命层/精神层/抽象层）+ 层间关系（严格分层/单向因果/双向渗透/完全融合）+ 层间访问条件
+- individuality_topology：自我边界定义 + 他者承认机制 + 集体实体承认 + 分裂规则 + 融合规则
+- reality_status：世界本质 + 多层结构 + 模拟假说 + 叙事自我意识
+
+## 2. causal_architecture（因果架构）
+- causal_directionality：时间箭头 + 主导因果类型 + 因果类型清单
+- determinism_spectrum：自由意志状态 + 预言机制 + 命运结构 + 干预点
+- probability_ecology：随机性来源 + 运气守恒 + 巧合规则
+- causal_latency：因果延迟 + 因果记账
+
+## 3. spatio_temporal_ontology（时空本体论）
+- time_ontology：时间本质 + 时间流模式 + 分支可能性 + 时间旅行规则
+- space_ontology：空间本质 + 距离逻辑 + 边界条件 + 地点本体论
+- space_time_coupling：耦合模式 + 移动约束
+
+## 4. information_epistemology（信息与认识论）
+- information_ontology：信息本体论 + 信息守恒 + 信息传递
+- truth_mechanics：真理本质 + 验证方式 + 虚假规则 + 知识壁垒
+- secret_ecology：秘密结构 + 揭示动力学 + 信息不对称
+- language_ontology：语言力量 + 跨层翻译 + 沉默规则
+
+## 5. axiological_foundation（价值论基础）
+- morality_source：道德本体论 + 道德绝对性 + 道德执行 + 恶的本质
+- meaning_system：意义来源 + 意义脆弱性 + 死亡意义
+- aesthetic_rules：美丑本体论 + 崇高机制 + 艺术力量
+- value_exchange：牺牲逻辑 + 救赎机制 + 业报货币
+
+## 6. becoming_dynamics（生成动力学）
+- change_ontology：变化本质 + 变化阻力 + 变化触发
+- evolution_rules：演化范围 + 演化方向 + 演化机制 + 演化极限
+- entropy_order：熵规则 + 秩序来源 + 衰变模式
+- transformation_rules：转化类型 + 转化代价 + 转化仪式
+
+## 7. narrative_ontology（叙事本体论）
+- story_world_relation：世界即故事 + 叙事能动性 + 命运即情节
+- meta_narrative_rules：第四墙状态 + 读者存在 + 作者神性 + 重复强迫
+- ending_logic：结局必然性 + 结局类型 + 结局代价
+
+# 输出格式
+请输出严格的 JSON 对象，包含上述 7 大维度字段，每个字段值为对象（含子维度键值对）。所有取值必须基于本批次章节实际内容反推，禁止套用通用模板，禁止出现任何专有名词。
+
+只输出 JSON 对象，不要包含任何解释性文字，不要使用 markdown 代码块标记。

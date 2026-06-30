@@ -127,12 +127,14 @@ class PresetManager(PersistentDialog):
         self._delete_btn = QPushButton("删除")
         self._duplicate_btn = QPushButton("复制")
         self._toggle_preset_btn = QPushButton("禁用预设")
+        self._reset_default_btn = QPushButton("恢复默认预设")
         toolbar.addWidget(self._new_btn)
         toolbar.addWidget(self._import_btn)
         toolbar.addWidget(self._export_btn)
         toolbar.addWidget(self._duplicate_btn)
         toolbar.addWidget(self._delete_btn)
         toolbar.addWidget(self._toggle_preset_btn)
+        toolbar.addWidget(self._reset_default_btn)
         toolbar.addStretch()
 
         layout.addLayout(toolbar)
@@ -261,6 +263,21 @@ class PresetManager(PersistentDialog):
         self._max_context_spin.setValue(9999999)
         params_form.addRow("最大上下文:", self._max_context_spin)
 
+        self._top_p_spin = QSpinBox()
+        self._top_p_spin.setRange(0, 100)
+        self._top_p_spin.setValue(99)
+        self._top_p_spin.setSuffix(" (×0.01)")
+        params_form.addRow("Top P:", self._top_p_spin)
+
+        self._top_k_spin = QSpinBox()
+        self._top_k_spin.setRange(0, 1000)
+        self._top_k_spin.setValue(0)
+        params_form.addRow("Top K:", self._top_k_spin)
+
+        self._reasoning_effort_combo = QComboBox()
+        self._reasoning_effort_combo.addItems(["auto", "low", "medium", "high", "max"])
+        params_form.addRow("推理强度:", self._reasoning_effort_combo)
+
         self._save_params_btn = QPushButton("保存参数")
         params_form.addRow("", self._save_params_btn)
 
@@ -292,6 +309,7 @@ class PresetManager(PersistentDialog):
         self._save_params_btn.clicked.connect(self._on_save_params)
 
         self._toggle_preset_btn.clicked.connect(self._on_toggle_preset_enabled)
+        self._reset_default_btn.clicked.connect(self._on_reset_default_preset)
 
     # ===== 预设列表 =====
 
@@ -403,6 +421,14 @@ class PresetManager(PersistentDialog):
             self._temperature_spin.setValue(int(temp * 100))
         self._max_tokens_spin.setValue(params.get("max_tokens", 2000))
         self._max_context_spin.setValue(params.get("max_context", 32000))
+        top_p = params.get("top_p", 1.0)
+        if isinstance(top_p, (int, float)):
+            self._top_p_spin.setValue(int(top_p * 100))
+        self._top_k_spin.setValue(params.get("top_k", 0))
+        reasoning = params.get("reasoning_effort", "high")
+        if reasoning not in ("auto", "low", "medium", "high", "max"):
+            reasoning = "high"
+        self._reasoning_effort_combo.setCurrentText(reasoning)
 
     # ===== 预设操作 =====
 
@@ -752,6 +778,15 @@ class PresetManager(PersistentDialog):
         self._current_preset.generation_params["max_context"] = (
             self._max_context_spin.value()
         )
+        self._current_preset.generation_params["top_p"] = (
+            self._top_p_spin.value() / 100.0
+        )
+        self._current_preset.generation_params["top_k"] = (
+            self._top_k_spin.value()
+        )
+        self._current_preset.generation_params["reasoning_effort"] = (
+            self._reasoning_effort_combo.currentText()
+        )
 
         self.preset_service.save_preset(self._current_preset)
         QMessageBox.information(self, "成功", "生成参数已保存")
@@ -820,6 +855,36 @@ class PresetManager(PersistentDialog):
             self._toggle_preset_btn.setText("禁用预设")
         else:
             self._toggle_preset_btn.setText("启用预设")
+
+    def _on_reset_default_preset(self) -> None:
+        """将本地默认预设重置为内置最新版本。
+
+        内置默认预设升级后，本地 ``~/.novelforge/presets/default.json``
+        仍保留旧版本，需用户主动点击此按钮同步到最新版本。
+        """
+        reply = QMessageBox.question(
+            self, "恢复默认预设",
+            "将本地默认预设重置为内置最新版本。\n"
+            "这会覆盖您对默认预设的所有自定义修改（如提示词内容、生成参数、"
+            "开关状态等），且不可撤销。\n\n确定继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            self._current_preset = self.preset_service.reset_default_preset()
+            self._refresh_preset_list()
+            self._refresh_prompt_list()
+            self._refresh_params()
+            self.preset_changed.emit("default")
+            QMessageBox.information(
+                self, "完成",
+                f"默认预设已恢复为内置最新版本。\n提示数: {len(self._current_preset.prompts)}",
+            )
+        except (OSError, ValueError) as e:
+            QMessageBox.critical(self, "错误", f"恢复默认预设失败: {e}")
 
     # ===== 公共接口 =====
 

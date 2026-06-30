@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS projects (
     preset_id TEXT DEFAULT 'default',
     regex_script_ids TEXT DEFAULT '[]',
     extract_config TEXT,
-    chapter_split_rule TEXT DEFAULT '{}'
+    chapter_split_rule TEXT DEFAULT '{}',
+    world_ontology TEXT,
+    worldbook_id TEXT DEFAULT ''
 );
 
 -- 章节元数据表（正文存文件系统）
@@ -75,6 +77,7 @@ CREATE TABLE IF NOT EXISTS continuations (
     content TEXT DEFAULT '',
     model TEXT DEFAULT '',
     is_accepted INTEGER DEFAULT 0,
+    parent_id TEXT,
     status TEXT DEFAULT 'completed',
     created_by TEXT DEFAULT 'continuation',
     parameters_snapshot TEXT DEFAULT '{}',
@@ -336,12 +339,14 @@ class Storage:
 
         # 幂等迁移：为旧版 continuations 表补充 agent_artifacts / volume_artifacts 列
         await self._migrate_continuations_columns()
+        # 幂等迁移：为旧版 projects 表补充 world_ontology / worldbook_id 列
+        await self._migrate_projects_columns()
 
         await self._conn.commit()
         logger.info("数据库连接成功: %s（日志模式: %s）", self._db_path, journal_mode)
 
     async def _migrate_continuations_columns(self) -> None:
-        """幂等迁移：为 continuations 表补充 agent_artifacts / volume_artifacts 列。
+        """幂等迁移：为 continuations 表补充 agent_artifacts / volume_artifacts / parent_id 列。
 
         SQLite 不支持 ADD COLUMN IF NOT EXISTS，需先查 PRAGMA table_info
         检测列是否存在，再决定是否 ALTER TABLE。
@@ -362,6 +367,37 @@ class Storage:
                 "ALTER TABLE continuations ADD COLUMN volume_artifacts TEXT"
             )
             logger.info("已为 continuations 表添加 volume_artifacts 列")
+        if "parent_id" not in column_names:
+            await self._conn.execute(
+                "ALTER TABLE continuations ADD COLUMN parent_id TEXT"
+            )
+            logger.info("已为 continuations 表添加 parent_id 列")
+        # parent_id 索引（在 ALTER TABLE 补列之后创建，保证旧库列已存在）
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_continuations_parent ON continuations(parent_id)"
+        )
+
+    async def _migrate_projects_columns(self) -> None:
+        """幂等迁移：为 projects 表补充 world_ontology / worldbook_id 列。
+
+        SQLite 不支持 ADD COLUMN IF NOT EXISTS，需先查 PRAGMA table_info
+        检测列是否存在，再决定是否 ALTER TABLE。
+        """
+        async with self._conn.execute(
+            "PRAGMA table_info(projects)"
+        ) as cursor:
+            columns = await cursor.fetchall()
+        column_names = {col[1] for col in columns}
+        if "world_ontology" not in column_names:
+            await self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN world_ontology TEXT"
+            )
+            logger.info("已为 projects 表添加 world_ontology 列")
+        if "worldbook_id" not in column_names:
+            await self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN worldbook_id TEXT DEFAULT ''"
+            )
+            logger.info("已为 projects 表添加 worldbook_id 列")
 
     async def close(self) -> None:
         """关闭数据库连接。"""
@@ -400,10 +436,23 @@ class Storage:
         project["updated_at"] = now
 
         await self.conn.execute(
-            """INSERT OR REPLACE INTO projects
+            """INSERT INTO projects
                (id, name, created_at, updated_at, source_file, novel_profile,
-                preset_id, regex_script_ids, extract_config, chapter_split_rule)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                preset_id, regex_script_ids, extract_config, chapter_split_rule,
+                world_ontology, worldbook_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   name=excluded.name,
+                   created_at=excluded.created_at,
+                   updated_at=excluded.updated_at,
+                   source_file=excluded.source_file,
+                   novel_profile=excluded.novel_profile,
+                   preset_id=excluded.preset_id,
+                   regex_script_ids=excluded.regex_script_ids,
+                   extract_config=excluded.extract_config,
+                   chapter_split_rule=excluded.chapter_split_rule,
+                   world_ontology=excluded.world_ontology,
+                   worldbook_id=excluded.worldbook_id""",
             (
                 project["id"],
                 project.get("name", ""),
@@ -417,6 +466,10 @@ class Storage:
                 if project.get("extract_config") is not None
                 else None,
                 json.dumps(project.get("chapter_split_rule", {}), ensure_ascii=False),
+                json.dumps(project.get("world_ontology"), ensure_ascii=False, default=str)
+                if project.get("world_ontology") is not None
+                else None,
+                project.get("worldbook_id", ""),
             ),
         )
         await self.conn.commit()
@@ -471,6 +524,8 @@ class Storage:
             "regex_script_ids": json.loads(row[7]) if row[7] else [],
             "extract_config": json.loads(row[8]) if row[8] else None,
             "chapter_split_rule": json.loads(row[9]) if row[9] else {},
+            "world_ontology": json.loads(row[10]) if len(row) > 10 and row[10] else None,
+            "worldbook_id": row[11] if len(row) > 11 and row[11] else "",
         }
 
     # ===== 章节操作 =====
@@ -515,10 +570,18 @@ class Storage:
 
         try:
             await self.conn.execute(
-                """INSERT OR REPLACE INTO chapters
+                """INSERT INTO chapters
                    (id, project_id, "index", title, word_count, metadata,
                     created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                       project_id=excluded.project_id,
+                       "index"=excluded."index",
+                       title=excluded.title,
+                       word_count=excluded.word_count,
+                       metadata=excluded.metadata,
+                       created_at=excluded.created_at,
+                       updated_at=excluded.updated_at""",
                 (
                     chapter_id,
                     project_id,
@@ -611,7 +674,12 @@ class Storage:
             return {}
         # 一次性查询所有章节的续写
         async with self.conn.execute(
-            f"SELECT * FROM continuations WHERE chapter_id IN ({placeholders}) "
+            "SELECT id, chapter_id, created_at, content, model, is_accepted, "
+            "parent_id, status, created_by, parameters_snapshot, preset_id, "
+            "preset_snapshot, regex_script_ids_snapshot, "
+            "extracted_context_snapshot, prompt_snapshot, reasoning_content, "
+            "agent_artifacts, volume_artifacts "
+            f"FROM continuations WHERE chapter_id IN ({placeholders}) "
             "ORDER BY created_at ASC",
             tuple(chapter_ids),
         ) as cursor:
@@ -641,13 +709,102 @@ class Storage:
         return result
 
     async def list_chapters(self, project_id: str) -> list[dict[str, Any]]:
-        """列出项目的所有章节元数据（不含正文）。"""
+        """列出项目的所有章节元数据（不含正文）。
+
+        若 DB 无章节但磁盘有 .txt 文件（级联删除数据丢失场景），
+        自动从磁盘重建 DB 行后返回。
+        """
         async with self.conn.execute(
             'SELECT * FROM chapters WHERE project_id = ? ORDER BY "index" ASC',
             (project_id,),
         ) as cursor:
             rows = await cursor.fetchall()
+
+        # 自动恢复：DB 无章节但磁盘有 .txt 文件时重建
+        if not rows:
+            rebuilt = await self.rebuild_chapters_from_disk(project_id)
+            if rebuilt:
+                async with self.conn.execute(
+                    'SELECT * FROM chapters WHERE project_id = ? ORDER BY "index" ASC',
+                    (project_id,),
+                ) as cursor:
+                    rows = await cursor.fetchall()
+
         return [self._row_to_chapter(row) for row in rows]
+
+    async def rebuild_chapters_from_disk(self, project_id: str) -> int:
+        """从磁盘 .txt 文件重建 chapters DB 行。
+
+        当 DB chapters 行丢失但磁盘文件仍在时，扫描 chapters 目录，
+        为每个 .txt 文件重建 DB 行。已存在的 DB 行不覆盖。
+
+        Args:
+            project_id: 项目 ID
+
+        Returns:
+            重建的章节数
+        """
+        chapters_dir = self.storage_path / "projects" / project_id / "chapters"
+        if not chapters_dir.exists():
+            return 0
+
+        # 收集磁盘上的 chapter_id（按文件名排序）
+        disk_files = sorted(chapters_dir.glob("*.txt"))
+        if not disk_files:
+            return 0
+
+        # 收集 DB 中已存在的 chapter_id
+        async with self.conn.execute(
+            "SELECT id FROM chapters WHERE project_id = ?", (project_id,)
+        ) as cursor:
+            existing_ids = {row[0] for row in await cursor.fetchall()}
+
+        rebuilt = 0
+        now = datetime.now().isoformat()
+        for idx, chapter_file in enumerate(disk_files):
+            chapter_id = chapter_file.stem
+            if chapter_id in existing_ids:
+                continue  # 已存在不覆盖
+            try:
+                content = chapter_file.read_text(encoding="utf-8")
+            except OSError as e:
+                logger.warning("读取章节文件失败 %s: %s", chapter_file, e)
+                continue
+            # 推断 title：用正文首行或文件名
+            first_line = content.strip().split("\n", 1)[0][:50] if content.strip() else ""
+            title = first_line or chapter_id
+            try:
+                await self.conn.execute(
+                    """INSERT INTO chapters
+                       (id, project_id, "index", title, word_count, metadata,
+                        created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(id) DO UPDATE SET
+                           project_id=excluded.project_id,
+                           "index"=excluded."index",
+                           title=excluded.title,
+                           word_count=excluded.word_count,
+                           metadata=excluded.metadata,
+                           created_at=excluded.created_at,
+                           updated_at=excluded.updated_at""",
+                    (
+                        chapter_id,
+                        project_id,
+                        idx,
+                        title,
+                        len(content),
+                        "{}",
+                        now,
+                        now,
+                    ),
+                )
+                rebuilt += 1
+            except Exception as e:
+                logger.error("重建章节 %s 失败: %s", chapter_id, e)
+        if rebuilt:
+            await self.conn.commit()
+            logger.info("从磁盘重建 %d 章 (project=%s)", rebuilt, project_id)
+        return rebuilt
 
     async def delete_chapter(self, chapter_id: str) -> None:
         """删除章节及其所有续写。
@@ -703,11 +860,11 @@ class Storage:
         await self.conn.execute(
             """INSERT OR REPLACE INTO continuations
                (id, chapter_id, created_at, content, model, is_accepted,
-                status, created_by, parameters_snapshot, preset_id,
+                parent_id, status, created_by, parameters_snapshot, preset_id,
                 preset_snapshot, regex_script_ids_snapshot,
                 extracted_context_snapshot, prompt_snapshot, reasoning_content,
                 agent_artifacts, volume_artifacts)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 continuation["id"],
                 continuation["chapter_id"],
@@ -715,6 +872,7 @@ class Storage:
                 continuation.get("content", ""),
                 continuation.get("model", ""),
                 1 if continuation.get("is_accepted", False) else 0,
+                continuation.get("parent_id"),
                 continuation.get("status", "completed"),
                 continuation.get("created_by", "continuation"),
                 json.dumps(continuation.get("parameters_snapshot", {}), ensure_ascii=False),
@@ -741,7 +899,12 @@ class Storage:
     async def list_continuations(self, chapter_id: str) -> list[dict[str, Any]]:
         """列出章节的所有续写版本。"""
         async with self.conn.execute(
-            "SELECT * FROM continuations WHERE chapter_id = ? ORDER BY created_at ASC",
+            "SELECT id, chapter_id, created_at, content, model, is_accepted, "
+            "parent_id, status, created_by, parameters_snapshot, preset_id, "
+            "preset_snapshot, regex_script_ids_snapshot, "
+            "extracted_context_snapshot, prompt_snapshot, reasoning_content, "
+            "agent_artifacts, volume_artifacts "
+            "FROM continuations WHERE chapter_id = ? ORDER BY created_at ASC",
             (chapter_id,),
         ) as cursor:
             rows = await cursor.fetchall()
@@ -764,17 +927,18 @@ class Storage:
             "content": row[3],
             "model": row[4],
             "is_accepted": bool(row[5]),
-            "status": row[6],
-            "created_by": row[7],
-            "parameters_snapshot": json.loads(row[8]) if row[8] else {},
-            "preset_id": row[9],
-            "preset_snapshot": json.loads(row[10]) if row[10] else {},
-            "regex_script_ids_snapshot": json.loads(row[11]) if row[11] else [],
-            "extracted_context_snapshot": json.loads(row[12]) if row[12] else [],
-            "prompt_snapshot": json.loads(row[13]) if row[13] else [],
-            "reasoning_content": row[14],
-            "agent_artifacts": json.loads(row[15]) if len(row) > 15 and row[15] else None,
-            "volume_artifacts": json.loads(row[16]) if len(row) > 16 and row[16] else None,
+            "parent_id": row[6] if len(row) > 6 else None,
+            "status": row[7] if len(row) > 7 else "completed",
+            "created_by": row[8] if len(row) > 8 else "continuation",
+            "parameters_snapshot": json.loads(row[9]) if len(row) > 9 and row[9] else {},
+            "preset_id": row[10] if len(row) > 10 else "",
+            "preset_snapshot": json.loads(row[11]) if len(row) > 11 and row[11] else {},
+            "regex_script_ids_snapshot": json.loads(row[12]) if len(row) > 12 and row[12] else [],
+            "extracted_context_snapshot": json.loads(row[13]) if len(row) > 13 and row[13] else [],
+            "prompt_snapshot": json.loads(row[14]) if len(row) > 14 and row[14] else [],
+            "reasoning_content": row[15] if len(row) > 15 else None,
+            "agent_artifacts": json.loads(row[16]) if len(row) > 16 and row[16] else None,
+            "volume_artifacts": json.loads(row[17]) if len(row) > 17 and row[17] else None,
         }
 
     # ===== 历史日志操作 =====

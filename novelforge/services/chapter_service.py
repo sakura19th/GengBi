@@ -350,39 +350,81 @@ class ChapterService:
         chapter: Chapter,
         continuation: Continuation,
     ) -> Chapter:
-        """接受续写版本。
+        """接受续写（链式模型：标记已接受，入列，不修改正文）。
 
-        - 标记当前 swipe is_accepted=True，其他设为 False
-        - swipe content 追加到章节正文末尾
-        - 章节保存到文件系统
+        - 标记当前续写 ``is_accepted=True``，使其作为链上节点出现在章节列表
+        - **不修改** ``chapter.content``（续写内容仅存于 ``Continuation.content``）
+        - 同一父节点下多个已接受续写可并存（表示链的不同分支），不互斥取消其他
 
         Args:
             chapter: 章节
-            continuation: 待接受的续写版本
+            continuation: 待接受的续写
 
         Returns:
-            更新后的章节
+            重新加载后的章节（含最新 continuations）
         """
-        # 取消其他 swipe 的 is_accepted
-        for c in chapter.continuations:
-            c.is_accepted = (c.id == continuation.id)
-        # 标记当前为已接受
         continuation.is_accepted = True
+        self.storage.save_continuation(continuation, chapter.id)
 
-        # 追加到章节正文
-        if chapter.content and continuation.content:
-            chapter.content = chapter.content + "\n\n" + continuation.content
-        elif continuation.content:
-            chapter.content = continuation.content
-        chapter.word_count = len(chapter.content)
+        # 重新加载章节（含 continuations）
+        reloaded = self.storage.load_chapter(chapter.id)
+        if reloaded is not None:
+            chapter = reloaded
 
-        # 保存
-        self.storage.save_chapter(chapter)
-        for c in chapter.continuations:
-            self.storage.save_continuation(c, chapter.id)
-
-        logger.info("接受续写: chapter=%s, swipe=%s", chapter.id, continuation.id)
+        logger.info(
+            "接受续写入列: chapter=%s, continuation=%s", chapter.id, continuation.id
+        )
         return chapter
+
+    def promote_continuation_to_chapter(
+        self, chapter: Chapter, continuation: Continuation
+    ) -> tuple[Chapter, Chapter]:
+        """接受续写：提升为独立章节插入到当前章节之后，并删除原续写记录。
+
+        - 将当前章节之后所有章节 index 后移 1 位
+        - 创建新 Chapter（index=当前+1，content=续写内容）
+        - 删除原续写记录（从存储与 chapter.continuations 移除）
+
+        Args:
+            chapter: 当前章节
+            continuation: 待接受的续写
+
+        Returns:
+            (更新后的当前章节(continuations 已移除该续写), 新章节)
+        """
+        project_id = chapter.project_id
+        new_index = chapter.index + 1
+
+        # 后移当前章节之后的所有章节 index
+        later_chapters = [
+            ch for ch in self.storage.list_chapters(project_id)
+            if ch.index >= new_index
+        ]
+        for ch in later_chapters:
+            self.storage.update_chapter_index(ch.id, ch.index + 1)
+
+        # 创建新章节
+        new_chapter = Chapter(
+            id=_generate_id("ch_"),
+            project_id=project_id,
+            index=new_index,
+            title=f"第{new_index + 1}章",
+            content=continuation.content,
+            word_count=len(continuation.content),
+        )
+        self.storage.save_chapter(new_chapter)
+
+        # 删除原续写记录
+        self.storage.delete_continuation(continuation.id)
+        chapter.continuations = [
+            c for c in chapter.continuations if c.id != continuation.id
+        ]
+
+        logger.info(
+            "续写提升为章节: chapter=%s, continuation=%s, new_chapter=%s",
+            chapter.id, continuation.id, new_chapter.id,
+        )
+        return chapter, new_chapter
 
     def delete_continuation(
         self,

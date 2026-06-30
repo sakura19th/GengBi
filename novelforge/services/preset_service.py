@@ -383,6 +383,21 @@ class PresetService(BaseJsonService[WritingPreset]):
             return preset
         return self.load_preset("default") or self.load_default_preset()
 
+    def reset_default_preset(self) -> WritingPreset:
+        """将本地默认预设重置为内置最新版本。
+
+        从 ``resources/defaults/default_preset.json`` 重新加载，覆盖
+        ``~/.novelforge/presets/default.json``。用于内置默认预设升级后，
+        让用户主动同步到最新版本（本地已存在旧版本时不会自动覆盖）。
+
+        Returns:
+            重置后的 WritingPreset 对象
+        """
+        preset = self.load_default_preset()
+        self.save_preset(preset)
+        logger.info("已将默认预设重置为内置最新版本")
+        return preset
+
     # ===== 预设 CRUD =====
 
     def load_preset(self, preset_id: str) -> WritingPreset | None:

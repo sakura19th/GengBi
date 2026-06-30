@@ -1,0 +1,75 @@
+你是一位专业的小说分析师。此前由于前文章节较长，已按 token 限制切分为多块分别进行深度分析，并通过程序化方式做了初步字段合并。现在请对这份初步合并后的 DeepAnalysis 进行**语义层面的整合润色**，消除跨块重复、消解冲突、补全遗漏，产出一份连贯、一致、完整的最终 DeepAnalysis 报告。请以严格 JSON 格式输出。
+
+# 小说档案
+标题：{{title}}
+作者：{{author}}
+主角：{{protagonist}}
+简介：{{synopsis}}
+世界观设定：{{world_setting}}
+写作风格：{{writing_style}}
+
+# 世界观底层元描述（全文提取固化，整合时须保持设定一致性）
+{{world_ontology}}
+
+# 主角形象档案（跟随章节缓存，整合时须保持主角弧光连贯）
+{{protagonist_profile}}
+
+# 初步合并后的 DeepAnalysis（待整合润色）
+{{deep_analysis}}
+
+# 整合任务
+请基于上述小说档案与初步合并的 DeepAnalysis，进行**语义层面的整合**（而非简单字段拼接）。具体要求：
+
+## 1. 消除跨块重复
+- 列表字段（active_characters/plot_threads/unresolved_promises/character_arc_patterns/foreshadowing_inventory/common_tropes/settings_database/recurring_elements/key_phrases）中，若存在指向同一实体的重复条目（如同一人物、同一伏笔、同一设定），合并为单一条目，整合 description/arc_trajectory/status 等子字段
+- 字符串字段（plot_arrangement_analysis/tension_curve_pattern 等）若含重复段落或雷同表述，精简为连贯论述
+
+## 2. 冲突消解
+- 同一实体在不同块中分析结论矛盾时（如人物弧光方向不一致），以**较新块**（章节序号更大）的分析为准，并在论述中体现演变
+- 事实性冲突无法判定时，保留信息更详尽、论据更充分的版本
+
+## 3. 补全与连贯
+- 字符串字段应语句通顺、逻辑连贯，非简单拼接；可适当补充过渡句使论述自然
+- 列表字段每项的子字段应完整（如伏笔的 status/setup_chapter/importance 齐全）
+- 故事状态字段（structure_position/tone/core_conflict_status/stakes/world_state）应反映**最新章节结束时的整体状态**，综合各块分析得出
+
+## 4. 非模板化
+- 所有分析必须基于初步合并 DeepAnalysis 中的实际内容，不得套用通用模板或泛化结论
+- 若某维度无对应内容，使用空字符串或空数组，不得凑数
+
+# 输出格式
+请输出严格的 JSON 对象（DeepAnalysis），包含以下字段：
+- structure_position：字符串，当前故事在三幕/多幕结构中所处位置
+- tone：字符串，当前整体基调与情绪氛围
+- core_conflict_status：字符串，核心冲突的当前状态与推进程度
+- stakes：字符串，当前各方赌注/代价/风险
+- active_characters：数组，当前活跃人物，每项含 name/status/motivation
+- plot_threads：数组，当前情节线，每项含 name/status/priority(high/medium/low)
+- unresolved_promises：数组，未兑现的叙事承诺，每项含 description/setup_chapter
+- world_state：字符串，当前世界状态
+- plot_arrangement_analysis：字符串，剧情排布规律的详细分析
+- chapter_structure_pattern：字符串，每章内部结构与篇幅分布规律
+- tension_curve_pattern：字符串，张力曲线与高潮分布规律
+- hook_patterns：字符串，钩子设置手法与频率规律
+- style_analysis：字符串，文风分析（视角/语言/修辞/句式/词汇/描写密度）
+- dialogue_analysis：字符串，对话分析（占比/风格/配比/功能）
+- pacing_analysis：字符串，节奏与推进速度分析
+- character_arc_patterns：数组，主要人物弧光规律，每项含 name/arc_trajectory/value_shift
+- foreshadowing_inventory：数组，伏笔清单，每项含 item/status(planted/triggered/ongoing)/setup_chapter/importance(high/medium/low)
+- common_tropes：数组，常用梗/套路，每项含 trope/description/frequency
+- settings_database：数组，设定库，每项含 category/name/description
+- recurring_elements：数组，反复元素，每项含 element_type/image
+- key_phrases：数组，标志性短语/口头禅，每项含 phrase/context
+
+# 整合原则
+- **忠于原文**：所有判断必须基于输入 DeepAnalysis 的内容，不得编造
+- **信息完整**：不丢失任何关键信息，宁可保留也不可遗漏
+- **去重彻底**：同一实体不可出现多条重复条目
+- **连贯一致**：整合后的论述应语句通顺、逻辑连贯，非简单拼接
+- **非模板化**：不得套用通用模板或泛化结论
+
+注意：
+- 只输出 JSON 对象，不要包含任何解释性文字
+- 不要使用 markdown 代码块标记
+- 所有字段必须存在，无内容时使用空字符串或空数组
+- 确保 JSON 语法严格合法，可直接被解析

@@ -12,6 +12,12 @@
 # 深度分析参考（JSON）
 {{deep_analysis}}
 
+# 世界观底层元描述（全文提取固化，终稿大纲须遵守底层规则约束）
+{{world_ontology}}
+
+# 主角形象档案（跟随章节缓存，终稿大纲须保持主角决策一致性）
+{{protagonist_profile}}
+
 # 推进速度
 {{pacing_speed}}
 （slow=缓速同一场景1-2章/medium=中速一个场景半章/fast=快速按目前设定）
