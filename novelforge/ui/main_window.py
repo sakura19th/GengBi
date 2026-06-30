@@ -911,6 +911,8 @@ class MainWindow(QMainWindow):
     def _get_enabled_worldbook_entries(self) -> list:
         """获取续写面板当前选中且启用的世界书条目列表。
 
+        仅返回条目级 enabled=True 的条目（条目级开关控制是否注入上下文）。
+
         Returns:
             ContextEntry 列表；未启用或未选择时返回空列表
         """
@@ -924,7 +926,7 @@ class MainWindow(QMainWindow):
             if wb is None:
                 logger.warning("世界书 %s 不存在", wb_id)
                 return []
-            return list(wb.entries)
+            return [e for e in wb.entries if e.enabled]
         except Exception as e:
             logger.error("获取启用世界书条目失败: %s", e)
             return []

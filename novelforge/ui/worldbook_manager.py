@@ -241,6 +241,7 @@ class WorldBookManager(PersistentDialog):
 
         self._entry_list.currentRowChanged.connect(self._on_entry_selected)
         self._entry_list.model().rowsMoved.connect(self._on_entries_reordered)
+        self._entry_list.itemChanged.connect(self._on_entry_check_changed)
         self._add_entry_btn.clicked.connect(self._on_add_entry)
         self._delete_entry_btn.clicked.connect(self._on_delete_entry)
         self._move_up_btn.clicked.connect(self._on_move_up)
@@ -315,8 +316,16 @@ class WorldBookManager(PersistentDialog):
 
             for entry in self._current_worldbook.entries:
                 label = entry.comment or entry.uid
+                if not entry.enabled:
+                    label = f"[禁用] {label}"
                 item = QListWidgetItem(label)
                 item.setData(Qt.ItemDataRole.UserRole, entry.uid)
+                item.setData(Qt.ItemDataRole.UserRole + 1, entry.enabled)
+                # 复选框开关（参照预设）
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.CheckState.Checked if entry.enabled else Qt.CheckState.Unchecked
+                )
                 self._entry_list.addItem(item)
         finally:
             self._entry_list.blockSignals(False)
@@ -420,6 +429,7 @@ class WorldBookManager(PersistentDialog):
                         position=e.position,
                         depth=e.depth,
                         role=e.role,
+                        enabled=e.enabled,
                         source_chapter_range=e.source_chapter_range,
                         extracted_at=e.extracted_at,
                         raw_st_fields=dict(e.raw_st_fields),
@@ -538,6 +548,30 @@ class WorldBookManager(PersistentDialog):
             if entry.uid == uid:
                 return entry
         return None
+
+    def _on_entry_check_changed(self, item: QListWidgetItem) -> None:
+        """条目复选框状态变化（参照预设开关）。"""
+        if not self._current_worldbook:
+            return
+        uid = item.data(Qt.ItemDataRole.UserRole)
+        enabled = item.checkState() == Qt.CheckState.Checked
+        # 防止刷新触发递归
+        self._entry_list.blockSignals(True)
+        try:
+            self.worldbook_service.set_entry_enabled(
+                self._current_worldbook, uid, enabled
+            )
+            # 更新镜像数据与标签（[禁用] 前缀）
+            item.setData(Qt.ItemDataRole.UserRole + 1, enabled)
+            entry = self._find_entry(uid)
+            if entry is not None:
+                label = entry.comment or entry.uid
+                if not enabled:
+                    label = f"[禁用] {label}"
+                item.setText(label)
+        finally:
+            self._entry_list.blockSignals(False)
+        self.worldbook_changed.emit()
 
     def _on_save_entry(self) -> None:
         """保存条目编辑。"""

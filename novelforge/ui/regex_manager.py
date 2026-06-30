@@ -362,6 +362,7 @@ class RegexManager(PersistentDialog):
         """连接信号。"""
         self._scope_combo.currentIndexChanged.connect(self._on_scope_changed)
         self._script_list.currentRowChanged.connect(self._on_script_selected)
+        self._script_list.itemChanged.connect(self._on_script_check_changed)
         self._new_btn.clicked.connect(self._on_new_script)
         self._import_btn.clicked.connect(self._on_import_script)
         self._export_btn.clicked.connect(self._on_export_script)
@@ -392,29 +393,38 @@ class RegexManager(PersistentDialog):
 
     def _refresh_script_list(self) -> None:
         """刷新脚本列表（含执行顺序编号）。"""
-        self._script_list.clear()
-        params = self._get_current_scope_params()
-
+        # blockSignals 包裹：避免 addItem 触发 itemChanged（复选框初始化）
+        self._script_list.blockSignals(True)
         try:
-            scripts = self.regex_service.load_scripts(**params)
-        except Exception as e:
-            logger.error("加载正则脚本失败: %s", e)
-            scripts = []
+            self._script_list.clear()
+            params = self._get_current_scope_params()
 
-        # 显示脚本列表
-        for i, script in enumerate(scripts, 1):
-            label_parts = [f"#{i}", script.scriptName or script.id]
-            if script.disabled:
-                label_parts.append("[禁用]")
-            if not script.findRegex:
-                label_parts.append("[空]")
-            label = " ".join(label_parts)
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, script.id)
-            self._script_list.addItem(item)
+            try:
+                scripts = self.regex_service.load_scripts(**params)
+            except Exception as e:
+                logger.error("加载正则脚本失败: %s", e)
+                scripts = []
 
-        # 同时显示其他作用域的脚本（灰色，仅显示顺序）
-        self._append_other_scope_scripts()
+            # 显示脚本列表（当前作用域：含内联勾选开关，反向映射 disabled）
+            for i, script in enumerate(scripts, 1):
+                label_parts = [f"#{i}", script.scriptName or script.id]
+                if not script.findRegex:
+                    label_parts.append("[空]")
+                label = " ".join(label_parts)
+                item = QListWidgetItem(label)
+                item.setData(Qt.ItemDataRole.UserRole, script.id)
+                item.setData(Qt.ItemDataRole.UserRole + 1, script.disabled)
+                # 复选框开关（参照预设；Checked 表示启用=disabled=False）
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                item.setCheckState(
+                    Qt.CheckState.Checked if not script.disabled else Qt.CheckState.Unchecked
+                )
+                self._script_list.addItem(item)
+
+            # 同时显示其他作用域的脚本（灰色，仅显示顺序，不可勾选）
+            self._append_other_scope_scripts()
+        finally:
+            self._script_list.blockSignals(False)
 
         if self._script_list.count() > 0:
             self._script_list.setCurrentRow(0)
@@ -505,6 +515,43 @@ class RegexManager(PersistentDialog):
         self._run_on_edit_check.setChecked(script.runOnEdit)
         self._substitute_regex_check.setChecked(bool(script.substituteRegex))
         self._markup_safety_check.setChecked(script.markupSafety)
+
+    def _on_script_check_changed(self, item: QListWidgetItem) -> None:
+        """脚本复选框状态变化（反向映射 disabled）。
+
+        仅处理当前作用域脚本（含 ItemIsUserCheckable flag）；分隔项与
+        其他作用域脚本不可勾选，直接跳过。Checked → disabled=False。
+        """
+        # 跳过分隔项与其他作用域脚本（不可勾选）
+        if not (item.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+            return
+        script_id = item.data(Qt.ItemDataRole.UserRole)
+        if not script_id:
+            return
+        disabled = item.checkState() != Qt.CheckState.Checked
+        params = self._get_current_scope_params()
+        scripts = self.regex_service.load_scripts(**params)
+        target: RegexScript | None = None
+        for s in scripts:
+            if s.id == script_id:
+                target = s
+                break
+        if target is None:
+            return
+        new_script = target.model_copy(update={"disabled": disabled})
+        if not self.regex_service.update_script(new_script, **params):
+            return
+        # 防递归：更新镜像数据
+        self._script_list.blockSignals(True)
+        try:
+            item.setData(Qt.ItemDataRole.UserRole + 1, disabled)
+        finally:
+            self._script_list.blockSignals(False)
+        # 同步右侧编辑器（若当前选中的正是该脚本）
+        if self._current_script and self._current_script.id == script_id:
+            self._current_script = new_script
+            self._disabled_check.setChecked(disabled)
+        self.regex_changed.emit()
 
     # ===== 脚本操作 =====
 

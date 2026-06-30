@@ -232,6 +232,10 @@ def _convert_entry(raw: dict[str, Any], fallback_id: str = "") -> ContextEntry:
     # role（默认 system）
     role = _normalize_role(raw.get("role"))
 
+    # enabled：由 ST disable 字段反序列化（disable=True → enabled=False）
+    disable = bool(raw.get("disable", False))
+    enabled = not disable
+
     # 收集未识别字段（排除 probability 与已知字段）
     raw_st_fields: dict[str, Any] = {}
     for k, v in raw.items():
@@ -248,6 +252,7 @@ def _convert_entry(raw: dict[str, Any], fallback_id: str = "") -> ContextEntry:
         position=position,
         depth=depth,
         role=role,
+        enabled=enabled,
         source_chapter_range=None,  # 导入条目标记
         extracted_at=None,
         raw_st_fields=raw_st_fields,

@@ -6,7 +6,7 @@
 
 NovelForge 是一个 SillyTavern (ST) 兼容的小说续写工具，提供从 TXT 导入、章节管理、上下文提取、提示词组装到 LLM 流式续写的完整工作流。
 
-**当前版本：v0.2.1**（定义于 `novelforge/__init__.py` 的 `__version__`，由"关于"对话框引用，README 顶部同步标注）
+**当前版本：v0.2.2**（定义于 `novelforge/__init__.py` 的 `__version__`，由"关于"对话框引用，README 顶部同步标注）
 
 **版本更新记录**：维护在 `README.md` 的"更新记录"章节，按版本倒序排列，每次发版须追加新版本小节（新增功能/修复/优化分类，每条一行简洁描述）
 
@@ -25,7 +25,7 @@ NovelForge 是一个 SillyTavern (ST) 兼容的小说续写工具，提供从 TX
 novelforge/
 ├── models/          # 数据模型（pydantic）
 │   ├── chapter.py       # Chapter、Continuation（续写模型：parent_id 字段保留向后兼容不再使用；accept=promote_continuation_to_chapter 提升为新章节插入当前章节之后，非链式入链）
-│   ├── context.py       # ContextEntry、VALID_CATEGORIES/POSITIONS/ROLES
+│   ├── context.py       # ContextEntry（含条目级 enabled 开关，控制是否注入上下文）、VALID_CATEGORIES/POSITIONS/ROLES
 │   ├── preset.py        # WritingPreset、Prompt、PromptOrderEntry
 │   ├── project.py       # Project、NovelProfile
 │   ├── regex.py         # RegexScript、PLACEMENT_* 常量
@@ -74,9 +74,9 @@ novelforge/
 │   ├── dialogs.py               # 通用对话框（隐私声明等）
 │   ├── project_panel.py         # 项目管理对话框
 │   ├── preset_manager.py        # 预设管理器（工具栏含新建/导入/导出/复制/删除/禁用/恢复默认预设 七按钮；生成参数含 temperature/max_tokens/max_context/top_p/top_k/reasoning_effort 六项，top_p 用 0-100 整数×0.01 映射 0.0-1.0 浮点，reasoning_effort 五档 auto/low/medium/high/max；恢复默认预设按钮调用 reset_default_preset 覆盖本地旧版本为内置最新版，含确认对话框与刷新）
-│   ├── regex_manager.py         # 正则管理器
+│   ├── regex_manager.py         # 正则管理器（当前作用域脚本列表含内联勾选开关，反向映射 disabled，点击即时持久化）
 │   ├── template_editor.py       # 模板编辑器（变量/模板渲染）
-│   ├── worldbook_manager.py     # 世界书管理器（导入/编辑/启停）
+│   ├── worldbook_manager.py     # 世界书管理器（导入/编辑/启停；条目列表含内联勾选开关控制条目级 enabled，禁用条目不注入上下文）
 │   ├── worldbook_panel.py       # 世界书选择面板（嵌入续写配置）
 │   ├── settings_dialog.py       # 设置对话框（API 端点管理）
 │   └── ...
@@ -105,6 +105,7 @@ novelforge/
 - 预设格式兼容 SillyTavern 的 `prompts` + `prompt_order` + `extensions.regex_scripts` 结构
 - 正则脚本支持 ST 的 `findRegex`（`/pattern/flags` 格式）、`trimStrings`、`placement`（1=USER_INPUT, 2=AI_OUTPUT, 5=WORLD_INFO）
 - 宏系统兼容 ST 的 `{{user}}`、`{{char}}`、`{{setvar::name::value}}`、`{{getvar::name}}` 等
+- 世界书条目级开关：`ContextEntry.enabled`（默认 True）与 ST `disable` 字段反向映射——导入 ST 世界书时 `disable=true → enabled=false`（`worldbook_importer._convert_entry`），导出时 `disable = not enabled`（`worldbook_service._entry_to_st_dict`）；正则 `RegexScript.disabled` 与 ST 同向（disabled=true 表示禁用）
 
 ### 2. QThread + asyncio 桥接
 
@@ -119,6 +120,7 @@ novelforge/
 - 续写时使用已提取的 `self._current_context_entries`，不再自动提取
 - **多批次【信息汇总】环节**：前文超 token_limit 时按章节边界拆分为多批次，每批独立全量提取 ContextEntry；`batch_count > 1` 时触发 `_run_merge_entries`（加载 `extract_merge_prompt.txt`，LLM 合并去重/冲突消解/字段补全），失败降级使用 best-effort uid 替换合并的 `all_entries`；`ExtractResult.merged` 标识是否经汇总环节
 - **单次续写上下文条目格式化输出**：`PromptAssembler._build_world_info_message` 按 `category` 分组为 Markdown（`# 上下文条目（自动提取）` + `## {中文标签}` + `- {content}（{keys}）`），`_CATEGORY_LABELS` 提供 characters→人物/locations→地点/events→事件/style→风格/plot_state→剧情状态/relationships→关系/atmosphere→氛围/foreshadowing→伏笔/other→其他 映射；worldInfoBefore/After 仍为独立 system 消息，position 语义不变
+- **世界书条目级开关控制注入**：`MainWindow._get_enabled_worldbook_entries` 过滤 `enabled=False` 的条目，单点覆盖 3 处续写入口（单章/卷/提示词预览均经 `_merge_worldbook_entries` 调用此方法）；世界书管理器条目列表内联勾选开关（`itemChanged` → `worldbook_service.set_entry_enabled`）即时持久化条目级 enabled；自动提取的 ContextEntry 默认 enabled=True 不受影响
 - **底层世界观元描述提取**（`OntologyExtractor`）：全文拆分分析提取 `WorldOntology` 7 大维度（existential_topology/causal_architecture/spatio_temporal_ontology/information_epistemology/axiological_foundation/becoming_dynamics/narrative_ontology）参数化描述，固化到 `Project.world_ontology`（全文提取一次，不随章节变化）；镜像 `ContextExtractor` 三大机制：①`_split_chapters_by_token_limit` 按 token 拆批（token_limit=0 不拆分）②增量更新每批次携带 `{{accumulated_ontology}}` 占位符（首批注入"（首批提取，无前序参考）"，后续注入累积 JSON），`_merge_ontology_fields` 程序化字段级合并（空字段取另侧/双侧非空按序列化长度启发式/冲突新批次优先）③`batch_count > 1` 触发 `_run_ontology_merge`（加载 `extract_ontology_merge_prompt.txt`，`{{entries_blocks}}` 拼接各批 JSON 含 `## 批次 i/N（章节 X-Y）` 标题，2 次重试温度 0.2/0.0，失败降级返回 accumulated_ontology）；非流式 `chat_completion` + 超时重试 1 次，`stop_event` 跨线程取消；`_save_ontology_to_worldbook` 拆 7 维度为 `ContextEntry`（category="plot_state"，uid=`{wb_id}_{dim}`，comment=中文标签）绑定 `project.worldbook_id`（空则 `_generate_id("wb_")` 新建）；返回 `tuple[WorldOntology | None, str]`（成功状态消息/失败错误消息/取消"用户取消提取"）
 - **主角形象一致性提取**（`ContextExtractor._extract_protagonist`）：与 8 维度提取共用 `batches` 划分（继承 token 拆分），逐批调用 `extract_protagonist_prompt.txt`，每批携带 `{{accumulated_protagonist}}` 增量上下文（首批注入"（首批提取，无前序参考）"），`_merge_protagonist_fields` 程序化字段级合并（`growth_arc` 维度新批次直接覆盖反映弧光演变，其他 7 维度按序列化长度启发式）；`batch_count > 1` 触发 `_run_protagonist_merge`（加载 `extract_protagonist_merge_prompt.txt`，2 次重试温度 0.2/0.0，失败降级返回 accumulated_protagonist）；失败不阻塞 8 维度结果；`ProtagonistProfile` 与 `ContextEntry` 共享 SQLite 缓存键 `ctx_extract:{project_id}:{chapter_id}`，仅反映至当前章节状态；8 维度心理学档案（basic_anchors/motivation_system/personality_structure/cognitive_style/defense_mechanisms/behavioral_fingerprint/relationship_coordinates/growth_arc）+ OOC 红线；大纲审计 `protagonist_consistency` 维度一票否决（score ≤ 4 → 整体 passed=false），章节验证 critical 级主角一致性问题 → passed=false
 

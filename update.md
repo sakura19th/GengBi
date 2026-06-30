@@ -4,6 +4,60 @@
 
 ---
 
+## 2026-06-30：发布 v0.2.2（世界书/正则条目内联勾选开关）
+
+### 版本号同步
+
+- `novelforge/__init__.py`：`__version__` 由 `0.2.1` → `0.2.2`
+- `README.md`：顶部「当前版本」由 `v0.2.1` → `v0.2.2`；「更新记录」章节新增 `v0.2.2` 小节（精简 3 条）
+- `agent.md`：「当前版本」由 `v0.2.1` → `v0.2.2`
+
+### 核心改动
+
+- **模型**（`novelforge/models/context.py`）：`ContextEntry` 新增 `enabled: bool = True` 字段，控制条目是否注入上下文；默认 True 保证旧 JSON/提取/新建条目向后兼容。
+- **ST 导入/导出**（`worldbook_importer.py` / `worldbook_service.py`）：导入时由 ST `disable` 字段反序列化（`disable=true → enabled=false`）；导出时 `disable = not enabled`（原硬编码 `False`），实现 ST 往返保持。
+- **世界书 UI**（`worldbook_manager.py`）：`_refresh_entry_list` 为每条目加 `ItemIsUserCheckable` + `setCheckState`（参照 `preset_manager._refresh_prompt_list`）；新增 `_on_entry_check_changed` handler（`itemChanged` → `worldbook_service.set_entry_enabled` 即时持久化 + `[禁用]` 前缀 + `worldbook_changed` 信号）；`_refresh_entry_list` 整体 `blockSignals(True)` 防递归；复制世界书补 `enabled=e.enabled`。
+- **服务层**（`worldbook_service.py`）：新增 `set_entry_enabled(wb, uid, enabled) -> bool`。
+- **注入过滤**（`main_window.py`）：`_get_enabled_worldbook_entries` 由 `list(wb.entries)` 改为 `[e for e in wb.entries if e.enabled]`，单点覆盖 3 处续写入口（单章/卷/提示词预览均经 `_merge_worldbook_entries`），禁用条目不注入上下文。
+- **正则 UI**（`regex_manager.py`）：`_refresh_script_list` 当前作用域脚本加 `ItemIsUserCheckable` + `setCheckState`（反向映射 `disabled`，Checked=启用）；移除 `[禁用]` 文本前缀（改由复选框表达）；整体 `blockSignals(True)` 包裹防递归；新增 `_on_script_check_changed` handler（仅处理可勾选项，跳过分隔项与其他作用域脚本；`model_copy(update={"disabled": ...})` + `update_script` 即时持久化 + 同步右侧 `_disabled_check`）；其他作用域脚本保留 `[禁用]` 文本前缀且不可勾选。
+- **正则默认状态**：无需额外改动——`default_regex_scripts.json` 4 条 `disabled:false`（全启用），`ensure_default_scripts_exist` 首次注入即写 `disabled:false`，内联复选框读取 `script.disabled` 后默认全勾选，符合「按案例默认开关加载」。
+
+### 测试
+
+`python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"`：430 passed, 13 skipped, 12 deselected。含 worldbook/regex/context 相关 146 用例全通过，无回归。
+
+### 文档同步
+
+README.md 新增 v0.2.2 更新记录小节（精简 3 条）；agent.md 同步版本号；update.md 追加本发布条目。
+
+---
+
+## 2026-06-30：世界书/正则条目内联勾选开关（参照预设）
+
+### 背景
+
+世界书与正则管理器的条目列表此前无内联勾选开关：世界书条目无条目级启用字段（仅有书级 enabled），正则虽模型含 `disabled` 字段但列表仅以 `[禁用]` 文本前缀呈现，切换需进入右侧编辑器勾选「禁用」再点保存，操作繁琐。用户要求参照「预设管理器」的条目前方勾选开关，可单独点击启用/禁用；正则默认加载后按内置案例 `default_regex_scripts.json` 的默认开关加载，无需手动调整。
+
+### 核心改动
+
+- **模型**（`novelforge/models/context.py`）：`ContextEntry` 新增 `enabled: bool = True` 字段，控制条目是否注入上下文；默认 True 保证旧 JSON/提取/新建条目向后兼容。
+- **ST 导入/导出**（`worldbook_importer.py` / `worldbook_service.py`）：导入时由 ST `disable` 字段反序列化（`disable=true → enabled=false`）；导出时 `disable = not enabled`（原硬编码 `False`），实现 ST 往返保持。
+- **世界书 UI**（`worldbook_manager.py`）：`_refresh_entry_list` 为每条目加 `ItemIsUserCheckable` + `setCheckState`（参照 `preset_manager._refresh_prompt_list`）；新增 `_on_entry_check_changed` handler（`itemChanged` → `worldbook_service.set_entry_enabled` 即时持久化 + `[禁用]` 前缀 + `worldbook_changed` 信号）；`_refresh_entry_list` 整体 `blockSignals(True)` 防递归；复制世界书补 `enabled=e.enabled`。
+- **服务层**（`worldbook_service.py`）：新增 `set_entry_enabled(wb, uid, enabled) -> bool`。
+- **注入过滤**（`main_window.py`）：`_get_enabled_worldbook_entries` 由 `list(wb.entries)` 改为 `[e for e in wb.entries if e.enabled]`，单点覆盖 3 处续写入口（单章/卷/提示词预览均经 `_merge_worldbook_entries`），禁用条目不注入上下文。
+- **正则 UI**（`regex_manager.py`）：`_refresh_script_list` 当前作用域脚本加 `ItemIsUserCheckable` + `setCheckState`（反向映射 `disabled`，Checked=启用）；移除 `[禁用]` 文本前缀（改由复选框表达）；整体 `blockSignals(True)` 包裹防递归；新增 `_on_script_check_changed` handler（仅处理可勾选项，跳过分隔项与其他作用域脚本；`model_copy(update={"disabled": ...})` + `update_script` 即时持久化 + 同步右侧 `_disabled_check`）；其他作用域脚本保留 `[禁用]` 文本前缀且不可勾选。
+- **正则默认状态**：无需额外改动——`default_regex_scripts.json` 4 条 `disabled:false`（全启用），`ensure_default_scripts_exist` 首次注入即写 `disabled:false`，内联复选框读取 `script.disabled` 后默认全勾选，符合「按案例默认开关加载」。
+
+### 测试
+
+`python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"`：430 passed, 13 skipped, 12 deselected。含 worldbook/regex/context 相关 146 用例全通过，无回归。
+
+### 文档同步
+
+`agent.md`：目录树 `context.py`/`regex_manager.py`/`worldbook_manager.py` 描述行更新；关键设计决策 §1 ST 兼容性新增条目级 enabled↔disable 映射说明；§3 提取与续写新增「世界书条目级开关控制注入」条目。
+
+---
+
 ## 2026-06-30：发布 v0.2.1（合并 feat-context-extraction-merge 分支）
 
 ### 背景

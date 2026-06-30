@@ -39,6 +39,8 @@ class ContextEntry(BaseModel):
     - ``depth``：仅 at_depth 时有效，默认 4
     - ``role``：消息角色，默认 system；仅 at_depth 注入时生效，
       worldInfoBefore/After marker 注入时固定为 system
+    - ``enabled``：条目级启用开关，默认 True；为 False 时不注入上下文。
+      导入 ST 世界书时由 ``disable`` 字段反序列化（disable=True → enabled=False）
     - ``source_chapter_range``：提取来源章节区间（闭区间，如 (0, 4)）；
       导入 ST 世界书时为 None
     - ``extracted_at``：提取时间
@@ -58,6 +60,7 @@ class ContextEntry(BaseModel):
     position: str = "before"
     depth: int = 4
     role: str = "system"
+    enabled: bool = True
     source_chapter_range: tuple[int, int] | None = None
     extracted_at: datetime | None = None
     raw_st_fields: dict = Field(default_factory=dict, alias="_raw_st_fields")

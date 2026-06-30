@@ -202,8 +202,8 @@ class WorldBookService(BaseJsonService[WorldBook]):
         """将 ContextEntry 转换为 ST 兼容字典（含未识别字段）。
 
         先从 ``raw_st_fields`` 恢复未识别字段，再用赓笔字段覆盖。
-        position/role 通过反向映射转回数字；disable 默认 False
-        （ContextEntry 不跟踪单条启用状态）。
+        position/role 通过反向映射转回数字；disable 由条目级 enabled
+        反向映射（enabled=False → disable=True）。
         """
         # 从 raw_st_fields 恢复未识别字段
         data: dict[str, Any] = dict(entry.raw_st_fields)
@@ -216,7 +216,7 @@ class WorldBookService(BaseJsonService[WorldBook]):
         data["position"] = REVERSE_POSITION_MAP.get(entry.position, 0)
         data["depth"] = entry.depth
         data["role"] = REVERSE_ROLE_MAP.get(entry.role, 0)
-        data["disable"] = False
+        data["disable"] = not entry.enabled
         return data
 
     def set_worldbook_enabled(self, wb_id: str, enabled: bool) -> bool:
@@ -235,3 +235,23 @@ class WorldBookService(BaseJsonService[WorldBook]):
         wb.enabled = enabled
         self.save_worldbook(wb)
         return True
+
+    def set_entry_enabled(
+        self, wb: WorldBook, uid: str, enabled: bool
+    ) -> bool:
+        """切换世界书内单条条目的启用状态并持久化。
+
+        Args:
+            wb: 当前世界书（内存对象，调用方持有引用）
+            uid: 条目 UID
+            enabled: 是否启用
+
+        Returns:
+            是否找到并更新成功（uid 不存在时返回 False）
+        """
+        for entry in wb.entries:
+            if entry.uid == uid:
+                entry.enabled = enabled
+                self.save_worldbook(wb)
+                return True
+        return False
