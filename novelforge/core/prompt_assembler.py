@@ -356,6 +356,7 @@ class PromptAssembler:
         chapter_metadata: dict[str, Any] | None = None,
         user_input: str = "",
         lookback_chapters: int = 0,
+        skip_history: bool = False,
         world_ontology: Any = None,
         protagonist_profile: Any = None,
     ) -> AssembleResult:
@@ -375,6 +376,7 @@ class PromptAssembler:
             chapter_metadata: 章节元数据（用于模板渲染上下文）
             user_input: 用户续写指令
             lookback_chapters: 回溯章节数（0=全部前文，>0=仅取最近 N 章）
+            skip_history: 跳过聊天历史构建（卷模式专用，True 时不注入任何章节正文到 chat history）
 
         Returns:
             AssembleResult 对象
@@ -417,7 +419,7 @@ class PromptAssembler:
 
         # ===== 阶段 2：构建历史 + 深度注入 =====
         history_messages = self._build_history(
-            chapters, current_chapter, lookback_chapters
+            chapters, current_chapter, lookback_chapters, skip_history
         )
         at_depth_entries = [e for e in context_entries if e.position == "at_depth"]
         # 排序后 splice 插入
@@ -716,6 +718,7 @@ class PromptAssembler:
         chapters: list[Any],
         current_chapter: Any,
         lookback_chapters: int = 0,
+        skip_history: bool = False,
     ) -> list[dict[str, Any]]:
         """构建章节历史消息。
 
@@ -726,14 +729,21 @@ class PromptAssembler:
         - 0（默认）：全部前文（从第 0 章到当前章节含）
         - >0：仅取最近 N 章（含当前章节），从末尾保留
 
+        ``skip_history`` 为 True 时直接返回空列表（卷模式专用，
+        前文由"最近 10 章正文参考"系统消息提供，避免章节正文重复）。
+
         Args:
             chapters: 所有章节列表
             current_chapter: 当前续写章节
             lookback_chapters: 回溯章节数（0=全部前文，>0=仅取最近 N 章）
+            skip_history: 跳过历史构建（卷模式专用）
 
         Returns:
             历史消息列表
         """
+        if skip_history:
+            return []
+
         # 获取当前章节 ID
         if isinstance(current_chapter, dict):
             current_id = current_chapter.get("id", "")

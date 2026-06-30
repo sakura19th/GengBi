@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-06-30：重新检视【回溯章节数】与【最近 10 章正文参考】概念分离
+
+### 背景
+
+卷续写模式下章节正文会同时出现在两个地方造成重复：(1) 聊天历史（受单章模式"回溯章节数"参数 `lookback_chapters` 控制，默认 5 章，来自 ContinuationPanel `_lookback_spin`，卷模式下隐藏但仍活跃）截断 chat history；(2) `volume_orchestrator.py` 在 assemble 后额外注入"最近 10 章正文参考（含本卷已生成）"系统消息。两者重叠导致 5 章正文重复出现两次。用户要求：单章生成用"回溯章节数"，多章节生成用"最近 10 章正文参考（含本卷已生成）"，卷模式不再使用"回溯章节数"以免多次重复章节。
+
+### 核心改动
+
+- **`novelforge/core/prompt_assembler.py`**：`assemble()` 与 `_build_history()` 新增 `skip_history: bool = False` 参数；`skip_history=True` 时 `_build_history` 直接返回空列表，不构建任何章节历史消息。默认 `False`，单章续写与提示词预览不受影响。
+- **`novelforge/services/volume_orchestrator.py`**：`_run_chapter_writing()` 的 `prompt_assembler.assemble()` 调用新增 `skip_history=True`，移除原 `lookback_chapters=self.parameters.get("lookback_chapters", 0)` 参数（不再泄漏单章模式参数到卷模式）；卷模式写作阶段聊天历史为空，前文仅由"最近 10 章正文参考（含本卷已生成）"系统消息提供；`effective_chapters` 仍传入供 Jinja2 render_context 与宏上下文使用。
+
+### 测试
+
+- 新增 `tests/test_volume_orchestrator.py::test_volume_writing_skips_chat_history`：N=2 预置 1 章含唯一正文标记，断言写作 messages 含"最近 10 章正文参考"系统消息但无 user 消息含预置章节正文，验证 `skip_history=True` 消除 chat history 与系统消息的章节正文重复。
+- `python -m pytest tests/test_volume_orchestrator.py tests/test_m2_prompt_assembly.py tests/test_volume_e2e.py tests/test_volume_prompts.py -q`：74 passed，无回归。
+
+### 文档同步
+
+- `agent.md`：§5 UI 布局规范明确"回溯章节数仅在单章模式生效"；§9 卷级续写 `_run_chapter_writing` 描述注明 `skip_history=True` 跳过聊天历史；架构分层 `prompt_assembler.py` 描述加 `skip_history` 参数；代码风格规范新增"前文参考机制按模式分离"条目；测试用例计数 36→37。
+
+---
+
 ## 2026-06-30：发布 v0.2.2（世界书/正则条目内联勾选开关）
 
 ### 版本号同步

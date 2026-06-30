@@ -1493,6 +1493,52 @@ def test_dynamic_lookback_includes_generated_chapters() -> None:
     assert "最近 10 章正文参考（含本卷已生成）" in ch2_verify_prompt
 
 
+def test_volume_writing_skips_chat_history() -> None:
+    """卷模式写作阶段跳过聊天历史：前文仅由"最近 10 章正文参考"系统消息提供，不在 chat history 重复。"""
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = False
+    config.enable_chapter_revise = False
+    # 预置 1 章，正文含唯一标记
+    pre_chapter = make_chapter(
+        index=0, chapter_id="pre_0",
+        title="前文第1章", content="PRE_CHAPTER_UNIQUE_BODY_MARK",
+    )
+    orchestrator = make_orchestrator(
+        config=config,
+        chapters=[pre_chapter],
+        current_chapter=pre_chapter,
+    )
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 第 1 章：细纲 + 写作
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="VOL_CH1_UNIQUE_MARK")])
+    # 第 2 章：细纲 + 写作
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="VOL_CH2_UNIQUE_MARK")])
+    orchestrator._client = fake
+
+    run_async(orchestrator._async_run())
+
+    # last_stream_messages 为最后一次 stream 调用（第 2 章写作）的 messages
+    writing_messages = fake.last_stream_messages
+    assert writing_messages, "应有写作阶段 stream 调用"
+
+    # 预置章节正文应出现在"最近 10 章正文参考"系统消息中（前文由系统消息提供）
+    all_content = "\n".join(m.get("content", "") for m in writing_messages)
+    assert "PRE_CHAPTER_UNIQUE_BODY_MARK" in all_content, "预置章节应在系统消息中提供前文"
+    assert "最近 10 章正文参考（含本卷已生成）" in all_content, "应含系统消息标签"
+
+    # 预置章节正文不应作为独立 user 消息出现（chat history 应为空，skip_history=True）
+    user_msgs_with_pre = [
+        m for m in writing_messages
+        if m.get("role") == "user" and "PRE_CHAPTER_UNIQUE_BODY_MARK" in m.get("content", "")
+    ]
+    assert not user_msgs_with_pre, "chat history 不应包含预置章节正文（skip_history=True）"
+
+
 def test_dynamic_lookback_window_size() -> None:
     """动态前文窗口恰好 10 章：15 章前文 + 生成第 6 章，lookback=chapters[10:20]。"""
     config = VolumeRunConfig(chapter_count=6)

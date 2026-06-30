@@ -1429,7 +1429,7 @@ class VolumeOrchestrator(QThread):
             project_id=self.project_id,
             chapter_metadata=self.chapter_metadata,
             user_input=per_chapter_input,
-            lookback_chapters=self.parameters.get("lookback_chapters", 0),
+            skip_history=True,
             world_ontology=self.world_ontology,
             protagonist_profile=self.protagonist_profile,
         )
