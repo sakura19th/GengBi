@@ -47,6 +47,9 @@ ONTOLOGY_EXTRACT_MAX_TOKENS = 8000
 # 提取温度（低温保证稳定输出）
 ONTOLOGY_EXTRACT_TEMPERATURE = 0.2
 
+# 提取温度（重试，温度归零确保稳定）
+ONTOLOGY_EXTRACT_TEMPERATURE_RETRY = 0.0
+
 # 合并温度（首次尝试）
 ONTOLOGY_MERGE_TEMPERATURE = 0.2
 
@@ -795,78 +798,104 @@ class OntologyExtractor:
                 logger.error("构建底层世界观提示词失败: %s", e, exc_info=True)
                 return None, f"构建提示词失败: {e}"
 
-            # 调用 LLM（非流式 + 超时重试 1 次）
+            # 调用 LLM（2 次尝试：温度 0.2 / 0.0，仅 2 次均失败才中止整体提取）
             messages = [{"role": "user", "content": prompt}]
-            response: dict[str, Any] = {}
-            retried = False
+            extract_temperatures = [
+                ONTOLOGY_EXTRACT_TEMPERATURE,
+                ONTOLOGY_EXTRACT_TEMPERATURE_RETRY,
+            ]
+            batch_ontology: dict[str, Any] | None = None
+            last_error = ""
 
-            while True:
+            for attempt, temperature in enumerate(extract_temperatures):
+                # 取消信号检查
+                if stop_event is not None and stop_event.is_set():
+                    return None, "用户取消提取"
                 try:
                     response = await client.chat_completion(
                         messages=messages,
                         model=model,
-                        temperature=ONTOLOGY_EXTRACT_TEMPERATURE,
+                        temperature=temperature,
                         max_tokens=ONTOLOGY_EXTRACT_MAX_TOKENS,
                         stop_event=stop_event,
                     )
-                    break
-                except asyncio.CancelledError:
-                    logger.info("底层世界观提取被取消（批次 %d/%d 调用中）",
-                                batch_idx + 1, batch_count)
-                    return None, "用户取消提取"
-                except asyncio.TimeoutError as e:
-                    if not retried:
-                        logger.warning(
-                            "批次 %d/%d 超时，重试中...",
-                            batch_idx + 1, batch_count,
+                    # 取消信号检查
+                    if stop_event is not None and stop_event.is_set():
+                        return None, "用户取消提取"
+                    # 解析响应
+                    choices = response.get("choices", [])
+                    if not choices:
+                        last_error = (
+                            f"批次 {batch_idx + 1}/{batch_count} 响应无 choices"
                         )
-                        retried = True
-                        # 重试前检查取消信号
-                        if stop_event is not None and stop_event.is_set():
-                            return None, "用户取消提取"
-                        continue
-                    logger.error(
-                        "批次 %d/%d 超时重试失败: %s",
-                        batch_idx + 1, batch_count, e,
+                        logger.warning(
+                            "批次 %d/%d 第 %d 次尝试无 choices",
+                            batch_idx + 1, batch_count, attempt + 1,
+                        )
+                        if attempt < len(extract_temperatures) - 1:
+                            continue
+                        return None, last_error
+                    message = choices[0].get("message", {})
+                    content = message.get("content", "") or ""
+
+                    # 推送本批次内容到 on_chunk（供 UI 显示）
+                    if on_chunk is not None and content:
+                        try:
+                            on_chunk(content)
+                        except Exception as e:
+                            logger.warning("on_chunk 回调异常: %s", e)
+
+                    # 解析 JSON → dict（仅保留 7 大维度字段）
+                    batch_ontology = _parse_ontology_response(content)
+                    break  # 成功，退出重试循环
+                except asyncio.CancelledError:
+                    logger.info(
+                        "底层世界观提取被取消（批次 %d/%d 第 %d 次尝试）",
+                        batch_idx + 1, batch_count, attempt + 1,
                     )
-                    return None, f"批次 {batch_idx + 1}/{batch_count} 超时（已重试）"
+                    return None, "用户取消提取"
+                except json.JSONDecodeError as e:
+                    last_error = (
+                        f"批次 {batch_idx + 1}/{batch_count} JSON 解析失败: {e}"
+                    )
+                    logger.warning(
+                        "批次 %d/%d 第 %d 次尝试 JSON 解析失败: %s, content=%s",
+                        batch_idx + 1, batch_count, attempt + 1, e, content[:200],
+                    )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
+                    return None, last_error
+                except asyncio.TimeoutError as e:
+                    last_error = f"批次 {batch_idx + 1}/{batch_count} 超时: {e}"
+                    logger.warning(
+                        "批次 %d/%d 第 %d 次尝试超时: %s",
+                        batch_idx + 1, batch_count, attempt + 1, e,
+                    )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
+                    return None, last_error
                 except (AuthError, RateLimitError, APIError, LLMError) as e:
-                    logger.error("底层世界观提取 LLM 调用失败: %s", e)
-                    return None, f"LLM 调用失败: {e}"
+                    last_error = f"批次 {batch_idx + 1}/{batch_count} LLM 调用失败: {e}"
+                    logger.warning(
+                        "批次 %d/%d 第 %d 次尝试 LLM 调用失败: %s",
+                        batch_idx + 1, batch_count, attempt + 1, e,
+                    )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
+                    return None, last_error
                 except Exception as e:
-                    logger.error("底层世界观提取异常: %s", e, exc_info=True)
-                    return None, f"提取异常: {e}"
-
-            # 取消信号检查
-            if stop_event is not None and stop_event.is_set():
-                return None, "用户取消提取"
-
-            # 解析响应
-            choices = response.get("choices", [])
-            if not choices:
-                return None, f"批次 {batch_idx + 1}/{batch_count} 响应无 choices"
-
-            message = choices[0].get("message", {})
-            content = message.get("content", "") or ""
-
-            # 推送本批次内容到 on_chunk（供 UI 显示）
-            if on_chunk is not None and content:
-                try:
-                    on_chunk(content)
-                except Exception as e:
-                    logger.warning("on_chunk 回调异常: %s", e)
-
-            # 解析 JSON → dict（仅保留 7 大维度字段）
-            try:
-                batch_ontology = _parse_ontology_response(content)
-            except json.JSONDecodeError as e:
-                logger.error(
-                    "批次 %d/%d JSON 解析失败: %s, content=%s",
-                    batch_idx + 1, batch_count, e, content[:200],
-                )
-                return None, f"批次 {batch_idx + 1}/{batch_count} JSON 解析失败: {e}"
+                    last_error = f"批次 {batch_idx + 1}/{batch_count} 提取异常: {e}"
+                    logger.error(
+                        "批次 %d/%d 第 %d 次尝试异常: %s",
+                        batch_idx + 1, batch_count, attempt + 1, e, exc_info=True,
+                    )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
+                    return None, last_error
 
             # 记录本批次独立结果（供汇总环节使用）
+            # 循环仅 break（成功）或 return（失败）退出，此处 batch_ontology 必非 None
+            assert batch_ontology is not None
             batch_results.append(batch_ontology)
 
             # 增量合并到 accumulated_ontology（核心：增量更新）

@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-06-30：批次提取失败自动重试
+
+### 背景
+
+世界观底层与上下文提取分批次调用 LLM 时，单批次失败（网络波动/JSON 解析失败/超时等）会立即中止整体提取，用户需从头重跑。用户要求：单批次失败立即自动重试该次，而非整体中止。
+
+### 核心改动
+
+- **`novelforge/services/ontology_extractor.py`**：`extract_ontology_streaming` 批次循环改为 2 次重试（温度 0.2/0.0），覆盖 TimeoutError/AuthError/RateLimitError/APIError/LLMError/JSONDecodeError/无 choices/其他非取消异常，`asyncio.CancelledError` 不重试；新增常量 `ONTOLOGY_EXTRACT_TEMPERATURE_RETRY = 0.0`
+- **`novelforge/services/context_extractor.py`**：8 维度批次循环（`extract`/`extract_streaming`）与主角形象批次循环（`_extract_protagonist`）均改为 2 次重试，重试条件同上；新增常量 `EXTRACT_TEMPERATURE_RETRY`/`PROTAGONIST_EXTRACT_TEMPERATURE_RETRY`；流式分支重试时清空 `content_parts` 避免拼接残缺内容
+- 镜像【信息汇总】合并环节（`_run_ontology_merge`/`_run_protagonist_merge`/`_run_merge_entries`）现有的 2 次重试策略
+
+### 测试
+
+- `tests/test_ontology_extractor.py`：+3 用例（LLMError 重试 / JSON 解析失败重试 / 重试耗尽失败）
+- `tests/test_protagonist_extraction.py`：+1 用例（LLMError 重试）
+- `tests/test_m4_context_extraction.py`：+2 用例（LLMError 重试 / 重试耗尽失败）+ 5 旧用例 call_count 断言同步更新（主角形象解析失败现触发重试，调用次数 +1）
+- `tests/test_e2e_workflow.py`：1 用例 call_count 断言同步更新（同上）
+- 全量回归：456 passed, 13 skipped
+
+### 文档同步
+
+- agent.md §3「提取与续写解耦」新增「批次级自动重试」条目，覆盖三个提取器（ContextExtractor 8 维度批次 / _extract_protagonist 主角形象批次 / OntologyExtractor 批次）
+
 ## 2026-06-30：重新检视【回溯章节数】与【最近 10 章正文参考】概念分离
 
 ### 背景

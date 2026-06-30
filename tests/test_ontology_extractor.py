@@ -26,6 +26,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import pytest
 
 from novelforge.models import ContextEntry, WorldOntology
+from novelforge.services.llm_client import LLMError
 from novelforge.services.ontology_extractor import (
     ONTOLOGY_DIMENSIONS,
     OntologyExtractor,
@@ -362,6 +363,103 @@ class TestOntologyExtractor:
         assert ontology.causal_architecture == {"causal_directionality": "前向"}
         assert ontology.narrative_ontology == {"ending_logic": "开放式"}
         assert "完成" in status
+
+    def test_extract_batch_retry_on_llm_error(self) -> None:
+        """单批次首次 LLM 调用失败，第二次成功 → 提取成功，call_count==2。"""
+        extractor = self._make_extractor()
+
+        ontology_json = _make_ontology_json()
+        mock_client = MagicMock()
+        mock_client.chat_completion = AsyncMock(
+            side_effect=[
+                LLMError("首次调用网络错误"),
+                {
+                    "choices": [{"message": {"content": ontology_json}}],
+                    "usage": {"total_tokens": 100},
+                },
+            ]
+        )
+        extractor._get_llm_client = MagicMock(
+            return_value=(mock_client, "gpt-4o-mini")
+        )
+
+        chapters = [make_chapter(index=0, content="章节内容")]
+        ontology, status = asyncio.run(
+            extractor.extract_ontology_streaming(
+                project=make_project(),
+                chapters=chapters,
+                token_limit=0,
+            )
+        )
+
+        assert ontology is not None
+        assert isinstance(ontology, WorldOntology)
+        assert ontology.existential_topology == {"being_hierarchy": "三界"}
+        assert "完成" in status
+        # 首次失败 + 第二次成功 = 2 次 LLM 调用
+        assert mock_client.chat_completion.call_count == 2
+
+    def test_extract_batch_retry_on_json_parse_failure(self) -> None:
+        """单批次首次返回非法 JSON，第二次返回有效 JSON → 提取成功，call_count==2。"""
+        extractor = self._make_extractor()
+
+        ontology_json = _make_ontology_json()
+        mock_client = MagicMock()
+        mock_client.chat_completion = AsyncMock(
+            side_effect=[
+                {"choices": [{"message": {"content": "这不是合法JSON"}}], "usage": {}},
+                {"choices": [{"message": {"content": ontology_json}}], "usage": {}},
+            ]
+        )
+        extractor._get_llm_client = MagicMock(
+            return_value=(mock_client, "gpt-4o-mini")
+        )
+
+        chapters = [make_chapter(index=0, content="章节内容")]
+        ontology, status = asyncio.run(
+            extractor.extract_ontology_streaming(
+                project=make_project(),
+                chapters=chapters,
+                token_limit=0,
+            )
+        )
+
+        assert ontology is not None
+        assert isinstance(ontology, WorldOntology)
+        assert ontology.existential_topology == {"being_hierarchy": "三界"}
+        assert "完成" in status
+        # 首次 JSON 解析失败 + 第二次成功 = 2 次 LLM 调用
+        assert mock_client.chat_completion.call_count == 2
+
+    def test_extract_batch_retry_exhausted_fails(self) -> None:
+        """单批次 2 次均抛 LLMError → 返回 None + 错误消息含批次信息，call_count==2。"""
+        extractor = self._make_extractor()
+
+        mock_client = MagicMock()
+        mock_client.chat_completion = AsyncMock(
+            side_effect=[
+                LLMError("第一次失败"),
+                LLMError("第二次失败"),
+            ]
+        )
+        extractor._get_llm_client = MagicMock(
+            return_value=(mock_client, "gpt-4o-mini")
+        )
+
+        chapters = [make_chapter(index=0, content="章节内容")]
+        ontology, status = asyncio.run(
+            extractor.extract_ontology_streaming(
+                project=make_project(),
+                chapters=chapters,
+                token_limit=0,
+            )
+        )
+
+        assert ontology is None
+        assert "批次 1/1" in status
+        assert "LLM 调用失败" in status
+        # 2 次均失败 = 2 次 LLM 调用
+        assert mock_client.chat_completion.call_count == 2
 
 
 if __name__ == "__main__":

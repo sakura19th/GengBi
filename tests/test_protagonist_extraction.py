@@ -558,6 +558,77 @@ class TestSafeSerializeDim:
         assert _safe_serialize_dim(None) == "null"
 
 
+# ===== 10. _extract_protagonist 批次重试测试 =====
+
+
+class TestExtractProtagonistBatchRetry:
+    """_extract_protagonist 批次失败自动重试测试。"""
+
+    def test_protagonist_batch_retry_on_llm_error(self) -> None:
+        """单批次首次 LLM 调用失败，第二次成功 → 提取成功，call_count==2。"""
+        import asyncio
+
+        from novelforge.models import Chapter, NovelProfile, Project
+        from novelforge.services.llm_client import LLMError
+
+        extractor = _make_extractor()
+
+        # 构造含 8 维度之一的有效主角形象 JSON
+        profile_json = json.dumps(
+            {"basic_anchors": {"name": "主角", "identity": "战士"}},
+            ensure_ascii=False,
+        )
+        mock_client = MagicMock()
+        mock_client.chat_completion = AsyncMock(
+            side_effect=[
+                LLMError("首次调用网络错误"),
+                {
+                    "choices": [{"message": {"content": profile_json}}],
+                    "usage": {},
+                },
+            ]
+        )
+
+        profile = NovelProfile(
+            title="测试小说",
+            author="测试作者",
+            protagonist="主角",
+            synopsis="测试简介",
+            world_setting="测试世界观",
+            writing_style="测试风格",
+        )
+        project = Project(id="test_proj", name="测试小说", novel_profile=profile)
+        chapters = [
+            Chapter(
+                id="ch_0",
+                project_id="test_proj",
+                index=0,
+                title="第1章",
+                content="章节内容",
+                word_count=4,
+            )
+        ]
+        config = {"lookback_chapters": 5}
+
+        result, batch_count, merged = asyncio.run(
+            extractor._extract_protagonist(
+                project=project,
+                batches=[chapters],
+                config=config,
+                client=mock_client,
+                model="gpt-4o-mini",
+                stream=False,
+                on_chunk=None,
+                on_batch_complete=None,
+            )
+        )
+
+        assert result is not None
+        assert batch_count == 1
+        # 首次失败 + 第二次成功 = 2 次 LLM 调用
+        assert mock_client.chat_completion.call_count == 2
+
+
 if __name__ == "__main__":
     # 直接运行时执行所有测试
     pytest.main([__file__, "-v", "--tb=short"])

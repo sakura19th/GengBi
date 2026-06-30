@@ -836,8 +836,8 @@ class TestContextExtractor:
             )
         )
         assert result.status == "completed"
-        # 验证调用了 LLM：1 次 8 维度提取 + 1 次主角形象提取（失败被捕获，不阻塞结果）
-        assert mock_client.chat_completion.call_count == 2
+        # 1 次 8 维度提取 + 2 次主角形象提取（解析失败重试 1 次，最终失败被捕获不阻塞结果）
+        assert mock_client.chat_completion.call_count == 3
 
     def test_extract_cache_hit(self) -> None:
         """测试缓存命中。"""
@@ -921,8 +921,8 @@ class TestContextExtractor:
         assert result.from_cache is False
         # 缓存不应被读取
         storage_service.storage.get_cache.assert_not_called()
-        # LLM 应被调用：1 次 8 维度提取 + 1 次主角形象提取（失败被捕获，不阻塞结果）
-        assert mock_client.chat_completion.call_count == 2
+        # LLM 应被调用：1 次 8 维度提取 + 2 次主角形象提取（解析失败重试 1 次，最终失败被捕获不阻塞结果）
+        assert mock_client.chat_completion.call_count == 3
 
     def test_extract_llm_failure(self) -> None:
         """测试 LLM 调用失败。"""
@@ -1036,6 +1036,85 @@ class TestContextExtractor:
         assert all(e.source_chapter_range == (0, 0) for e in result.entries)
         # 验证 token_usage 被记录
         assert result.token_usage.get("total_tokens") == 200
+
+    def test_extract_batch_retry_on_llm_error(self) -> None:
+        """单批次首次 LLM 调用失败，第二次成功 → status 非 failed，call_count==2。"""
+        from novelforge.services.llm_client import LLMError
+
+        extractor = self._make_extractor()
+
+        response_content = json.dumps([
+            {
+                "uid": "char_1",
+                "category": "characters",
+                "key": ["主角"],
+                "comment": "主角信息",
+                "content": "主角是位战士",
+                "order": 50,
+                "position": "before",
+                "depth": 4,
+                "role": "system",
+            },
+        ])
+        mock_client = MagicMock()
+        mock_client.chat_completion = AsyncMock(
+            side_effect=[
+                LLMError("首次调用网络错误"),
+                {
+                    "choices": [{"message": {"content": response_content}}],
+                    "usage": {"total_tokens": 200},
+                },
+                # 主角形象提取响应（合法 dict，第 1 次尝试即成功）
+                {
+                    "choices": [{"message": {"content": '{"basic_anchors": {}}'}}],
+                    "usage": {},
+                },
+            ]
+        )
+        extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
+
+        chapters = [make_chapter(index=0, content="内容")]
+        result = asyncio.run(
+            extractor.extract(
+                project=make_project(),
+                chapters=chapters,
+                current_chapter=chapters[0],
+                force_refresh=True,
+            )
+        )
+        assert result.status != "failed"
+        assert len(result.entries) == 1
+        assert result.entries[0].uid == "char_1"
+        # 8 维度首次失败+第二次成功（2 次）+ 主角形象 1 次成功 = 3 次 LLM 调用
+        assert mock_client.chat_completion.call_count == 3
+
+    def test_extract_batch_retry_exhausted_fails(self) -> None:
+        """单批次 2 次均抛 LLMError → status failed，call_count==2。"""
+        from novelforge.services.llm_client import LLMError
+
+        extractor = self._make_extractor()
+
+        mock_client = MagicMock()
+        mock_client.chat_completion = AsyncMock(
+            side_effect=[
+                LLMError("第一次失败"),
+                LLMError("第二次失败"),
+            ]
+        )
+        extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
+
+        chapters = [make_chapter(index=0, content="内容")]
+        result = asyncio.run(
+            extractor.extract(
+                project=make_project(),
+                chapters=chapters,
+                current_chapter=chapters[0],
+                force_refresh=True,
+            )
+        )
+        assert result.status == "failed"
+        # 2 次均失败 = 2 次 LLM 调用
+        assert mock_client.chat_completion.call_count == 2
 
     def test_extract_lookback_chapters_override(self) -> None:
         """测试 lookback_chapters 配置覆盖。"""
@@ -1185,8 +1264,8 @@ class TestContextExtractor:
         assert result.merged is True
         assert result.batch_count == 3
         assert len(result.entries) == 3
-        # 3 批 8 维度 + 1 次汇总 + 1 次主角形象提取（失败被捕获，不阻塞结果）
-        assert mock_client.chat_completion.call_count == 5
+        # 3 批 8 维度 + 1 次汇总 + 2 次主角形象提取（StopAsyncIteration 重试 1 次，最终失败被捕获不阻塞结果）
+        assert mock_client.chat_completion.call_count == 6
         # 验证第 4 次调用（汇总）的 prompt 含批次标记
         merge_call = mock_client.chat_completion.call_args_list[3]
         merge_prompt = merge_call.kwargs["messages"][0]["content"]
@@ -1231,8 +1310,8 @@ class TestContextExtractor:
         assert result.merged is False
         assert result.batch_count == 1
         assert len(result.entries) == 2
-        # 1 次 8 维度提取 + 1 次主角形象提取（失败被捕获，不阻塞结果）
-        assert mock_client.chat_completion.call_count == 2
+        # 1 次 8 维度提取 + 2 次主角形象提取（解析失败重试 1 次，最终失败被捕获不阻塞结果）
+        assert mock_client.chat_completion.call_count == 3
 
     def test_merge_failure_degrades_to_all_entries(self) -> None:
         """测试【信息汇总】失败时降级使用 best-effort uid 替换合并结果。
@@ -1280,8 +1359,8 @@ class TestContextExtractor:
         assert result.batch_count == 3
         # best-effort uid 替换合并：dup_1 被更新（2 次），loc_2 新增 → 2 条
         assert len(result.entries) == 2
-        # 3 批 8 维度 + 1 次汇总失败 + 1 次主角形象提取（StopAsyncIteration 被捕获，不阻塞结果）
-        assert mock_client.chat_completion.call_count == 5
+        # 3 批 8 维度 + 1 次汇总失败 + 2 次主角形象提取（StopAsyncIteration 重试 1 次，最终失败被捕获不阻塞结果）
+        assert mock_client.chat_completion.call_count == 6
 
     def test_extract_result_merged_field(self) -> None:
         """测试 ExtractResult.merged 字段默认值与赋值。"""

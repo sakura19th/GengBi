@@ -66,6 +66,9 @@ EXTRACT_MAX_TOKENS = 5000
 # 提取温度（低温保证稳定输出）
 EXTRACT_TEMPERATURE = 0.2
 
+# 提取温度（重试，温度归零确保稳定）
+EXTRACT_TEMPERATURE_RETRY = 0.0
+
 # content 字段最大长度
 MAX_CONTENT_LENGTH = 500
 
@@ -82,6 +85,9 @@ PROTAGONIST_EXTRACT_MAX_TOKENS = 6000
 
 # 主角形象提取温度（低温保证稳定输出）
 PROTAGONIST_EXTRACT_TEMPERATURE = 0.2
+
+# 主角形象提取温度（重试，温度归零确保稳定）
+PROTAGONIST_EXTRACT_TEMPERATURE_RETRY = 0.0
 
 # 主角形象合并温度（首次尝试）
 PROTAGONIST_MERGE_TEMPERATURE = 0.2
@@ -1195,19 +1201,28 @@ class ContextExtractor:
                 logger.error("构建主角形象提示词失败: %s", e, exc_info=True)
                 return None, batch_count, False
 
-            # 调用 LLM（流式/非流式 + 超时重试 1 次）
+            # 调用 LLM（2 次尝试：温度 0.2 / 0.0，仅 2 次均失败才中止整体提取）
             messages = [{"role": "user", "content": prompt}]
+            extract_temperatures = [
+                PROTAGONIST_EXTRACT_TEMPERATURE,
+                PROTAGONIST_EXTRACT_TEMPERATURE_RETRY,
+            ]
             content_parts: list[str] = []
             response: dict[str, Any] = {}
-            retried = False
+            batch_protagonist: dict[str, Any] | None = None
 
-            while True:
+            for attempt, temperature in enumerate(extract_temperatures):
+                # 取消信号检查 + 清空流式累积（重试时避免拼接残缺内容）
+                if self._cancel_event.is_set():
+                    return None, batch_count, False
+                if stream:
+                    content_parts.clear()
                 try:
                     if stream:
                         async for chunk in client.stream_chat_completion(
                             messages=messages,
                             model=model,
-                            temperature=PROTAGONIST_EXTRACT_TEMPERATURE,
+                            temperature=temperature,
                             max_tokens=PROTAGONIST_EXTRACT_MAX_TOKENS,
                             stop_event=self._cancel_event,
                         ):
@@ -1225,66 +1240,72 @@ class ContextExtractor:
                         response = await client.chat_completion(
                             messages=messages,
                             model=model,
-                            temperature=PROTAGONIST_EXTRACT_TEMPERATURE,
+                            temperature=temperature,
                             max_tokens=PROTAGONIST_EXTRACT_MAX_TOKENS,
                             stop_event=self._cancel_event,
                         )
-                    break
+                    # 取消信号检查
+                    if self._cancel_event.is_set():
+                        return None, batch_count, False
+                    # 非流式模式提取 content
+                    if not stream:
+                        choices = response.get("choices", [])
+                        if not choices:
+                            logger.warning(
+                                "主角形象批次 %d/%d 第 %d 次尝试无 choices",
+                                batch_idx + 1, batch_count, attempt + 1,
+                            )
+                            if attempt < len(extract_temperatures) - 1:
+                                continue
+                            return None, batch_count, False
+                        message = choices[0].get("message", {})
+                        content = message.get("content", "") or ""
+
+                    # 解析 JSON → dict（仅保留 8 大维度字段）
+                    batch_protagonist = _parse_protagonist_response(content)
+                    break  # 成功，退出重试循环
                 except asyncio.CancelledError:
-                    logger.info("主角形象提取被取消（批次 %d/%d 调用中）",
-                                batch_idx + 1, batch_count)
+                    logger.info(
+                        "主角形象提取被取消（批次 %d/%d 第 %d 次尝试）",
+                        batch_idx + 1, batch_count, attempt + 1,
+                    )
+                    return None, batch_count, False
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        "主角形象批次 %d/%d 第 %d 次尝试 JSON 解析失败: %s, content=%s",
+                        batch_idx + 1, batch_count, attempt + 1, e, content[:200],
+                    )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
                     return None, batch_count, False
                 except asyncio.TimeoutError as e:
-                    if not retried:
-                        logger.warning(
-                            "主角形象批次 %d/%d 超时，重试中...",
-                            batch_idx + 1, batch_count,
-                        )
-                        retried = True
-                        if self._cancel_event.is_set():
-                            return None, batch_count, False
-                        if stream:
-                            content_parts.clear()
-                        continue
-                    logger.error(
-                        "主角形象批次 %d/%d 超时重试失败: %s",
-                        batch_idx + 1, batch_count, e,
+                    logger.warning(
+                        "主角形象批次 %d/%d 第 %d 次尝试超时: %s",
+                        batch_idx + 1, batch_count, attempt + 1, e,
                     )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
                     return None, batch_count, False
                 except (AuthError, RateLimitError, APIError, LLMError) as e:
-                    logger.error("主角形象提取 LLM 调用失败: %s", e)
+                    logger.warning(
+                        "主角形象批次 %d/%d 第 %d 次尝试 LLM 调用失败: %s",
+                        batch_idx + 1, batch_count, attempt + 1, e,
+                    )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
                     return None, batch_count, False
                 except Exception as e:
-                    logger.error("主角形象提取异常: %s", e, exc_info=True)
-                    return None, batch_count, False
-
-            # 取消信号检查
-            if self._cancel_event.is_set():
-                return None, batch_count, False
-
-            # 非流式模式提取 content
-            if not stream:
-                choices = response.get("choices", [])
-                if not choices:
                     logger.error(
-                        "主角形象批次 %d/%d 响应无 choices",
-                        batch_idx + 1, batch_count,
+                        "主角形象批次 %d/%d 第 %d 次尝试异常: %s",
+                        batch_idx + 1, batch_count, attempt + 1, e, exc_info=True,
                     )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
                     return None, batch_count, False
-                message = choices[0].get("message", {})
-                content = message.get("content", "") or ""
-
-            # 解析 JSON → dict（仅保留 8 大维度字段）
-            try:
-                batch_protagonist = _parse_protagonist_response(content)
-            except json.JSONDecodeError as e:
-                logger.error(
-                    "主角形象批次 %d/%d JSON 解析失败: %s, content=%s",
-                    batch_idx + 1, batch_count, e, content[:200],
-                )
-                return None, batch_count, False
 
             # 记录本批次独立结果（供汇总环节使用）
+            # 循环仅 break（成功）或 return（失败）退出，此处 batch_protagonist 必非 None
+            assert batch_protagonist is not None
             batch_results.append(batch_protagonist)
 
             # 增量合并到 accumulated_protagonist（核心：增量更新）
@@ -1822,19 +1843,33 @@ class ContextExtractor:
                     elapsed_seconds=time.time() - start_time,
                 )
 
-            # 调用 LLM（超时重试 1 次）；流式与非流式分支处理
+            # 调用 LLM（2 次尝试：温度 0.2 / 0.0，仅 2 次均失败才中止整体提取）
             messages = [{"role": "user", "content": prompt}]
+            extract_temperatures = [
+                EXTRACT_TEMPERATURE,
+                EXTRACT_TEMPERATURE_RETRY,
+            ]
             content_parts: list[str] = []  # 流式模式累积 chunk
             response: dict[str, Any] = {}  # 非流式模式响应
-            extract_timeout_retried = False
+            raw_entries: list[dict[str, Any]] | None = None
 
-            while True:
+            for attempt, temperature in enumerate(extract_temperatures):
+                # 取消信号检查 + 清空流式累积（重试时避免拼接残缺内容）
+                if self._cancel_event.is_set():
+                    return ExtractResult(
+                        entries=[],
+                        status="failed",
+                        error="用户取消提取",
+                        elapsed_seconds=time.time() - start_time,
+                    )
+                if stream:
+                    content_parts.clear()
                 try:
                     if stream:
                         async for chunk in client.stream_chat_completion(
                             messages=messages,
                             model=model,
-                            temperature=EXTRACT_TEMPERATURE,
+                            temperature=temperature,
                             max_tokens=EXTRACT_MAX_TOKENS,
                             stop_event=self._cancel_event,
                         ):
@@ -1851,9 +1886,66 @@ class ContextExtractor:
                         response = await client.chat_completion(
                             messages=messages,
                             model=model,
-                            temperature=EXTRACT_TEMPERATURE,
+                            temperature=temperature,
                             max_tokens=EXTRACT_MAX_TOKENS,
                             stop_event=self._cancel_event,
+                        )
+                    # 检查取消信号
+                    if self._cancel_event.is_set():
+                        return ExtractResult(
+                            entries=[],
+                            status="failed",
+                            error="用户取消提取",
+                            elapsed_seconds=time.time() - start_time,
+                        )
+                    # 提取内容与 token_usage（流式与非流式路径不同）
+                    if stream:
+                        content = "".join(content_parts)
+                    else:
+                        # 累加 token_usage
+                        batch_usage = response.get("usage", {})
+                        if isinstance(batch_usage, dict):
+                            for k, v in batch_usage.items():
+                                if isinstance(v, (int, float)):
+                                    total_token_usage[k] = (
+                                        total_token_usage.get(k, 0) + v
+                                    )
+                        # 解析响应
+                        choices = response.get("choices", [])
+                        if not choices:
+                            logger.warning(
+                                "%s批次 %d/%d 第 %d 次尝试无 choices",
+                                log_prefix, batch_idx + 1, batch_count, attempt + 1,
+                            )
+                            if attempt < len(extract_temperatures) - 1:
+                                continue
+                            return ExtractResult(
+                                entries=[],
+                                status="failed",
+                                error=f"批次 {batch_idx + 1}/{batch_count} LLM 响应无 choices",
+                                elapsed_seconds=time.time() - start_time,
+                                token_usage=total_token_usage,
+                            )
+                        message = choices[0].get("message", {})
+                        content = message.get("content", "") or ""
+
+                    # 解析响应
+                    try:
+                        raw_entries = _parse_extract_response(content)
+                    except json.JSONDecodeError as e:
+                        logger.warning(
+                            "%s批次 %d/%d 第 %d 次尝试 JSON 解析失败: %s, content=%s",
+                            log_prefix, batch_idx + 1, batch_count, attempt + 1,
+                            e, content[:200],
+                        )
+                        if attempt < len(extract_temperatures) - 1:
+                            continue
+                        return ExtractResult(
+                            entries=[],
+                            status="failed",
+                            error=f"批次 {batch_idx + 1}/{batch_count} JSON 解析失败: {e}",
+                            elapsed_seconds=time.time() - start_time,
+                            token_usage=total_token_usage,
                         )
                     break  # 成功，退出重试循环
                 except asyncio.CancelledError:
@@ -1865,30 +1957,13 @@ class ContextExtractor:
                         elapsed_seconds=time.time() - start_time,
                     )
                 except asyncio.TimeoutError as e:
-                    if not extract_timeout_retried:
-                        logger.warning(
-                            "%s批次 %d/%d 超时，重试中...",
-                            log_prefix, batch_idx + 1, batch_count,
-                        )
-                        extract_timeout_retried = True
-                        # 超时重试前检查取消信号：用户在首次尝试期间已点击取消，
-                        # 不应再发起重试，直接返回 cancelled 结果。
-                        if self._cancel_event.is_set():
-                            return ExtractResult(
-                                entries=[],
-                                status="failed",
-                                error="用户取消提取",
-                                elapsed_seconds=time.time() - start_time,
-                            )
-                        # 流式模式需清空已累积的 chunk，避免拼接出残缺内容
-                        if stream:
-                            content_parts.clear()
+                    logger.warning(
+                        "%s批次 %d/%d 第 %d 次尝试超时: %s",
+                        log_prefix, batch_idx + 1, batch_count, attempt + 1, e,
+                    )
+                    if attempt < len(extract_temperatures) - 1:
                         continue
                     # 重试仍失败：保留已有批次结果，返回部分结果
-                    logger.error(
-                        "%s批次 %d/%d 超时重试失败: %s",
-                        log_prefix, batch_idx + 1, batch_count, e,
-                    )
                     return ExtractResult(
                         entries=all_entries,
                         status="failed",
@@ -1898,7 +1973,12 @@ class ContextExtractor:
                         token_usage=total_token_usage,
                     )
                 except (AuthError, RateLimitError, APIError, LLMError) as e:
-                    logger.error("上下文提取 LLM 调用失败: %s", e)
+                    logger.warning(
+                        "%s批次 %d/%d 第 %d 次尝试 LLM 调用失败: %s",
+                        log_prefix, batch_idx + 1, batch_count, attempt + 1, e,
+                    )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
                     return ExtractResult(
                         entries=[],
                         status="failed",
@@ -1906,7 +1986,13 @@ class ContextExtractor:
                         elapsed_seconds=time.time() - start_time,
                     )
                 except Exception as e:
-                    logger.error("上下文提取异常: %s", e, exc_info=True)
+                    logger.error(
+                        "%s批次 %d/%d 第 %d 次尝试异常: %s",
+                        log_prefix, batch_idx + 1, batch_count, attempt + 1, e,
+                        exc_info=True,
+                    )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
                     return ExtractResult(
                         entries=[],
                         status="failed",
@@ -1914,58 +2000,9 @@ class ContextExtractor:
                         elapsed_seconds=time.time() - start_time,
                     )
 
-            # 检查取消信号
-            if self._cancel_event.is_set():
-                return ExtractResult(
-                    entries=[],
-                    status="failed",
-                    error="用户取消提取",
-                    elapsed_seconds=time.time() - start_time,
-                )
-
-            # 提取内容与 token_usage（流式与非流式路径不同）
-            if stream:
-                content = "".join(content_parts)
-            else:
-                # 累加 token_usage
-                batch_usage = response.get("usage", {})
-                if isinstance(batch_usage, dict):
-                    for k, v in batch_usage.items():
-                        if isinstance(v, (int, float)):
-                            total_token_usage[k] = (
-                                total_token_usage.get(k, 0) + v
-                            )
-
-                # 解析响应
-                choices = response.get("choices", [])
-                if not choices:
-                    return ExtractResult(
-                        entries=[],
-                        status="failed",
-                        error="LLM 响应无 choices",
-                        elapsed_seconds=time.time() - start_time,
-                        token_usage=total_token_usage,
-                    )
-
-                message = choices[0].get("message", {})
-                content = message.get("content", "") or ""
-
-            # 解析响应
-            try:
-                raw_entries = _parse_extract_response(content)
-            except json.JSONDecodeError as e:
-                logger.error(
-                    "提取响应 JSON 解析失败: %s, content=%s", e, content[:200]
-                )
-                return ExtractResult(
-                    entries=[],
-                    status="failed",
-                    error=f"JSON 解析失败: {e}",
-                    elapsed_seconds=time.time() - start_time,
-                    token_usage=total_token_usage,
-                )
-
             # 校验并规范化，收集本批独立结果（uid 替换合并仅用于 UI best-effort 显示）
+            # 循环仅 break（成功）或 return（失败）退出，此处 raw_entries 必非 None
+            assert raw_entries is not None
             batch_entries: list[ContextEntry] = []
             for raw in raw_entries:
                 entry = _validate_and_normalize_entry(
