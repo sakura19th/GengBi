@@ -188,6 +188,23 @@ CRITIQUE_FAILED_JSON = json.dumps(
     ensure_ascii=False,
 )
 
+CRITIQUE_CRITICAL_FAILED_JSON = json.dumps(
+    {
+        "summary": "不通过-critical",
+        "issues": [
+            {
+                "category": "protagonist_consistency",
+                "severity": "critical",
+                "location": "第2段",
+                "description": "主角 OOC",
+                "suggestion": "重写主角对话",
+            }
+        ],
+        "passed": False,
+    },
+    ensure_ascii=False,
+)
+
 REVISE_JSON = json.dumps(
     {
         "revision_strategy": "修正一致性",
@@ -828,6 +845,61 @@ def test_revise_loop_max_rounds() -> None:
     assert ca.final_critique.passed is False
 
 
+# ===== 8c. critical 问题忽略修订上限：一直修正到通过为止 =====
+
+
+def test_revise_loop_critical_ignores_max() -> None:
+    """critical 问题忽略 max_revise_rounds_per_chapter 上限，一直修正到通过为止。
+
+    构造场景：max=1，审计①失败（critical），强制第1轮修订后审计②仍失败（critical），
+    新逻辑下 critical 问题忽略上限，继续第2轮修订，审计③通过。
+    断言：revision_rounds==2（超过 max=1），content 为最终修订稿，final_critique.passed=True。
+    """
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = True
+    config.enable_chapter_revise = True
+    config.max_revise_rounds_per_chapter = 1  # 上限 1，但 critical 应忽略
+    orchestrator = make_orchestrator(config=config)
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 第1章：细纲 + 写作(初稿) + 验证失败(critical)
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="初稿")])
+    fake.add_chat_response(CRITIQUE_CRITICAL_FAILED_JSON)
+    # 第1轮修订：指导 + 重写 + 验证失败(critical)（超过 max=1，但因 critical 继续）
+    fake.add_chat_response(REVISE_JSON)
+    fake.add_stream_response([StreamChunk(content="修订1")])
+    fake.add_chat_response(CRITIQUE_CRITICAL_FAILED_JSON)
+    # 第2轮修订：指导 + 重写 + 验证通过
+    fake.add_chat_response(REVISE_JSON)
+    fake.add_stream_response([StreamChunk(content="修订2")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    # 第2章：细纲 + 写作 + 验证通过 + 强制修改(修订指导 + 修订稿 + 验证通过)
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第二章初稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    fake.add_chat_response(REVISE_JSON)
+    fake.add_stream_response([StreamChunk(content="第二章修订稿")])
+    fake.add_chat_response(CRITIQUE_PASSED_JSON)
+    orchestrator._client = fake
+
+    finished_results: list[Continuation] = []
+    orchestrator.finished.connect(lambda cont: finished_results.append(cont))
+
+    run_async(orchestrator._async_run())
+
+    assert len(finished_results) == 1
+    cont = finished_results[0]
+    ca = cont.volume_artifacts.chapter_artifacts[0]
+    # critical 问题忽略 max=1 上限，revision_rounds 超过 max
+    assert ca.revision_rounds == 2
+    assert ca.content == "修订2"
+    assert ca.final_critique is not None
+    assert ca.final_critique.passed is True
+
+
 # ===== 9. 暂停点（after_deep_analysis）触发 checkpoint_reached =====
 
 
@@ -1120,13 +1192,14 @@ def test_outline_audit_injects_previous_chapters_and_deep_analysis() -> None:
 
 
 def test_chapter_continuity_chapter2_injects_chapter1_and_plan() -> None:
-    """生成第 2 章时，写作 messages 含第 1 章正文与第 2 章 ChapterPlan 派生要求。
+    """生成第 2 章时，写作 messages 含第 1 章正文（通过最近 10 章正文参考）与第 2 章 ChapterPlan 派生要求。
 
     - 第 2 章写作阶段（最后一次 stream 调用）的 messages 应含：
-      - 上一章正文 system 消息（含"第一章正文"）
+      - 最近 10 章正文参考 system 消息（含"第一章正文"，注入到最后一条消息之前）
       - 本章生成要求（含第 2 章 ChapterPlan 的标题"卷章2"与摘要"第2章摘要"）
     - 第 2 章细纲阶段（第 4 个 chat 调用，索引 3）system prompt 应含
       previous_chapter_text（"第一章正文"）与 chapter_plan（"卷章2"）。
+    - 不应再含独立的"上一章正文（用于衔接）"system 消息（已删除）。
     """
     config = VolumeRunConfig(chapter_count=2)
     config.enable_outline_audit = False
@@ -1162,20 +1235,27 @@ def test_chapter_continuity_chapter2_injects_chapter1_and_plan() -> None:
     writing_messages = fake.last_stream_messages
     # 拼接所有 message 内容用于断言
     all_content = "\n".join(m.get("content", "") for m in writing_messages)
-    # 上一章正文 system 消息含第 1 章正文
+    # 最近 10 章正文参考 system 消息含第 1 章正文
     assert "第一章正文" in all_content
     # 本章生成要求含第 2 章 ChapterPlan 的标题与摘要
     assert "卷章2" in all_content
     assert "第2章摘要" in all_content
     # 不应包含卷级 user_input 作为本章生成要求主体（user_input 默认空字符串）
-    # 验证存在上一章正文 system 消息
-    has_prev_chapter_sys = any(
+    # 验证存在最近 10 章正文参考 system 消息（含第 1 章正文）
+    has_lookback_sys = any(
         m.get("role") == "system"
-        and "上一章正文" in m.get("content", "")
+        and "最近 10 章正文参考" in m.get("content", "")
         and "第一章正文" in m.get("content", "")
         for m in writing_messages
     )
-    assert has_prev_chapter_sys, "写作 messages 应含上一章正文 system 消息"
+    assert has_lookback_sys, "写作 messages 应含最近 10 章正文参考 system 消息"
+    # 验证不再含独立的"上一章正文（用于衔接）"system 消息
+    has_old_prev_chapter_sys = any(
+        m.get("role") == "system"
+        and "上一章正文（用于衔接）" in m.get("content", "")
+        for m in writing_messages
+    )
+    assert not has_old_prev_chapter_sys, "写作 messages 不应再含独立的上一章正文 system 消息"
 
 
 # ===== 17. 深度分析按 token 切分：多块调用 + 增量携带 + 合并（Task 3）=====
@@ -1450,8 +1530,8 @@ def test_volume_outline_uses_lookback_text() -> None:
     assert "BBB_LOOKBACK" in outline_prompt
     # 第 3 章在 current_chapter 之后，不应注入卷大纲
     assert "CCC_BEYOND" not in outline_prompt
-    # 段落标签应为 # 续写点前文内容
-    assert "# 续写点前文内容" in outline_prompt
+    # 段落标签应为 # 续写点前 10 章正文（含当前章）
+    assert "# 续写点前 10 章正文（含当前章）" in outline_prompt
     # 无残留占位符
     assert "{{chapters_text}}" not in outline_prompt
 
@@ -1650,7 +1730,7 @@ def test_after_chapter_checkpoint_rejected_then_approved() -> None:
     fake.add_chat_response(make_outline_json())
     fake.add_stream_response([StreamChunk(content="第一章初稿")])
     # reject 后：_run_chapter_revise(user_guidance) 短路无 LLM 调用，
-    # _run_chapter_writing 流式重写（无 verify，跳过验证环节）
+    # _run_chapter_rewrite 流式重写（无 verify，跳过验证环节）
     fake.add_stream_response([StreamChunk(content="第一章重写稿")])
     # 第 2 章：细纲 + 写作
     fake.add_chat_response(make_outline_json())
@@ -1734,7 +1814,7 @@ def test_style_audit_dimension() -> None:
     from novelforge.utils.paths import get_volume_prompt_path, load_text_resource
 
     assert "style" in DEFAULT_AUDIT_DIMENSIONS
-    assert len(DEFAULT_AUDIT_DIMENSIONS) == 10
+    assert len(DEFAULT_AUDIT_DIMENSIONS) == 11
 
     audit_template = load_text_resource(get_volume_prompt_path("outline_audit"))
     assert "style" in audit_template
@@ -1947,7 +2027,7 @@ def test_stages_capture_after_chapter_reject() -> None:
     fake.add_stream_response([StreamChunk(content="修订稿")])
     fake.add_chat_response(CRITIQUE_PASSED_JSON)
     # reject 后：_run_chapter_revise(user_guidance) 短路无 LLM 调用，
-    # _run_chapter_writing 流式重写 + 验证(通过)
+    # _run_chapter_rewrite 流式重写 + 验证(通过)
     fake.add_stream_response([StreamChunk(content="重写稿")])
     fake.add_chat_response(CRITIQUE_PASSED_JSON)
     # 第 2 章：细纲 + 写作 + 验证(通过) + 强制修改(修订指导 + 修订稿 + 验证通过)
@@ -2014,3 +2094,469 @@ def test_stages_capture_after_chapter_reject() -> None:
     reject_audit = ca.stages[6]
     assert reject_audit.stage_type == "audit"
     assert reject_audit.round_index == 3
+
+
+# ===== 17. 深度分析章节范围（不切分）：插入点前 10 章 =====
+
+
+def test_deep_analysis_lookback_10_chapters_range() -> None:
+    """深度分析不切分时，system_prompt 含插入点前 10 章（第 6-15 章），不含更早章节。
+
+    构造 15 章场景，current_chapter 为第 15 章（index=14），
+    analysis_chunk_tokens=0（不切分）。深度分析调用 _build_lookback_10_chapters_text()
+    （已改为委托 _build_dynamic_lookback_text(window=10)）。本卷未生成章节时
+    动态窗口 = 静态窗口结果相同，返回 chapters[5:15]（第 6-15 章）。
+    断言 system_prompt 含第 6-15 章标记，不含第 1-5 章标记。
+    """
+    config = VolumeRunConfig(chapter_count=2)
+    config.analysis_chunk_tokens = 0  # 不切分
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = False
+    config.enable_chapter_revise = False
+    # 15 章，current_chapter 为第 15 章（index=14）
+    pre_chapters = [
+        make_chapter(
+            index=i, chapter_id=f"da_{i}",
+            title=f"第{i + 1}章", content=f"DA_CH_MARK_{i:02d}",
+        )
+        for i in range(15)
+    ]
+    orchestrator = make_orchestrator(
+        config=config, chapters=pre_chapters, current_chapter=pre_chapters[-1],
+    )
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 逐章：细纲 + 写作（2 章）
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第一章正文")])
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第二章正文")])
+    orchestrator._client = fake
+
+    run_async(orchestrator._async_run())
+
+    # 深度分析是第 1 个 chat 调用（索引 0）
+    assert len(fake.chat_messages_history) >= 1
+    da_messages = fake.chat_messages_history[0]
+    da_prompt = da_messages[0]["content"]
+    # 含第 6-15 章标记（索引 5-14）
+    assert "DA_CH_MARK_05" in da_prompt
+    assert "DA_CH_MARK_14" in da_prompt
+    # 不含第 1-5 章标记（索引 0-4）
+    assert "DA_CH_MARK_00" not in da_prompt
+    assert "DA_CH_MARK_04" not in da_prompt
+    # 无残留占位符
+    assert "{{chapters_text}}" not in da_prompt
+
+
+# ===== 18. 深度分析占位符注入（context_entries/user_input）=====
+
+
+def test_deep_analysis_context_entries_user_input_injection() -> None:
+    """深度分析 system_prompt 含 # 上下文条目 与 # 用户剧情输出需求 段，占位符已注入。
+
+    context_entries 与 user_input 占位符被替换为实际内容（空或非空），
+    段落标题保留，无 {{context_entries}}/{{user_input}} 残留。
+    """
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = False
+    config.enable_chapter_revise = False
+    orchestrator = make_orchestrator(config=config, user_input="用户测试指令")
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 逐章：细纲 + 写作（2 章）
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第一章正文")])
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第二章正文")])
+    orchestrator._client = fake
+
+    run_async(orchestrator._async_run())
+
+    # 深度分析是第 1 个 chat 调用（索引 0）
+    da_messages = fake.chat_messages_history[0]
+    da_prompt = da_messages[0]["content"]
+    # 段落标题存在
+    assert "# 上下文条目" in da_prompt
+    assert "# 用户剧情输出需求" in da_prompt
+    # user_input 内容已注入
+    assert "用户测试指令" in da_prompt
+    # 占位符无残留
+    assert "{{context_entries}}" not in da_prompt
+    assert "{{user_input}}" not in da_prompt
+
+
+# ===== 19. 深度分析合并占位符注入（context_entries/user_input/chapters_text）=====
+
+
+def test_deep_analysis_merge_placeholders_injection() -> None:
+    """深度分析合并调用 system_prompt 含 # 上下文条目/# 用户剧情输出需求/# 续写点前 10 章正文 段。
+
+    切分模式下 _run_deep_analysis_merge 注入 context_entries/user_input/chapters_text
+    三个占位符，断言段落标题存在且占位符无残留。
+    """
+    config = VolumeRunConfig(chapter_count=2)
+    config.analysis_chunk_tokens = 10  # 触发切分
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = False
+    config.enable_chapter_revise = False
+    long_content = "这是一个很长的章节正文内容用于测试切分功能，内容需要足够长才能触发切分。"
+    ch1 = make_chapter(index=0, content=long_content, title="第一章")
+    ch2 = make_chapter(index=1, content=long_content, title="第二章")
+    orchestrator = make_orchestrator(
+        config=config, chapters=[ch1, ch2], current_chapter=ch2,
+        user_input="合并测试指令",
+    )
+
+    fake = FakeLLMClient()
+    # 深度分析第1块
+    fake.add_chat_response(json.dumps({"tone": "紧张"}, ensure_ascii=False))
+    # 深度分析第2块
+    fake.add_chat_response(json.dumps({"structure_position": "中段"}, ensure_ascii=False))
+    # 【信息汇总】环节
+    fake.add_chat_response(
+        json.dumps({"tone": "紧张", "structure_position": "中段"}, ensure_ascii=False)
+    )
+    # 卷大纲
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 逐章：细纲 + 写作（2 章）
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第一章正文")])
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第二章正文")])
+    orchestrator._client = fake
+
+    run_async(orchestrator._async_run())
+
+    # chat 顺序：da_chunk1(0) → da_chunk2(1) → da_merge(2) → volume_outline(3) → ...
+    assert len(fake.chat_messages_history) >= 3
+    merge_messages = fake.chat_messages_history[2]
+    merge_prompt = merge_messages[0]["content"]
+    # 段落标题存在
+    assert "# 上下文条目" in merge_prompt
+    assert "# 用户剧情输出需求" in merge_prompt
+    assert "# 续写点前 10 章正文" in merge_prompt
+    # user_input 内容已注入
+    assert "合并测试指令" in merge_prompt
+    # 占位符无残留
+    assert "{{context_entries}}" not in merge_prompt
+    assert "{{user_input}}" not in merge_prompt
+    assert "{{chapters_text}}" not in merge_prompt
+
+
+# ===== 20. 卷大纲章节范围：插入点前 10 章 =====
+
+
+def test_volume_outline_lookback_10_chapters_range() -> None:
+    """卷大纲 system_prompt 含插入点前 10 章（第 6-15 章），不含更早章节。
+
+    构造 15 章场景，current_chapter 为第 15 章（index=14）。卷大纲调用
+    _build_lookback_10_chapters_text()（已改为委托 _build_dynamic_lookback_text(window=10)）。
+    本卷未生成章节时动态窗口 = 静态窗口结果相同，返回 chapters[5:15]。
+    断言 system_prompt 含第 6-15 章标记，不含第 1-5 章标记。
+    """
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = False
+    config.enable_chapter_revise = False
+    pre_chapters = [
+        make_chapter(
+            index=i, chapter_id=f"vo_{i}",
+            title=f"第{i + 1}章", content=f"VO_CH_MARK_{i:02d}",
+        )
+        for i in range(15)
+    ]
+    orchestrator = make_orchestrator(
+        config=config, chapters=pre_chapters, current_chapter=pre_chapters[-1],
+    )
+    fake = FakeLLMClient()
+    fake.add_chat_response(DEEP_ANALYSIS_JSON)
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 逐章：细纲 + 写作（2 章）
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第一章正文")])
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第二章正文")])
+    orchestrator._client = fake
+
+    run_async(orchestrator._async_run())
+
+    # 卷大纲是第 2 个 chat 调用（索引 1）
+    assert len(fake.chat_messages_history) >= 2
+    outline_messages = fake.chat_messages_history[1]
+    outline_prompt = outline_messages[0]["content"]
+    # 含第 6-15 章标记（索引 5-14）
+    assert "VO_CH_MARK_05" in outline_prompt
+    assert "VO_CH_MARK_14" in outline_prompt
+    # 不含第 1-5 章标记（索引 0-4）
+    assert "VO_CH_MARK_00" not in outline_prompt
+    assert "VO_CH_MARK_04" not in outline_prompt
+    # 无残留占位符
+    assert "{{chapters_text}}" not in outline_prompt
+
+
+# ===== 21. 卷大纲 user_directive_analysis 注入 =====
+
+
+def _make_deep_analysis_json_with_uda() -> str:
+    """构造含 user_directive_analysis 字段的 DeepAnalysis JSON。"""
+    da = json.loads(DEEP_ANALYSIS_JSON)
+    da["user_directive_analysis"] = {
+        "required_elements": ["test_element_uda"],
+        "emphasized_elements": ["emphasis_key_uda"],
+        "interpretation": "用户意图说明",
+        "conflicts": [],
+    }
+    return json.dumps(da, ensure_ascii=False)
+
+
+def test_volume_outline_user_directive_analysis_injection() -> None:
+    """卷大纲 system_prompt 含 user_directive_analysis 内容（test_element_uda）。"""
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = False
+    config.enable_chapter_verify = False
+    config.enable_chapter_revise = False
+    orchestrator = make_orchestrator(config=config)
+    fake = FakeLLMClient()
+    fake.add_chat_response(_make_deep_analysis_json_with_uda())
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 逐章：细纲 + 写作（2 章）
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第一章正文")])
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第二章正文")])
+    orchestrator._client = fake
+
+    run_async(orchestrator._async_run())
+
+    # 卷大纲是第 2 个 chat 调用（索引 1）
+    outline_messages = fake.chat_messages_history[1]
+    outline_prompt = outline_messages[0]["content"]
+    # user_directive_analysis 内容已注入
+    assert "test_element_uda" in outline_prompt
+    # 占位符无残留
+    assert "{{user_directive_analysis}}" not in outline_prompt
+
+
+# ===== 22. 审计 user_directive_analysis 注入 =====
+
+
+def test_outline_audit_user_directive_analysis_injection() -> None:
+    """审计 system_prompt 含 user_directive_analysis 内容（test_element_uda）。"""
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = True
+    config.enable_chapter_verify = False
+    config.enable_chapter_revise = False
+    config.checkpoints["before_audit"] = False
+    config.audit_rounds = 1
+    orchestrator = make_orchestrator(config=config)
+    fake = FakeLLMClient()
+    fake.add_chat_response(_make_deep_analysis_json_with_uda())
+    fake.add_chat_response(make_volume_outline_json(2))
+    fake.add_chat_response(make_audit_report_json(2))
+    # 终稿大纲（审计成功后调用）
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 逐章：细纲 + 写作（2 章）
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第一章正文")])
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第二章正文")])
+    orchestrator._client = fake
+
+    run_async(orchestrator._async_run())
+
+    # chat 顺序：deep_analysis(0) → volume_outline(1) → outline_audit(2) → outline_final(3) → ...
+    assert len(fake.chat_messages_history) >= 3
+    audit_messages = fake.chat_messages_history[2]
+    audit_prompt = audit_messages[0]["content"]
+    # user_directive_analysis 内容已注入
+    assert "test_element_uda" in audit_prompt
+    # 占位符无残留
+    assert "{{user_directive_analysis}}" not in audit_prompt
+
+
+# ===== 23. 终稿大纲 user_directive_analysis 注入 =====
+
+
+def test_outline_final_user_directive_analysis_injection() -> None:
+    """终稿大纲 system_prompt 含 user_directive_analysis 内容（test_element_uda）。"""
+    config = VolumeRunConfig(chapter_count=2)
+    config.enable_outline_audit = True
+    config.enable_chapter_verify = False
+    config.enable_chapter_revise = False
+    config.checkpoints["before_audit"] = False
+    config.audit_rounds = 1
+    orchestrator = make_orchestrator(config=config)
+    fake = FakeLLMClient()
+    fake.add_chat_response(_make_deep_analysis_json_with_uda())
+    fake.add_chat_response(make_volume_outline_json(2))
+    fake.add_chat_response(make_audit_report_json(2))
+    # 终稿大纲
+    fake.add_chat_response(make_volume_outline_json(2))
+    # 逐章：细纲 + 写作（2 章）
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第一章正文")])
+    fake.add_chat_response(make_outline_json())
+    fake.add_stream_response([StreamChunk(content="第二章正文")])
+    orchestrator._client = fake
+
+    run_async(orchestrator._async_run())
+
+    # chat 顺序：deep_analysis(0) → volume_outline(1) → outline_audit(2) → outline_final(3) → ...
+    assert len(fake.chat_messages_history) >= 4
+    final_messages = fake.chat_messages_history[3]
+    final_prompt = final_messages[0]["content"]
+    # user_directive_analysis 内容已注入
+    assert "test_element_uda" in final_prompt
+    # 占位符无残留
+    assert "{{user_directive_analysis}}" not in final_prompt
+
+
+# ===== 24. _merge_deep_analysis 合并 user_directive_analysis =====
+
+
+def test_merge_deep_analysis_user_directive_analysis() -> None:
+    """_merge_deep_analysis 合并 user_directive_analysis：列表去重拼接，字符串取较新非空。"""
+    orchestrator = make_orchestrator()
+    base = DeepAnalysis(
+        user_directive_analysis={
+            "required_elements": ["a", "b"],
+            "emphasized_elements": ["x"],
+            "interpretation": "old",
+            "conflicts": ["c1"],
+        }
+    )
+    new = DeepAnalysis(
+        user_directive_analysis={
+            "required_elements": ["b", "c"],
+            "emphasized_elements": ["y"],
+            "interpretation": "new",
+            "conflicts": ["c2"],
+        }
+    )
+    merged = orchestrator._merge_deep_analysis(base, new)
+    uda = merged.user_directive_analysis
+    # required_elements 去重拼接：["a", "b", "c"]
+    assert uda["required_elements"] == ["a", "b", "c"]
+    # emphasized_elements 去重拼接：["x", "y"]
+    assert uda["emphasized_elements"] == ["x", "y"]
+    # conflicts 去重拼接：["c1", "c2"]
+    assert uda["conflicts"] == ["c1", "c2"]
+    # interpretation 取较新块非空值："new"
+    assert uda["interpretation"] == "new"
+
+    # 测试 new 块 interpretation 为空时保留 base 值
+    base2 = DeepAnalysis(
+        user_directive_analysis={
+            "required_elements": ["a"],
+            "emphasized_elements": [],
+            "interpretation": "base_interp",
+            "conflicts": [],
+        }
+    )
+    new2 = DeepAnalysis(
+        user_directive_analysis={
+            "required_elements": ["b"],
+            "emphasized_elements": [],
+            "interpretation": "",
+            "conflicts": [],
+        }
+    )
+    merged2 = orchestrator._merge_deep_analysis(base2, new2)
+    assert merged2.user_directive_analysis["interpretation"] == "base_interp"
+    assert merged2.user_directive_analysis["required_elements"] == ["a", "b"]
+
+
+# ===== 25. _build_lookback_10_chapters_text 动态滑动（含本卷已生成章节）=====
+
+
+def test_lookback_10_dynamic_with_generated_chapters() -> None:
+    """_build_lookback_10_chapters_text() 含本卷已生成章节（动态滑动）。
+
+    构造场景：10 章原章节（插入点为第 5 章 index=4），__init__ 时 _original_chapter_count=10。
+    手动 append 3 章本卷已生成章节（模拟逐章循环中 chapters.append）。
+    有效章节序列 = chapters[0:5] + chapters[10:] = 5 章插入点前 + 3 章本卷已生成 = 8 章。
+    末尾 10 章窗口 = 全部 8 章（不足 10 章时取全部）。
+    断言返回文本含 3 章本卷已生成章节标记 + 5 章插入点前章节标记。
+    """
+    config = VolumeRunConfig(chapter_count=2)
+    # 10 章原章节
+    pre_chapters = [
+        make_chapter(
+            index=i, chapter_id=f"pre_{i}",
+            title=f"原第{i + 1}章", content=f"PRE_MARK_{i:02d}",
+        )
+        for i in range(10)
+    ]
+    # current_chapter 为第 5 章（index=4），__init__ 时 _original_chapter_count=10
+    orchestrator = make_orchestrator(
+        config=config, chapters=pre_chapters, current_chapter=pre_chapters[4],
+    )
+    # 模拟逐章循环中 chapters.append：追加 3 章本卷已生成章节
+    for i in range(3):
+        orchestrator.chapters.append(make_chapter(
+            index=10 + i, chapter_id=f"gen_{i}",
+            title=f"新生成第{i + 1}章", content=f"GEN_MARK_{i:02d}",
+        ))
+
+    text = orchestrator._build_lookback_10_chapters_text()
+
+    # 含 3 章本卷已生成章节标记
+    assert "GEN_MARK_00" in text
+    assert "GEN_MARK_01" in text
+    assert "GEN_MARK_02" in text
+    # 含 5 章插入点前章节标记（index 0-4）
+    assert "PRE_MARK_00" in text
+    assert "PRE_MARK_04" in text
+    # 不含插入点后原章节标记（index 5-9，被 _get_effective_chapters 跳过）
+    assert "PRE_MARK_05" not in text
+    assert "PRE_MARK_09" not in text
+
+
+# ===== 26. _build_lookback_10_chapters_text 窗口滑动（最老章节挤出）=====
+
+
+def test_lookback_10_dynamic_window_sliding() -> None:
+    """_build_lookback_10_chapters_text() 窗口滑动：生成 12 章后只含最近 10 章。
+
+    构造场景：5 章原章节（插入点为第 5 章 index=4），__init__ 时 _original_chapter_count=5。
+    手动 append 12 章本卷已生成章节（模拟逐章循环中 chapters.append）。
+    有效章节序列 = chapters[0:5] + chapters[5:] = 5 章插入点前 + 12 章本卷已生成 = 17 章。
+    effective 索引：0-4=PRE_MARK_00..04, 5-16=GEN_MARK_00..11。
+    末尾 10 章窗口 = effective[7:] = GEN_MARK_02..11（共 10 章）。
+    断言返回文本含 GEN_MARK_02..11，不含更早章节标记（PRE 全部挤出 + GEN_MARK_00/01 挤出）。
+    """
+    config = VolumeRunConfig(chapter_count=2)
+    # 5 章原章节
+    pre_chapters = [
+        make_chapter(
+            index=i, chapter_id=f"pre_{i}",
+            title=f"原第{i + 1}章", content=f"PRE_MARK_{i:02d}",
+        )
+        for i in range(5)
+    ]
+    # current_chapter 为第 5 章（index=4），__init__ 时 _original_chapter_count=5
+    orchestrator = make_orchestrator(
+        config=config, chapters=pre_chapters, current_chapter=pre_chapters[4],
+    )
+    # 模拟逐章循环中 chapters.append：追加 12 章本卷已生成章节
+    for i in range(12):
+        orchestrator.chapters.append(make_chapter(
+            index=5 + i, chapter_id=f"gen_{i}",
+            title=f"新生成第{i + 1}章", content=f"GEN_MARK_{i:02d}",
+        ))
+
+    text = orchestrator._build_lookback_10_chapters_text()
+
+    # 含窗口内标记：GEN_MARK_02..11（末尾 10 章）
+    assert "GEN_MARK_02" in text
+    assert "GEN_MARK_11" in text
+    # 不含被挤出的更早章节标记（PRE 全部挤出）
+    assert "PRE_MARK_00" not in text
+    assert "PRE_MARK_04" not in text
+    # 不含被挤出的较新章节标记（GEN_MARK_00/01 未进入窗口）
+    assert "GEN_MARK_00" not in text
+    assert "GEN_MARK_01" not in text

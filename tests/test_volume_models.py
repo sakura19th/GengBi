@@ -99,11 +99,11 @@ def test_volume_run_config_analysis_depth_default() -> None:
 
 
 def test_volume_run_config_default_audit_dimensions() -> None:
-    """默认 audit_dimensions 含 10 维度且与 DEFAULT_AUDIT_DIMENSIONS 一致。"""
+    """默认 audit_dimensions 含 11 维度且与 DEFAULT_AUDIT_DIMENSIONS 一致。"""
     config = VolumeRunConfig()
-    assert len(config.audit_dimensions) == 10
+    assert len(config.audit_dimensions) == 11
     assert config.audit_dimensions == DEFAULT_AUDIT_DIMENSIONS
-    # 确认 10 个维度内容
+    # 确认 11 个维度内容
     assert config.audit_dimensions == [
         "consistency",
         "pacing",
@@ -115,6 +115,7 @@ def test_volume_run_config_default_audit_dimensions() -> None:
         "style",
         "protagonist_consistency",
         "worldview_consistency",
+        "user_directive_compliance",
     ]
 
 
@@ -124,7 +125,7 @@ def test_volume_run_config_audit_dimensions_independent() -> None:
     c2 = VolumeRunConfig()
     c1.audit_dimensions.append("extra")
     # c2 不受影响
-    assert len(c2.audit_dimensions) == 10
+    assert len(c2.audit_dimensions) == 11
     assert "extra" not in c2.audit_dimensions
 
 
@@ -236,6 +237,44 @@ def test_deep_analysis_list_dict_fields() -> None:
     # 默认值
     assert DeepAnalysis().character_arc_patterns == []
     assert DeepAnalysis().key_phrases == []
+
+
+def test_deep_analysis_user_directive_analysis_defaults() -> None:
+    """DeepAnalysis.user_directive_analysis 默认为空 dict。"""
+    da = DeepAnalysis()
+    assert da.user_directive_analysis == {}
+    assert isinstance(da.user_directive_analysis, dict)
+
+
+def test_deep_analysis_user_directive_analysis_roundtrip() -> None:
+    """构造含 user_directive_analysis 的 DeepAnalysis，model_dump → model_validate 往返不丢字段。"""
+    uda = {
+        "required_elements": ["a"],
+        "emphasized_elements": ["b"],
+        "interpretation": "c",
+        "conflicts": [],
+    }
+    da = DeepAnalysis(user_directive_analysis=uda)
+    assert da.user_directive_analysis == uda
+    assert da.user_directive_analysis["required_elements"] == ["a"]
+    assert da.user_directive_analysis["emphasized_elements"] == ["b"]
+    assert da.user_directive_analysis["interpretation"] == "c"
+    assert da.user_directive_analysis["conflicts"] == []
+
+    # model_dump → model_validate 往返
+    dumped = da.model_dump()
+    assert dumped["user_directive_analysis"] == uda
+    restored = DeepAnalysis.model_validate(dumped)
+    assert restored.user_directive_analysis == uda
+    assert restored.user_directive_analysis["required_elements"] == ["a"]
+    assert restored.user_directive_analysis["emphasized_elements"] == ["b"]
+    assert restored.user_directive_analysis["interpretation"] == "c"
+    assert restored.user_directive_analysis["conflicts"] == []
+
+    # model_dump_json → model_validate_json 往返
+    json_str = da.model_dump_json()
+    restored_json = DeepAnalysis.model_validate_json(json_str)
+    assert restored_json.user_directive_analysis == uda
 
 
 # ===== 6. VolumeOutline 含 chapters: list[ChapterPlan] =====

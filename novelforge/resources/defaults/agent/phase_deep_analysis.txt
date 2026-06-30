@@ -14,7 +14,15 @@
 # 主角形象档案（跟随章节缓存，分析时需关注主角弧光演变与 OOC 红线）
 {{protagonist_profile}}
 
-# 章节文本（用于排布规律/文风/对话模式/剧情分析等所有维度）
+# 上下文条目（自动提取的人物/地点/事件/风格/伏笔等）
+{{context_entries}}
+（若为空表示无自动提取的上下文，可忽略本段）
+
+# 用户剧情输出需求
+{{user_input}}
+（若为空表示用户无具体指令，user_directive_analysis 各字段输出空值）
+
+# 章节文本（用于排布规律/文风/对话模式/剧情分析等所有维度，仅含插入点前 10 章正文，含当前章）
 {{chapters_text}}
 
 # 分析深度参数
@@ -45,6 +53,7 @@
 9. 人物弧光规律：主要人物的价值观与关系变化轨迹
 10. 反复元素：反复出现的意象、标志性短语、口头禅、场景符号
 11. 故事状态：structure_position/tone/core_conflict_status/stakes/active_characters/plot_threads/unresolved_promises/world_state
+12. 用户剧情输出需求解析：基于用户输入的剧情输出需求，提取后续续写必备要素（required_elements，后文必须出现的人物/事件/设定/情节节点）与必须着重强调的部分（emphasized_elements，需重点描写/强化呈现的要素），整体理解（interpretation）用户意图，并标注与前文设定的冲突（conflicts，若有）
 
 # 输出格式
 请输出严格的 JSON 对象（DeepAnalysis），包含以下字段：
@@ -69,6 +78,7 @@
 - settings_database：数组，设定库，每项含 category/name/description
 - recurring_elements：数组，反复元素，每项含 element_type/image
 - key_phrases：数组，标志性短语/口头禅，每项含 phrase/context
+- user_directive_analysis：对象，用户剧情输出需求解析，含 required_elements（数组，后文输出必备要素）/emphasized_elements（数组，必须着重强调的部分）/interpretation（字符串，整体理解）/conflicts（数组，与前文设定的冲突）
 
 # 分析原则
 - 忠于原文：所有判断必须基于前文实际内容，不得编造
@@ -77,6 +87,7 @@
 - 伏笔敏感：对任何暗示、象征、铺垫保持高度警觉
 - 风格还原：提取足够风格特征，确保续写能还原原文语言质感
 - 非模板化：所有分析必须基于前文实际内容，不得套用通用模板或泛化结论；若前文无对应现象，应据实说明而非凑数
+- 用户指令优先：所有分析必须将用户剧情输出需求视为后续续写的硬约束，提取的 user_directive_analysis.required_elements 与 emphasized_elements 将作为后续大纲生成的强制依据；若用户指令与前文设定冲突，应在 conflicts 中明确标注而非自行忽略
 
 注意：
 - 只输出 JSON 对象，不要包含任何解释性文字

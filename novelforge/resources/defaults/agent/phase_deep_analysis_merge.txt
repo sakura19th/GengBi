@@ -14,8 +14,20 @@
 # 主角形象档案（跟随章节缓存，整合时须保持主角弧光连贯）
 {{protagonist_profile}}
 
+# 上下文条目（自动提取的人物/地点/事件/风格/伏笔等）
+{{context_entries}}
+（若为空表示无自动提取的上下文，可忽略本段）
+
+# 用户剧情输出需求
+{{user_input}}
+（若为空表示用户无具体指令，user_directive_analysis 各字段输出空值）
+
 # 初步合并后的 DeepAnalysis（待整合润色）
 {{deep_analysis}}
+
+# 续写点前 10 章正文（含当前章）
+{{chapters_text}}
+（供整合时参考前文实际内容，确保整合后的分析忠于原文）
 
 # 整合任务
 请基于上述小说档案与初步合并的 DeepAnalysis，进行**语义层面的整合**（而非简单字段拼接）。具体要求：
@@ -36,6 +48,11 @@
 ## 4. 非模板化
 - 所有分析必须基于初步合并 DeepAnalysis 中的实际内容，不得套用通用模板或泛化结论
 - 若某维度无对应内容，使用空字符串或空数组，不得凑数
+
+## 5. 用户指令解析整合
+- 合并各块的 user_directive_analysis，required_elements/emphasized_elements/conflicts 列表去重拼接，interpretation 取信息更详尽的版本
+- 确保最终 user_directive_analysis 完整反映用户指令，不丢失任何必备要素或强调部分
+- 若各块对用户指令的解析存在矛盾，以信息更详尽、论据更充分的版本为准
 
 # 输出格式
 请输出严格的 JSON 对象（DeepAnalysis），包含以下字段：
@@ -60,6 +77,7 @@
 - settings_database：数组，设定库，每项含 category/name/description
 - recurring_elements：数组，反复元素，每项含 element_type/image
 - key_phrases：数组，标志性短语/口头禅，每项含 phrase/context
+- user_directive_analysis：对象，用户剧情输出需求解析，含 required_elements（数组，后文输出必备要素）/emphasized_elements（数组，必须着重强调的部分）/interpretation（字符串，整体理解）/conflicts（数组，与前文设定的冲突）
 
 # 整合原则
 - **忠于原文**：所有判断必须基于输入 DeepAnalysis 的内容，不得编造

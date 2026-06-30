@@ -486,7 +486,6 @@ class VolumeOrchestrator(QThread):
                     outline,
                     chapter_plan,
                     previous_chapters_text,
-                    previous_chapter_text,
                     lookback_chapters_text=dynamic_lookback,
                 )
                 self._writing_messages = messages
@@ -504,6 +503,7 @@ class VolumeOrchestrator(QThread):
                     critique = await self._run_chapter_verify(
                         deep_analysis, outline, content,
                         lookback_chapters_text=dynamic_lookback,
+                        previous_chapter_text=previous_chapter_text,
                     )
                     final_critique = critique
                     audit_round += 1
@@ -512,25 +512,35 @@ class VolumeOrchestrator(QThread):
                     ))
 
                     # 强制第1轮修改（无论审计①是否通过）+ 自动修订循环
+                    # critical 问题忽略 max_revise_rounds_per_chapter 上限，一直修正到通过为止
                     if self.config.enable_chapter_revise:
-                        while (
-                            rounds < self.config.max_revise_rounds_per_chapter
-                            and not self._stop_event.is_set()
-                            and (rounds == 0 or (critique is not None and not critique.passed))
+                        while not self._stop_event.is_set() and (
+                            rounds == 0 or (critique is not None and not critique.passed)
                         ):
+                            # 非首轮检查上限：无 critical 问题时受 max_revise_rounds_per_chapter 约束
+                            if rounds > 0:
+                                has_critical = critique is not None and any(
+                                    issue.severity == "critical"
+                                    for issue in critique.issues
+                                )
+                                if (
+                                    not has_critical
+                                    and rounds >= self.config.max_revise_rounds_per_chapter
+                                ):
+                                    break  # 无 critical 且达到上限，退出
+
                             rounds += 1
                             guidance = await self._run_chapter_revise(
                                 content, critique, outline,
                                 lookback_chapters_text=dynamic_lookback,
                             )
                             content, reasoning, messages = (
-                                await self._run_chapter_writing(
+                                await self._run_chapter_rewrite(
                                     outline,
                                     chapter_plan,
-                                    previous_chapters_text,
-                                    previous_chapter_text,
+                                    content,
                                     guidance,
-                                    original_content=content,
+                                    critique,
                                     lookback_chapters_text=dynamic_lookback,
                                 )
                             )
@@ -542,6 +552,7 @@ class VolumeOrchestrator(QThread):
                             critique = await self._run_chapter_verify(
                                 deep_analysis, outline, content,
                                 lookback_chapters_text=dynamic_lookback,
+                                previous_chapter_text=previous_chapter_text,
                             )
                             final_critique = critique
                             audit_round += 1
@@ -579,10 +590,9 @@ class VolumeOrchestrator(QThread):
                                 lookback_chapters_text=dynamic_lookback,
                                 user_guidance=user_guidance,
                             )
-                            content, reasoning, messages = await self._run_chapter_writing(
+                            content, reasoning, messages = await self._run_chapter_rewrite(
                                 outline, chapter_plan,
-                                previous_chapters_text, previous_chapter_text,
-                                guidance, original_content=content,
+                                content, guidance, None,
                                 lookback_chapters_text=dynamic_lookback,
                             )
                             self._writing_messages = messages
@@ -591,10 +601,12 @@ class VolumeOrchestrator(QThread):
                                 guidance=guidance, content=content,
                             ))
                             # 重新验证 + 自动修订循环
+                            # critical 问题忽略 max_revise_rounds_per_chapter 上限，一直修正到通过为止
                             if self.config.enable_chapter_verify:
                                 critique = await self._run_chapter_verify(
                                     deep_analysis, outline, content,
                                     lookback_chapters_text=dynamic_lookback,
+                                    previous_chapter_text=previous_chapter_text,
                                 )
                                 final_critique = critique
                                 audit_round += 1
@@ -606,19 +618,28 @@ class VolumeOrchestrator(QThread):
                                     self.config.enable_chapter_revise
                                     and critique is not None
                                     and not critique.passed
-                                    and rounds < self.config.max_revise_rounds_per_chapter
                                     and not self._stop_event.is_set()
                                 ):
+                                    # 无 critical 问题时受 max_revise_rounds_per_chapter 约束
+                                    has_critical = any(
+                                        issue.severity == "critical"
+                                        for issue in critique.issues
+                                    )
+                                    if (
+                                        not has_critical
+                                        and rounds >= self.config.max_revise_rounds_per_chapter
+                                    ):
+                                        break  # 无 critical 且达到上限，退出
+
                                     rounds += 1
                                     guidance = await self._run_chapter_revise(
                                         content, critique, outline,
                                         lookback_chapters_text=dynamic_lookback,
                                     )
                                     content, reasoning, messages = (
-                                        await self._run_chapter_writing(
+                                        await self._run_chapter_rewrite(
                                             outline, chapter_plan,
-                                            previous_chapters_text, previous_chapter_text,
-                                            guidance, original_content=content,
+                                            content, guidance, critique,
                                             lookback_chapters_text=dynamic_lookback,
                                         )
                                     )
@@ -630,6 +651,7 @@ class VolumeOrchestrator(QThread):
                                     critique = await self._run_chapter_verify(
                                         deep_analysis, outline, content,
                                         lookback_chapters_text=dynamic_lookback,
+                                        previous_chapter_text=previous_chapter_text,
                                     )
                                     final_critique = critique
                                     audit_round += 1
@@ -742,9 +764,10 @@ class VolumeOrchestrator(QThread):
         )
 
         if len(chapter_chunks) <= 1:
-            # 不切分：单次调用发送 lookback chapters_text
+            # 不切分：单次调用发送插入点前 10 章（含当前章）
             return await self._run_deep_analysis_single(
-                template, depth, max_entries, max_tokens, self._lookback_chapters_text
+                template, depth, max_entries, max_tokens,
+                self._build_lookback_10_chapters_text(),
             )
 
         # 切分：逐块调用，增量携带已有分析
@@ -818,6 +841,8 @@ class VolumeOrchestrator(QThread):
             "{{chapters_text}}": chapters_text,
             "{{analysis_depth}}": depth,
             "{{max_analysis_entries}}": str(max_entries),
+            "{{context_entries}}": self._build_context_entries_text(),
+            "{{user_input}}": self.user_input or "",
         }
         system_prompt = self._apply_macros(template, macros)
         if existing_analysis:
@@ -890,6 +915,9 @@ class VolumeOrchestrator(QThread):
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{deep_analysis}}": deep_analysis_text,
+            "{{context_entries}}": self._build_context_entries_text(),
+            "{{user_input}}": self.user_input or "",
+            "{{chapters_text}}": self._build_lookback_10_chapters_text(),
         }
         system_prompt = self._apply_macros(template, macros)
         messages = [{"role": "system", "content": system_prompt}]
@@ -1012,6 +1040,28 @@ class VolumeOrchestrator(QThread):
                     existing.append(x)
                     seen.add(key)
             setattr(result, field, existing)
+        # user_directive_analysis 字段：合并 4 个子字段
+        base_uda = result.user_directive_analysis or {}
+        new_uda = new.user_directive_analysis or {}
+        merged_uda: dict[str, Any] = dict(base_uda)
+        # 列表子字段：去重拼接
+        for list_key in ("required_elements", "emphasized_elements", "conflicts"):
+            base_list = list(base_uda.get(list_key) or [])
+            new_list = list(new_uda.get(list_key) or [])
+            seen = {json.dumps(x, ensure_ascii=False, sort_keys=True) for x in base_list}
+            for x in new_list:
+                key = json.dumps(x, ensure_ascii=False, sort_keys=True)
+                if key not in seen:
+                    base_list.append(x)
+                    seen.add(key)
+            merged_uda[list_key] = base_list
+        # 字符串子字段：取较新块非空值
+        new_interp = new_uda.get("interpretation") or ""
+        if new_interp:
+            merged_uda["interpretation"] = new_interp
+        elif "interpretation" not in merged_uda:
+            merged_uda["interpretation"] = base_uda.get("interpretation") or ""
+        result.user_directive_analysis = merged_uda
         return result
 
     async def _run_volume_outline(
@@ -1024,7 +1074,7 @@ class VolumeOrchestrator(QThread):
         失败重试一次（温度归零），再失败 emit error 终止。
         """
         template = self._load_volume_template("volume_outline")
-        chapters_text = self._lookback_chapters_text
+        chapters_text = self._build_lookback_10_chapters_text()
         if deep_analysis is not None:
             deep_analysis_text = json.dumps(
                 deep_analysis.model_dump(), ensure_ascii=False, indent=2
@@ -1037,6 +1087,14 @@ class VolumeOrchestrator(QThread):
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{deep_analysis}}": deep_analysis_text,
+            "{{user_directive_analysis}}": (
+                json.dumps(
+                    deep_analysis.user_directive_analysis,
+                    ensure_ascii=False, indent=2,
+                )
+                if deep_analysis is not None and deep_analysis.user_directive_analysis
+                else "{}"
+            ),
             "{{chapters_text}}": chapters_text,
             "{{user_input}}": self.user_input or "",
             "{{chapter_count}}": str(chapter_count),
@@ -1138,6 +1196,14 @@ class VolumeOrchestrator(QThread):
             "{{audit_dimensions}}": dimensions,
             "{{previous_chapters_text}}": previous_chapters_text,
             "{{deep_analysis}}": deep_analysis_text,
+            "{{user_directive_analysis}}": (
+                json.dumps(
+                    deep_analysis.user_directive_analysis,
+                    ensure_ascii=False, indent=2,
+                )
+                if deep_analysis is not None and deep_analysis.user_directive_analysis
+                else "{}"
+            ),
             "{{round_idx}}": str(round_idx + 1),
             "{{total_rounds}}": str(self.config.audit_rounds),
             "{{audit_focus}}": self._audit_focus or "（用户未指定重点）",
@@ -1223,6 +1289,14 @@ class VolumeOrchestrator(QThread):
             "{{audit_report}}": audit_text,
             "{{previous_chapters_text}}": lookback_10_text,
             "{{deep_analysis}}": deep_analysis_text,
+            "{{user_directive_analysis}}": (
+                json.dumps(
+                    deep_analysis.user_directive_analysis,
+                    ensure_ascii=False, indent=2,
+                )
+                if deep_analysis is not None and deep_analysis.user_directive_analysis
+                else "{}"
+            ),
             "{{pacing_speed}}": self.config.pacing_speed,
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
@@ -1349,7 +1423,6 @@ class VolumeOrchestrator(QThread):
         outline: Outline | None,
         chapter_plan: Any | None,
         previous_chapters_text: str,
-        previous_chapter_text: str = "",
         revision_guidance: dict | None = None,
         original_content: str = "",
         lookback_chapters_text: str = "",
@@ -1360,7 +1433,7 @@ class VolumeOrchestrator(QThread):
         - 单章细纲格式化为 Markdown（用 format_outline）
         - 合成 ContextEntry（position=before）注入 prompt_assembler
         - worldInfoBefore marker 不存在时 fallback：直接 prepend system 消息
-        - 上一章正文（previous_chapter_text）prepend 为 system 消息用于紧密衔接
+        - 动态前文窗口（lookback_chapters_text）注入到最后一条消息之前，供写作参考风格与剧情
         - user_input 用本章 ChapterPlan 派生的生成要求覆盖（chapter_plan 为 None 时回退 self.user_input）
         - prompt_assembler.assemble() 组装 messages
         - stream_chat_completion 流式调用，emit chunk_received/reasoning_received/token_count
@@ -1370,7 +1443,6 @@ class VolumeOrchestrator(QThread):
             outline: 单章细纲（可能为 None）
             chapter_plan: 当前章 ChapterPlan（用于 target_words 覆盖与生成要求派生）
             previous_chapters_text: 本卷已生成章节正文拼接
-            previous_chapter_text: 紧邻上一章完整正文（用于紧密衔接，可能为空）
             revision_guidance: 修订指导（非空时追加为 user 消息）
             original_content: 当前已生成内容（修订时作为重写参考，空串表示无）
 
@@ -1435,23 +1507,16 @@ class VolumeOrchestrator(QThread):
         )
         messages = list(result.messages)
 
-        # 上一章正文注入（用于紧密衔接，插入到最后一条消息之前）
-        if previous_chapter_text:
+        # 动态前文窗口注入（含本卷已生成章节，插入到最后一条消息之前）
+        if lookback_chapters_text:
             insert_pos = max(0, len(messages) - 1)
             messages.insert(
                 insert_pos,
                 {
                     "role": "system",
-                    "content": f"# 上一章正文（用于衔接）\n{previous_chapter_text}",
+                    "content": f"# 最近 10 章正文参考（含本卷已生成）\n{lookback_chapters_text}",
                 },
             )
-
-        # 动态前文窗口注入（含本卷已生成章节，供写作参考风格与剧情）
-        if lookback_chapters_text:
-            messages.insert(0, {
-                "role": "system",
-                "content": f"# 最近 10 章正文参考（含本卷已生成）\n{lookback_chapters_text}",
-            })
 
         # Fallback：无 marker 时 prepend 大纲为 system 消息
         if outline is not None and not has_marker:
@@ -1525,12 +1590,151 @@ class VolumeOrchestrator(QThread):
 
         return final_content, reasoning, messages
 
+    async def _run_chapter_rewrite(
+        self,
+        outline: Outline | None,
+        chapter_plan: Any | None,
+        original_content: str,
+        revision_guidance: dict | None,
+        critique: CritiqueReport | None,
+        lookback_chapters_text: str = "",
+    ) -> tuple[str, str, list[dict[str, Any]]]:
+        """阶段④-重写：审计后基于修订指导重写完整章节正文（流式）。
+
+        与 _run_chapter_writing 的区别：
+        - 不复用 prompt_assembler 组装，而是直接加载 phase_chapter_rewrite.txt 模板
+        - 模板结尾强调"重写完整章节，不得续写或追加"，避免 LLM 在原章节后追加内容
+        - 注入审计报告与修订指导，针对审计问题定向修订
+        - 动态前文窗口注入到最后一条消息之前（与 _run_chapter_writing 一致）
+
+        Args:
+            outline: 单章细纲（可能为 None）
+            chapter_plan: 当前章 ChapterPlan（用于 target_words 与章节规划参考）
+            original_content: 当前已生成内容（重写参考）
+            revision_guidance: 修订指导 dict（来自 _run_chapter_revise）
+            critique: 审计报告（可能为 None，如 after_chapter reject 场景）
+            lookback_chapters_text: 动态前文窗口（含本卷已生成章节）
+
+        Returns:
+            (content, reasoning_content, messages) 三元组
+        """
+        template = self._load_agent_template("chapter_rewrite")
+
+        # 序列化各 JSON 字段
+        if outline is not None:
+            outline_text = json.dumps(
+                outline.model_dump(), ensure_ascii=False, indent=2
+            )
+        else:
+            outline_text = "（无细纲）"
+        if chapter_plan is not None:
+            chapter_plan_text = json.dumps(
+                chapter_plan.model_dump(), ensure_ascii=False, indent=2
+            )
+        else:
+            chapter_plan_text = "（无卷大纲章节规划）"
+        if critique is not None:
+            critique_text = json.dumps(
+                critique.model_dump(), ensure_ascii=False, indent=2
+            )
+        else:
+            critique_text = "（无审计报告）"
+        if revision_guidance is not None:
+            guidance_text = json.dumps(
+                revision_guidance, ensure_ascii=False, indent=2
+            )
+        else:
+            guidance_text = "（无修订指导）"
+
+        # 每章目标字数
+        target_words = self.config.target_words_per_chapter
+        if chapter_plan is not None and chapter_plan.target_words:
+            target_words = chapter_plan.target_words
+
+        macros = {
+            "{{world_ontology}}": self._format_world_ontology(),
+            "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{original_content}}": original_content,
+            "{{revision_guidance}}": guidance_text,
+            "{{critique}}": critique_text,
+            "{{chapter_plan}}": chapter_plan_text,
+            "{{outline}}": outline_text,
+            "{{previous_chapters_text}}": lookback_chapters_text,
+            "{{pacing_speed}}": self.config.pacing_speed,
+            "{{target_words}}": str(target_words),
+        }
+        system_prompt = self._apply_macros(template, macros)
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "请基于审计报告与修订指导，重写完整章节正文。"},
+        ]
+
+        # 动态前文窗口注入（含本卷已生成章节，插入到最后一条消息之前）
+        if lookback_chapters_text:
+            insert_pos = max(0, len(messages) - 1)
+            messages.insert(
+                insert_pos,
+                {
+                    "role": "system",
+                    "content": f"# 最近 10 章正文参考（含本卷已生成）\n{lookback_chapters_text}",
+                },
+            )
+
+        # 调试模式确认
+        if not await self._maybe_debug_prompt(messages, "章节重写"):
+            return "", "", []
+
+        # 创建 async stop 事件（轮询 threading.Event）
+        async_stop = asyncio.Event()
+
+        def check_stop() -> None:
+            if self._stop_event.is_set():
+                async_stop.set()
+            else:
+                self._loop.call_later(0.1, check_stop)
+
+        check_stop()
+
+        # 流式调用
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        char_count = 0
+
+        async for chunk in self._client.stream_chat_completion(
+            messages=messages,
+            model=self.model,
+            temperature=self.parameters.get("temperature", 0.8),
+            max_tokens=self.parameters.get("max_tokens"),
+            top_p=self.parameters.get("top_p", 1.0),
+            frequency_penalty=self.parameters.get("frequency_penalty", 0.0),
+            presence_penalty=self.parameters.get("presence_penalty", 0.0),
+            stop_event=async_stop,
+        ):
+            if chunk.content:
+                content_parts.append(chunk.content)
+                char_count += len(chunk.content)
+                self.chunk_received.emit(chunk.content)
+                self.token_count.emit(char_count)
+
+            if chunk.reasoning_content:
+                reasoning_parts.append(chunk.reasoning_content)
+                self.reasoning_received.emit(chunk.reasoning_content)
+
+        content = "".join(content_parts)
+        reasoning = "".join(reasoning_parts)
+
+        # 后处理（正则 → 模板 → HTML 剥离）
+        final_content = self._post_process(content)
+
+        return final_content, reasoning, messages
+
     async def _run_chapter_verify(
         self,
         deep_analysis: DeepAnalysis | None,
         outline: Outline | None,
         written_text: str,
         lookback_chapters_text: str = "",
+        previous_chapter_text: str = "",
     ) -> CritiqueReport | None:
         """阶段④-验证：单章验证，产出 CritiqueReport。
 
@@ -1538,6 +1742,10 @@ class VolumeOrchestrator(QThread):
         （用 get_agent_prompt_path）。
         snapshot 可从 DeepAnalysis 构造简化版或 None。
         失败重试一次，再失败返回 None（视为通过，不阻塞）。
+
+        Args:
+            previous_chapter_text: 紧邻上一章完整正文，用于 chapter_transition 维度审计
+                章节开头与前一章结尾的衔接。第一章时为空串。
         """
         template = self._load_agent_template("verify")
         # 从 DeepAnalysis 构造简化 snapshot 文本（或 None）
@@ -1560,6 +1768,7 @@ class VolumeOrchestrator(QThread):
             "{{outline}}": outline_text,
             "{{written_text}}": written_text,
             "{{previous_chapters_text}}": lookback_chapters_text,
+            "{{previous_chapter_text}}": previous_chapter_text,
         }
         system_prompt = self._apply_macros(template, macros)
         messages = [{"role": "system", "content": system_prompt}]
@@ -1742,19 +1951,16 @@ class VolumeOrchestrator(QThread):
         return "\n\n".join(parts)
 
     def _build_lookback_10_chapters_text(self) -> str:
-        """构建插入点前 10 章正文文本（含当前章）。
+        """构建前 10 章正文文本（含当前章 + 本卷已生成章节，动态滑动）。
 
-        与 AgentOrchestrator._build_lookback_chapters_text(max_chapters=10) 一致：
-        返回 chapters[max(0, idx-9):idx+1] 拼接。
-        用于细纲生成与终稿大纲生成的前文参考。
+        基于 _get_effective_chapters() 取末尾 10 章：
+        - 插入点前章节 + 本卷已生成章节（跳过插入点后原章节）
+        - 随本卷新生成章节动态滑动：新生成章节挤入窗口末尾，最老章节挤出
+        - 本卷未生成章节时（深度分析/卷大纲/终稿大纲阶段），结果与插入点前 10 章相同
+
+        用于深度分析（不切分）/深度分析汇总/卷大纲/终稿大纲阶段的前文参考。
         """
-        if self._current_chapter_index >= 0:
-            start = max(0, self._current_chapter_index - 9)
-            lookback = self.chapters[start:self._current_chapter_index + 1]
-        else:
-            lookback = self.chapters[-10:] if self.chapters else []
-        parts = [f"## {ch.title}\n\n{ch.content}" for ch in lookback]
-        return "\n\n".join(parts)
+        return self._build_dynamic_lookback_text(window=10)
 
     def _get_effective_chapters(self) -> list:
         """构造有效章节序列：插入点前章节 + 本卷已生成章节。
@@ -1774,9 +1980,12 @@ class VolumeOrchestrator(QThread):
     def _build_dynamic_lookback_text(self, window: int = 10) -> str:
         """构建动态前文窗口：插入点前章节 + 本卷已生成章节，取末尾 window 章。
 
-        与 _build_lookback_10_chapters_text() 的区别：随本卷新生成章节动态滑动
-        （含本卷已生成章节），且通过 _get_effective_chapters 跳过插入点后原章节，
-        避免从中间续写时误将全文末尾章节当作前文。
+        通过 _get_effective_chapters() 构造有效章节序列（插入点前章节 + 本卷已生成章节，
+        跳过插入点后原章节），取末尾 window 章拼接。随本卷新生成章节动态滑动：
+        新生成章节挤入窗口末尾，最老章节挤出。
+
+        _build_lookback_10_chapters_text() 委托本方法（window=10），
+        深度分析/卷大纲/终稿大纲阶段与本方法共享同一动态滑动逻辑。
         """
         effective = self._get_effective_chapters()
         if not effective:

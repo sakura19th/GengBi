@@ -9,7 +9,11 @@
 # 前文深度分析结果（JSON）
 {{deep_analysis}}
 
-# 续写点前文内容
+# 用户剧情输出需求解析（来自深度分析，须严格遵从）
+{{user_directive_analysis}}
+（若为空对象 {} 表示用户无具体指令，可跳过本段；否则含 required_elements/emphasized_elements/interpretation/conflicts 四子字段）
+
+# 续写点前 10 章正文（含当前章）
 {{chapters_text}}
 
 # 用户续写指令
@@ -25,6 +29,12 @@
 推进速度：{{pacing_speed}}
 
 # 规划任务
+**首要约束：严格遵从用户剧情输出需求**
+- 本章规划必须满足 user_directive_analysis.required_elements 中的所有必备要素
+- 必须着重体现 user_directive_analysis.emphasized_elements 中的强调部分
+- 若 user_directive_analysis.conflicts 非空，应在规划中权衡处理并说明取舍依据
+- 用户指令的优先级高于通用规划原则，但低于主角 OOC 红线与世界观底层规则
+
 请综合参考前文深度分析结果（DeepAnalysis）、前文章节文本与用户续写指令，规划 N 章的卷大纲。核心要求如下：
 
 - **严格依据 DeepAnalysis 中的剧情排布规律、文风、伏笔清单、常用梗、设定库规划 N 章**，使新卷符合原内容的排布规律与风格（而非套用通用模板）
@@ -61,6 +71,7 @@
 - 伏笔回收：优先回收 DeepAnalysis 中 status 为 planted 的伏笔，同时可埋设新伏笔
 - 风格统一：章节切分方式、内部结构、文风、对话密度应与 DeepAnalysis 中的分析结果一致
 - 用户意图：若用户指令非空，应在规划中体现用户意图
+- 用户指令优先：若用户指令非空，规划必须满足 user_directive_analysis.required_elements 并着重体现 emphasized_elements；conflicts 中的冲突需在规划中明确处理，不得自行忽略用户指令
 
 注意：
 - 只输出 JSON 对象，不要包含任何解释性文字

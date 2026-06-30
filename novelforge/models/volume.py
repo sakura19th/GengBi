@@ -17,7 +17,7 @@ VALID_ANALYSIS_DEPTHS: frozenset[str] = frozenset(
     {"light", "standard", "thorough", "exhaustive"}
 )
 
-# 默认大纲审计维度（10 维度：原 8 维度 + 主角一致性 + 世界观一致性）
+# 默认大纲审计维度（11 维度：原 8 维度 + 主角一致性 + 世界观一致性 + 用户指令遵从性）
 DEFAULT_AUDIT_DIMENSIONS: list[str] = [
     "consistency",
     "pacing",
@@ -29,6 +29,7 @@ DEFAULT_AUDIT_DIMENSIONS: list[str] = [
     "style",
     "protagonist_consistency",  # 主角一致性（一票否决：score ≤ 4 时整体 passed=false）
     "worldview_consistency",  # 世界观一致性（严格给分：违反底层世界观元规则时 score ≤ 3）
+    "user_directive_compliance",  # 用户指令遵从性（严格给分：未满足 required_elements 任一项时 score ≤ 3）
 ]
 
 # ChapterPlan.plot_role 合法值（起承转合 + 高潮 + 过渡）
@@ -77,6 +78,7 @@ class DeepAnalysis(BaseModel):
     - ``settings_database``：场景设定库
     - ``recurring_elements``：复现元素
     - ``key_phrases``：关键短语
+    - ``user_directive_analysis``：用户剧情输出需求解析（含 required_elements/emphasized_elements/interpretation/conflicts 四子字段）
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -107,6 +109,9 @@ class DeepAnalysis(BaseModel):
     settings_database: list[dict[str, Any]] = Field(default_factory=list)
     recurring_elements: list[dict[str, Any]] = Field(default_factory=list)
     key_phrases: list[dict[str, Any]] = Field(default_factory=list)
+
+    # 用户剧情输出需求解析（结构化）
+    user_directive_analysis: dict[str, Any] = Field(default_factory=dict)
 
 
 class ChapterPlan(BaseModel):

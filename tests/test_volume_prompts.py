@@ -74,7 +74,7 @@ def test_phase_chapter_outline_template_exists() -> None:
 
 
 def test_phase_deep_analysis_placeholders() -> None:
-    """深度分析模板包含 9 个预期占位符（单 chapters_text 文本）。"""
+    """深度分析模板包含预期占位符（含 context_entries/user_input）与 user_directive_analysis 输出字段。"""
     content = load_text_resource(get_volume_prompt_path("deep_analysis"))
     expected = [
         "{{title}}",
@@ -86,6 +86,8 @@ def test_phase_deep_analysis_placeholders() -> None:
         "{{chapters_text}}",
         "{{analysis_depth}}",
         "{{max_analysis_entries}}",
+        "{{context_entries}}",
+        "{{user_input}}",
     ]
     for ph in expected:
         assert ph in content, f"深度分析模板缺少占位符: {ph}"
@@ -95,6 +97,20 @@ def test_phase_deep_analysis_placeholders() -> None:
     )
     assert "{{lookback_chapters_text}}" not in content, (
         "深度分析模板不应再含 {{lookback_chapters_text}} 占位符"
+    )
+    # 新增 user_directive_analysis 输出字段
+    assert "user_directive_analysis" in content, (
+        "深度分析模板应含 user_directive_analysis 输出字段"
+    )
+    # 新增"用户指令优先"原则
+    assert "用户指令优先" in content, "深度分析模板应含'用户指令优先'原则"
+    # 新增"用户剧情输出需求解析"任务
+    assert "用户剧情输出需求解析" in content, (
+        "深度分析模板应含'用户剧情输出需求解析'任务"
+    )
+    # 章节文本说明改为"仅含插入点前 10 章正文"
+    assert "仅含插入点前 10 章正文" in content, (
+        "深度分析模板章节文本说明应含'仅含插入点前 10 章正文'"
     )
 
 
@@ -108,7 +124,7 @@ def test_phase_deep_analysis_merge_template_exists() -> None:
 
 
 def test_phase_deep_analysis_merge_placeholders() -> None:
-    """深度分析汇总模板包含 {{deep_analysis}} + 6 个 profile 宏占位符。"""
+    """深度分析汇总模板包含 {{deep_analysis}} + 6 个 profile 宏 + context_entries/user_input/chapters_text 占位符。"""
     content = load_text_resource(get_volume_prompt_path("deep_analysis_merge"))
     expected = [
         "{{title}}",
@@ -118,13 +134,24 @@ def test_phase_deep_analysis_merge_placeholders() -> None:
         "{{world_setting}}",
         "{{writing_style}}",
         "{{deep_analysis}}",
+        "{{context_entries}}",
+        "{{user_input}}",
+        "{{chapters_text}}",
     ]
     for ph in expected:
         assert ph in content, f"深度分析汇总模板缺少占位符: {ph}"
+    # 新增 user_directive_analysis 输出字段
+    assert "user_directive_analysis" in content, (
+        "深度分析汇总模板应含 user_directive_analysis 输出字段"
+    )
+    # 新增"用户指令解析整合"任务
+    assert "用户指令解析整合" in content, (
+        "深度分析汇总模板应含'用户指令解析整合'任务"
+    )
 
 
 def test_phase_volume_outline_placeholders() -> None:
-    """卷大纲模板包含 6 个预期占位符，且前文段落标签为 # 续写点前文内容。"""
+    """卷大纲模板包含预期占位符（含 user_directive_analysis），前文标题为 # 续写点前 10 章正文（含当前章）。"""
     content = load_text_resource(get_volume_prompt_path("volume_outline"))
     expected = [
         "{{deep_analysis}}",
@@ -133,20 +160,27 @@ def test_phase_volume_outline_placeholders() -> None:
         "{{chapter_count}}",
         "{{target_words_per_chapter}}",
         "{{context_entries}}",
+        "{{user_directive_analysis}}",
     ]
     for ph in expected:
         assert ph in content, f"卷大纲模板缺少占位符: {ph}"
-    # Task 5: 前文段落标签应为 # 续写点前文内容（而非 # 前文章节内容）
-    assert "# 续写点前文内容" in content, (
-        "卷大纲模板前文段落标签应为 # 续写点前文内容"
+    # 前文段落标签应为 # 续写点前 10 章正文（含当前章）
+    assert "# 续写点前 10 章正文（含当前章）" in content, (
+        "卷大纲模板前文段落标签应为 # 续写点前 10 章正文（含当前章）"
     )
     assert "# 前文章节内容" not in content, (
         "卷大纲模板不应再含 # 前文章节内容 标签"
     )
+    # 新增"首要约束：严格遵从用户剧情输出需求"段
+    assert "首要约束：严格遵从用户剧情输出需求" in content, (
+        "卷大纲模板应含'首要约束：严格遵从用户剧情输出需求'段"
+    )
+    # 新增"用户指令优先"原则
+    assert "用户指令优先" in content, "卷大纲模板应含'用户指令优先'原则"
 
 
 def test_phase_outline_audit_placeholders() -> None:
-    """大纲审计模板包含预期占位符。"""
+    """大纲审计模板包含预期占位符（含 user_directive_analysis）。"""
     content = load_text_resource(get_volume_prompt_path("outline_audit"))
     expected = [
         "{{volume_outline}}",
@@ -156,9 +190,20 @@ def test_phase_outline_audit_placeholders() -> None:
         "{{round_idx}}",
         "{{total_rounds}}",
         "{{audit_focus}}",
+        "{{user_directive_analysis}}",
     ]
     for ph in expected:
         assert ph in content, f"大纲审计模板缺少占位符: {ph}"
+    # 新增 user_directive_compliance 维度定义
+    assert "user_directive_compliance" in content, (
+        "大纲审计模板应含 user_directive_compliance 维度定义"
+    )
+    # 新增"用户指令遵从性审计"任务
+    assert "用户指令遵从性审计" in content, (
+        "大纲审计模板应含'用户指令遵从性审计'任务"
+    )
+    # 新增"用户指令优先"原则
+    assert "用户指令优先" in content, "大纲审计模板应含'用户指令优先'原则"
 
 
 def test_phase_chapter_outline_placeholders() -> None:
@@ -175,6 +220,25 @@ def test_phase_chapter_outline_placeholders() -> None:
     ]
     for ph in expected:
         assert ph in content, f"单章细纲模板缺少占位符: {ph}"
+
+
+def test_phase_outline_final_placeholders() -> None:
+    """终稿大纲模板包含预期占位符（含 user_directive_analysis）与首要约束段。"""
+    content = load_text_resource(get_volume_prompt_path("outline_final"))
+    expected = [
+        "{{original_outline}}",
+        "{{audit_report}}",
+        "{{previous_chapters_text}}",
+        "{{deep_analysis}}",
+        "{{user_directive_analysis}}",
+        "{{pacing_speed}}",
+    ]
+    for ph in expected:
+        assert ph in content, f"终稿大纲模板缺少占位符: {ph}"
+    # 新增"首要约束：严格遵从用户剧情输出需求"段
+    assert "首要约束：严格遵从用户剧情输出需求" in content, (
+        "终稿大纲模板应含'首要约束：严格遵从用户剧情输出需求'段"
+    )
 
 
 # ===== 3. 深度分析深度参数注入 =====
@@ -310,8 +374,8 @@ def test_get_volume_prompt_path_filename_pattern() -> None:
 
 
 def test_get_agent_prompt_path_verify_revise() -> None:
-    """get_agent_prompt_path 对 verify/revise 返回存在的路径（volume 复用）。"""
-    for phase in ("verify", "revise"):
+    """get_agent_prompt_path 对 verify/revise/chapter_rewrite 返回存在的路径（volume 复用）。"""
+    for phase in ("verify", "revise", "chapter_rewrite"):
         path = get_agent_prompt_path(phase)
         assert path.name == f"phase_{phase}.txt"
         assert path.parent.name == "agent"
@@ -350,6 +414,8 @@ def test_macro_replacement_deep_analysis() -> None:
         "{{max_analysis_entries}}": "30",
         "{{world_ontology}}": '{"existential_topology": {}}',
         "{{protagonist_profile}}": '{"basic_anchors": {}}',
+        "{{context_entries}}": "## 人物\n- 主角林晨",
+        "{{user_input}}": "请加强主角内心戏",
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -376,6 +442,7 @@ def test_macro_replacement_volume_outline() -> None:
         "{{context_entries}}": "## 人物\n- 主角林晨",
         "{{world_ontology}}": '{"existential_topology": {}}',
         "{{protagonist_profile}}": '{"basic_anchors": {}}',
+        "{{user_directive_analysis}}": '{"required_elements": ["宝物"]}',
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -400,6 +467,7 @@ def test_macro_replacement_outline_audit() -> None:
         "{{audit_focus}}": "第3章人物动机不一致",
         "{{world_ontology}}": '{"existential_topology": {}}',
         "{{protagonist_profile}}": '{"basic_anchors": {}}',
+        "{{user_directive_analysis}}": '{"required_elements": ["宝物"]}',
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -467,3 +535,85 @@ def test_templates_contain_json_constraint() -> None:
             or "代码块" in content
             or "markdown" in content.lower()
         ), f"{phase} 模板缺少 JSON 输出格式指导"
+
+
+# ===== 9. phase_chapter_rewrite.txt 模板测试 =====
+
+
+def test_phase_chapter_rewrite_template_exists() -> None:
+    """phase_chapter_rewrite.txt 模板存在且可加载。"""
+    path = get_agent_prompt_path("chapter_rewrite")
+    assert path.name == "phase_chapter_rewrite.txt"
+    assert path.exists(), f"路径不存在: {path}"
+    content = load_text_resource(path)
+    assert len(content) > 0
+
+
+def test_phase_chapter_rewrite_placeholders() -> None:
+    """phase_chapter_rewrite.txt 含 10 个占位符且无残留。"""
+    template = load_text_resource(get_agent_prompt_path("chapter_rewrite"))
+    expected_placeholders = [
+        "{{original_content}}",
+        "{{critique}}",
+        "{{revision_guidance}}",
+        "{{chapter_plan}}",
+        "{{outline}}",
+        "{{previous_chapters_text}}",
+        "{{world_ontology}}",
+        "{{protagonist_profile}}",
+        "{{pacing_speed}}",
+        "{{target_words}}",
+    ]
+    for ph in expected_placeholders:
+        assert ph in template, f"phase_chapter_rewrite.txt 缺少占位符: {ph}"
+    # 含"重写完整章节"强调语
+    assert "重写完整章节" in template
+    assert "严禁续写或追加" in template
+    # 宏替换无残留
+    macros = {ph: "测试值" for ph in expected_placeholders}
+    result = _apply_macros(template, macros)
+    _assert_no_placeholders(result)
+
+
+# ===== 10. phase_verify.txt 14 维度与新占位符测试 =====
+
+
+def test_phase_verify_template_14_dimensions() -> None:
+    """phase_verify.txt 含 14 个审计维度定义。"""
+    template = load_text_resource(get_agent_prompt_path("verify"))
+    # 11 个原有维度
+    original_dims = [
+        "consistency", "pacing", "engagement", "structure", "coherence",
+        "foreshadowing", "characters", "style",
+        "protagonist_consistency", "worldview_consistency", "user_directive_compliance",
+    ]
+    # 3 个新维度
+    new_dims = ["outline_alignment", "detail_outline_alignment", "chapter_transition"]
+    for dim in original_dims + new_dims:
+        assert dim in template, f"phase_verify.txt 缺少维度: {dim}"
+    # 含"十四个维度"
+    assert "十四个维度" in template
+
+
+def test_phase_verify_previous_chapter_text_placeholder() -> None:
+    """phase_verify.txt 含 {{previous_chapter_text}} 占位符。"""
+    template = load_text_resource(get_agent_prompt_path("verify"))
+    assert "{{previous_chapter_text}}" in template
+    # 含章节衔接审计段说明
+    assert "前一章结尾正文" in template
+    assert "章节衔接审计" in template
+
+
+def test_phase_verify_six_summary_markers() -> None:
+    """phase_verify.txt summary 含 6 个固定标记段落。"""
+    template = load_text_resource(get_agent_prompt_path("verify"))
+    markers = [
+        "【主角一致性审计】",
+        "【世界观一致性审计】",
+        "【用户指令遵从性审计】",
+        "【大纲一致性审计】",
+        "【细纲一致性审计】",
+        "【章节衔接审计】",
+    ]
+    for marker in markers:
+        assert marker in template, f"phase_verify.txt 缺少 summary 标记段落: {marker}"

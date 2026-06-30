@@ -5,13 +5,17 @@
 
 # 启用的审计维度
 {{audit_dimensions}}
-（逗号分隔的维度名列表，取值 consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency）
+（逗号分隔的维度名列表，取值 consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance）
 
 # 前文参考（最近 10 章正文）
 {{previous_chapters_text}}
 
 # 深度分析参考（JSON）
 {{deep_analysis}}
+
+# 用户剧情输出需求解析（审计须检查大纲是否满足）
+{{user_directive_analysis}}
+（若为空对象 {} 表示用户无具体指令，可跳过用户指令遵从性维度审计；否则含 required_elements/emphasized_elements/interpretation/conflicts 四子字段，审计须检查修订后的大纲是否满足 required_elements 并着重体现 emphasized_elements）
 
 # 主角形象档案（JSON，含 8 大维度心理学档案）
 {{protagonist_profile}}
@@ -30,6 +34,8 @@
 
 **用户特别关注**：请优先检查用户在"审计重点"中指出的部分，确保相关问题在 revised_outline 中得到改善。
 
+**用户指令遵从性审计**：请检查修订后的大纲是否满足 user_directive_analysis.required_elements 中的所有必备要素，是否着重体现了 emphasized_elements 中的强调部分。未满足时 user_directive_compliance 维度应低分，并在 issues 中明确指出缺失的要素，在 suggestions 中给出补充建议。conflicts 中标注的冲突需在修订大纲中明确处理并说明取舍依据。
+
 请对每个启用的审计维度进行评分与问题诊断，并基于审计结果修订原大纲，产出终稿 VolumeOutline。各维度定义如下：
 
 - consistency（一致性）：与原前文设定/人物/世界状态是否一致
@@ -42,13 +48,14 @@
 - style（文风）：文风/语言特色/叙事视角是否与前文统一，是否符合卷大纲设定的 writing_style
 - protagonist_consistency（主角一致性）：大纲中主角的行为/决策/目标是否符合 protagonist_profile 中的性格铁律、动机优先级、核心恐惧、OOC红线？**一票否决**：该维度 score ≤ 4 时整体 passed=false。若大纲中主角任何行为违反 OOC 红线（绝对不能做的事），或决策模式不符合校验优先级（性格铁律>动机优先级>核心恐惧>默认防御>剧情需要），该维度直接 0 分，整体 passed=false
 - worldview_consistency（世界观一致性）：大纲中的事件/设定是否符合 world_ontology 中的因果架构、时空规则、守恒律？**严格给分**：违反底层世界观元规则时该维度 score ≤ 3
+- user_directive_compliance（用户指令遵从性）：修订后的大纲是否满足 user_directive_analysis.required_elements 中的所有必备要素？是否着重体现了 emphasized_elements 中的强调部分？**严格给分**：未满足 required_elements 任一项时该维度 score ≤ 3；conflicts 中的冲突未在修订大纲中明确处理的也应低分
 
 仅审计上述启用的维度，未启用的维度可跳过。
 
 # 输出格式
 请输出严格的 JSON 对象（OutlineAuditReport），包含以下字段：
 - dimensions：数组，各启用维度的审计结果，每项含：
-  - dimension：字符串，维度名（consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency）
+  - dimension：字符串，维度名（consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance）
   - score：整数，该维度评分（1-10，10 为最佳）
   - issues：数组，该维度发现的具体问题列表（每项为字符串）
   - suggestions：数组，针对该问题的具体修订建议列表（每项为字符串）
@@ -61,6 +68,7 @@
 - 问题具体：每个 issue 应明确指出问题所在章节与具体表现
 - 建议可操作：每个 suggestion 应可直接落地到修订后的 outline
 - 修订到位：revised_outline 必须切实改善审计中发现的问题，而非简单复制原大纲
+- 用户指令优先：用户指令遵从性是硬约束，required_elements 未满足时该维度必须低分，不可因其他维度优秀而豁免
 
 注意：
 - 只输出 JSON 对象，不要包含任何解释性文字

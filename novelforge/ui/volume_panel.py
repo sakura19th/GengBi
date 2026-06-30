@@ -127,6 +127,7 @@ _AUDIT_DIMENSION_LABELS: dict[str, str] = {
     "style": "文风",
     "protagonist_consistency": "主角一致性",
     "worldview_consistency": "世界观一致性",
+    "user_directive_compliance": "用户指令遵从性",
 }
 
 # 进度指示器状态对象名（由全局 QSS 接管样式，镜像 AgentPanel）

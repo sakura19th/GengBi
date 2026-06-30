@@ -12,6 +12,10 @@
 # 深度分析参考（JSON）
 {{deep_analysis}}
 
+# 用户剧情输出需求解析（终稿须严格满足）
+{{user_directive_analysis}}
+（若为空对象 {} 表示用户无具体指令，可跳过本段；否则含 required_elements/emphasized_elements/interpretation/conflicts 四子字段，终稿大纲必须满足 required_elements 并着重体现 emphasized_elements）
+
 # 世界观底层元描述（全文提取固化，终稿大纲须遵守底层规则约束）
 {{world_ontology}}
 
@@ -25,6 +29,7 @@
 # 终稿生成任务
 请综合参考原大纲、审计报告与前文深度分析，产出终稿 VolumeOutline。核心要求：
 
+- **首要约束：严格遵从用户剧情输出需求**：终稿大纲必须满足 user_directive_analysis.required_elements 中的所有必备要素，并着重体现 emphasized_elements 中的强调部分；conflicts 中的冲突需在终稿中明确处理并说明取舍依据；用户指令的优先级高于通用规划原则，但低于主角 OOC 红线与世界观底层规则
 - **整合审计意见**：审计报告中各维度的问题与建议必须在终稿中得到体现，切实改善而非简单复制
 - **保留原大纲意图**：终稿应保留原大纲的核心剧情走向与章节结构，仅在审计指出的薄弱处修订
 - **前文一致性**：终稿必须与前文 10 章正文（人物状态/世界状态/伏笔/文风）保持一致
