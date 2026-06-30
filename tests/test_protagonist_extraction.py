@@ -629,6 +629,490 @@ class TestExtractProtagonistBatchRetry:
         assert mock_client.chat_completion.call_count == 2
 
 
+# ===== 11. extract_protagonist_streaming 公共方法测试 =====
+
+
+class _StreamChunk:
+    """模拟 stream_chat_completion 产出的 chunk。"""
+
+    def __init__(self, content: str, finish_reason: str | None = "stop") -> None:
+        self.content = content
+        self.finish_reason = finish_reason
+
+
+class _ProtagonistLLMClient:
+    """模拟 LLM 客户端，支持 stream_chat_completion 成功/失败场景。
+
+    按调用顺序依次返回 stream_responses/stream_errors 中的预设响应。
+    """
+
+    def __init__(self) -> None:
+        self.stream_responses: list[list[_StreamChunk]] = []
+        self.stream_errors: list[Exception | None] = []
+        self._idx = 0
+        self.stream_call_count = 0
+
+    def add_stream_response(self, content: str) -> None:
+        """追加一次成功的流式响应（单 chunk，content 为传入字符串）。"""
+        self.stream_responses.append([_StreamChunk(content)])
+        self.stream_errors.append(None)
+
+    def add_stream_error(self, error: Exception) -> None:
+        """追加一次抛错的流式响应（迭代开始即抛出）。"""
+        self.stream_responses.append([])
+        self.stream_errors.append(error)
+
+    async def stream_chat_completion(self, **kwargs: Any) -> Any:
+        """模拟 stream_chat_completion：按顺序返回预设响应或抛错。"""
+        self.stream_call_count += 1
+        idx = self._idx
+        self._idx += 1
+        if idx < len(self.stream_errors) and self.stream_errors[idx] is not None:
+            raise self.stream_errors[idx]
+        if idx < len(self.stream_responses):
+            for chunk in self.stream_responses[idx]:
+                yield chunk
+
+
+def _make_protagonist_project() -> tuple[Any, list[Any]]:
+    """构建测试用 Project + Chapters（用于主角形象提取）。"""
+    from novelforge.models import Chapter, NovelProfile, Project
+
+    profile = NovelProfile(
+        title="测试小说",
+        author="测试作者",
+        protagonist="主角",
+        synopsis="测试简介",
+        world_setting="测试世界观",
+        writing_style="测试风格",
+    )
+    project = Project(id="test_protag_proj", name="测试小说", novel_profile=profile)
+    chapters = [
+        Chapter(
+            id="ch_0",
+            project_id="test_protag_proj",
+            index=0,
+            title="第1章",
+            content="章节内容",
+            word_count=4,
+        )
+    ]
+    return project, chapters
+
+
+class TestExtractProtagonistStreaming:
+    """extract_protagonist_streaming 公共方法测试。"""
+
+    def test_extract_protagonist_streaming_single_batch(self) -> None:
+        """单批次正常返回 (ProtagonistProfile, status)，并保存到独立缓存。"""
+        import asyncio
+
+        from novelforge.models import ProtagonistProfile
+
+        extractor = _make_extractor()
+        client = _ProtagonistLLMClient()
+        profile_json = json.dumps(
+            {"basic_anchors": {"name": "主角"}}, ensure_ascii=False
+        )
+        client.add_stream_response(profile_json)
+        extractor._get_llm_client = lambda: (client, "gpt-4o-mini")  # type: ignore[assignment]
+
+        project, chapters = _make_protagonist_project()
+        current_chapter = chapters[0]
+
+        profile, status = asyncio.run(
+            extractor.extract_protagonist_streaming(
+                project=project,
+                chapters=chapters,
+                current_chapter=current_chapter,
+            )
+        )
+
+        assert profile is not None
+        assert isinstance(profile, ProtagonistProfile)
+        assert profile.basic_anchors == {"name": "主角"}
+        assert "完成" in status
+        # 验证保存到独立缓存（key 含 protagonist: 前缀）
+        extractor.storage_service.storage.set_cache.assert_called_once()
+        call_args = extractor.storage_service.storage.set_cache.call_args
+        cache_key = call_args.args[0]
+        assert cache_key.startswith("protagonist:")
+        saved_data = call_args.args[1]
+        assert "protagonist_profile" in saved_data
+
+    def test_extract_protagonist_streaming_multi_batch_merge(self) -> None:
+        """小 token_limit 触发多批次合并。"""
+        import asyncio
+
+        from novelforge.models import Chapter, NovelProfile, Project
+
+        extractor = _make_extractor()
+        client = _ProtagonistLLMClient()
+        # 3 个批次各一次响应
+        for i in range(3):
+            client.add_stream_response(
+                json.dumps(
+                    {"basic_anchors": {"name": f"主角{i}"}}, ensure_ascii=False
+                )
+            )
+        # 合并环节（_run_protagonist_merge）也需一次响应
+        client.add_stream_response(
+            json.dumps(
+                {"basic_anchors": {"name": "合并后主角"}}, ensure_ascii=False
+            )
+        )
+        extractor._get_llm_client = lambda: (client, "gpt-4o-mini")  # type: ignore[assignment]
+
+        profile = NovelProfile(
+            title="测试",
+            author="作者",
+            protagonist="主角",
+            synopsis="简介",
+            world_setting="世界观",
+            writing_style="风格",
+        )
+        project = Project(id="multi_proj", name="测试", novel_profile=profile)
+        chapters = [
+            Chapter(
+                id=f"ch_{i}",
+                project_id="multi_proj",
+                index=i,
+                title=f"第{i + 1}章",
+                content=f"内容{i}" * 100,
+                word_count=200,
+            )
+            for i in range(3)
+        ]
+        current_chapter = chapters[-1]
+
+        prof, status = asyncio.run(
+            extractor.extract_protagonist_streaming(
+                project=project,
+                chapters=chapters,
+                current_chapter=current_chapter,
+                token_limit=10,  # 小 limit 触发拆分
+            )
+        )
+
+        assert prof is not None
+        assert "完成" in status
+        # 应有多批次调用（>= 3）+ 合并环节调用
+        assert client.stream_call_count >= 3
+
+    def test_extract_protagonist_streaming_load_cached_roundtrip(self) -> None:
+        """提取后 load_cached_protagonist 能加载到保存的 profile。"""
+        import asyncio
+
+        extractor = _make_extractor()
+        client = _ProtagonistLLMClient()
+        profile_json = json.dumps(
+            {"basic_anchors": {"name": "缓存主角"}, "growth_arc": {"stage": "denial"}},
+            ensure_ascii=False,
+        )
+        client.add_stream_response(profile_json)
+        extractor._get_llm_client = lambda: (client, "gpt-4o-mini")  # type: ignore[assignment]
+
+        project, chapters = _make_protagonist_project()
+        current_chapter = chapters[0]
+
+        # 第一次：提取并保存
+        profile, _ = asyncio.run(
+            extractor.extract_protagonist_streaming(
+                project=project,
+                chapters=chapters,
+                current_chapter=current_chapter,
+            )
+        )
+        assert profile is not None
+
+        # 模拟从存储读回：把 set_cache 收到的数据回填给 get_cache
+        saved_call = extractor.storage_service.storage.set_cache.call_args
+        saved_data = saved_call.args[1]
+        extractor.storage_service.storage.get_cache = AsyncMock(return_value=saved_data)
+
+        # 通过 load_cached_protagonist 加载
+        loaded = asyncio.run(
+            extractor.load_cached_protagonist(project.id, current_chapter.id)
+        )
+        assert loaded is not None
+        assert "protagonist_profile" in loaded
+        assert loaded["protagonist_profile"]["basic_anchors"] == {"name": "缓存主角"}
+
+    def test_extract_protagonist_streaming_callbacks_invoked(self) -> None:
+        """on_chunk 回调在流式提取中被调用。"""
+        import asyncio
+
+        extractor = _make_extractor()
+        client = _ProtagonistLLMClient()
+        profile_json = json.dumps(
+            {"basic_anchors": {"name": "回调主角"}}, ensure_ascii=False
+        )
+        client.add_stream_response(profile_json)
+        extractor._get_llm_client = lambda: (client, "gpt-4o-mini")  # type: ignore[assignment]
+
+        project, chapters = _make_protagonist_project()
+        current_chapter = chapters[0]
+
+        chunks_received: list[str] = []
+        batches_received: list[tuple[int, int]] = []
+
+        def on_chunk(text: str) -> None:
+            chunks_received.append(text)
+
+        def on_batch_complete(idx: int, total: int) -> None:
+            batches_received.append((idx, total))
+
+        profile, _ = asyncio.run(
+            extractor.extract_protagonist_streaming(
+                project=project,
+                chapters=chapters,
+                current_chapter=current_chapter,
+                on_chunk=on_chunk,
+                on_batch_complete=on_batch_complete,
+            )
+        )
+
+        assert profile is not None
+        # on_chunk 在流式 chunk 接收时被调用（至少 1 次）
+        assert len(chunks_received) >= 1
+        # on_batch_complete 仅在多批次合并环节被调用，单批次时为空（不强制断言）
+
+    def test_extract_protagonist_streaming_failure_returns_none(self) -> None:
+        """LLM 2 次重试均失败 → 返回 (None, 失败消息)。"""
+        import asyncio
+
+        from novelforge.services.llm_client import LLMError
+
+        extractor = _make_extractor()
+        client = _ProtagonistLLMClient()
+        # 2 次失败（首次 + 重试 = 2 次）
+        client.add_stream_error(LLMError("首次失败"))
+        client.add_stream_error(LLMError("重试也失败"))
+        extractor._get_llm_client = lambda: (client, "gpt-4o-mini")  # type: ignore[assignment]
+
+        project, chapters = _make_protagonist_project()
+        current_chapter = chapters[0]
+
+        profile, status = asyncio.run(
+            extractor.extract_protagonist_streaming(
+                project=project,
+                chapters=chapters,
+                current_chapter=current_chapter,
+            )
+        )
+
+        assert profile is None
+        assert "失败" in status
+        # 2 次重试均调用
+        assert client.stream_call_count == 2
+
+
+# ===== 12. 上下文提取与主角解耦测试 =====
+
+
+class TestExtractCommonNoProtagonist:
+    """验证上下文提取流程不再产出 protagonist_profile。"""
+
+    def test_extract_common_no_protagonist_in_result(self) -> None:
+        """extract 返回的 ExtractResult.protagonist_profile 为 None。"""
+        import asyncio
+
+        from novelforge.models import Chapter, NovelProfile, Project
+
+        extractor = _make_extractor()
+        mock_client = MagicMock()
+        mock_client.chat_completion = AsyncMock(
+            return_value={
+                "choices": [{"message": {"content": "[]"}}],
+                "usage": {},
+            }
+        )
+        extractor._get_llm_client = lambda: (mock_client, "gpt-4o-mini")  # type: ignore[assignment]
+
+        profile = NovelProfile(
+            title="测试",
+            author="作者",
+            protagonist="主角",
+            synopsis="简介",
+            world_setting="世界观",
+            writing_style="风格",
+        )
+        project = Project(id="decouple_proj", name="测试", novel_profile=profile)
+        chapters = [
+            Chapter(
+                id="ch_0",
+                project_id="decouple_proj",
+                index=0,
+                title="第1章",
+                content="内容",
+                word_count=2,
+            )
+        ]
+
+        result = asyncio.run(
+            extractor.extract(
+                project=project,
+                chapters=chapters,
+                current_chapter=chapters[0],
+            )
+        )
+
+        assert result.protagonist_profile is None
+        assert result.protagonist_batch_count == 1
+        assert result.protagonist_merged is False
+
+    def test_extract_common_cache_save_no_protagonist(self) -> None:
+        """_extract_common 保存缓存时不写入 protagonist 独立 key。"""
+        import asyncio
+
+        from novelforge.models import Chapter, NovelProfile, Project
+
+        extractor = _make_extractor()
+        mock_client = MagicMock()
+        mock_client.chat_completion = AsyncMock(
+            return_value={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                [
+                                    {
+                                        "uid": "e1",
+                                        "category": "characters",
+                                        "content": "测试条目",
+                                    }
+                                ],
+                                ensure_ascii=False,
+                            )
+                        }
+                    }
+                ],
+                "usage": {},
+            }
+        )
+        extractor._get_llm_client = lambda: (mock_client, "gpt-4o-mini")  # type: ignore[assignment]
+
+        profile = NovelProfile(
+            title="测试",
+            author="作者",
+            protagonist="主角",
+            synopsis="简介",
+            world_setting="世界观",
+            writing_style="风格",
+        )
+        project = Project(id="cache_test_proj", name="测试", novel_profile=profile)
+        chapters = [
+            Chapter(
+                id="ch_0",
+                project_id="cache_test_proj",
+                index=0,
+                title="第1章",
+                content="内容",
+                word_count=2,
+            )
+        ]
+
+        result = asyncio.run(
+            extractor.extract(
+                project=project,
+                chapters=chapters,
+                current_chapter=chapters[0],
+            )
+        )
+        assert result.status == "completed"
+
+        # 检查所有 set_cache 调用：均不应写入 protagonist: 前缀的独立缓存
+        assert extractor.storage_service.storage.set_cache.called
+        for call in extractor.storage_service.storage.set_cache.call_args_list:
+            cache_key = call.args[0]
+            assert not cache_key.startswith("protagonist:"), (
+                f"上下文提取不应写入 protagonist 独立缓存: {cache_key}"
+            )
+            saved_data = call.args[1]
+            # 上下文缓存若含 protagonist_profile 字段则必须为 None
+            if "protagonist_profile" in saved_data:
+                assert saved_data["protagonist_profile"] is None
+
+
+# ===== 13. UI 面板主角按钮测试 =====
+
+
+class TestContextPanelProtagonistButtons:
+    """ContextPreviewPanel 主角按钮 UI 测试。"""
+
+    def test_protagonist_buttons_exist(self) -> None:
+        """提取/查看主角形象按钮存在且 objectName 正确。"""
+        from PySide6.QtWidgets import QApplication
+
+        from novelforge.ui.context_preview_panel import ContextPreviewPanel
+
+        app = QApplication.instance() or QApplication([])
+        panel = ContextPreviewPanel()
+
+        assert panel._extract_protagonist_btn.text() == "提取主角形象"
+        assert panel._extract_protagonist_btn.objectName() == "primaryBtn"
+        assert panel._view_protagonist_btn.text() == "查看主角形象"
+        assert panel._view_protagonist_btn.objectName() == "secondaryBtn"
+
+    def test_extract_protagonist_clicked_emits_signal(self) -> None:
+        """点击提取按钮发射 extract_protagonist_requested 信号。"""
+        from PySide6.QtTest import QSignalSpy
+        from PySide6.QtWidgets import QApplication
+
+        from novelforge.ui.context_preview_panel import ContextPreviewPanel
+
+        app = QApplication.instance() or QApplication([])
+        panel = ContextPreviewPanel()
+        spy = QSignalSpy(panel.extract_protagonist_requested)
+
+        panel._on_extract_protagonist_clicked()
+
+        assert spy.count() == 1
+
+    def test_view_protagonist_clicked_emits_signal(self) -> None:
+        """点击查看按钮发射 view_protagonist_requested 信号。"""
+        from PySide6.QtTest import QSignalSpy
+        from PySide6.QtWidgets import QApplication
+
+        from novelforge.ui.context_preview_panel import ContextPreviewPanel
+
+        app = QApplication.instance() or QApplication([])
+        panel = ContextPreviewPanel()
+        spy = QSignalSpy(panel.view_protagonist_requested)
+
+        panel._on_view_protagonist_clicked()
+
+        assert spy.count() == 1
+
+    def test_start_protagonist_extraction_disables_buttons(self) -> None:
+        """start_protagonist_extraction 禁用提取按钮。"""
+        from PySide6.QtWidgets import QApplication
+
+        from novelforge.ui.context_preview_panel import ContextPreviewPanel
+
+        app = QApplication.instance() or QApplication([])
+        panel = ContextPreviewPanel()
+
+        panel.start_protagonist_extraction()
+
+        assert panel._extract_protagonist_btn.isEnabled() is False
+
+    def test_finish_protagonist_extraction_enables_buttons(self) -> None:
+        """finish_protagonist_extraction 恢复提取按钮可用。"""
+        from PySide6.QtWidgets import QApplication
+
+        from novelforge.ui.context_preview_panel import ContextPreviewPanel
+
+        app = QApplication.instance() or QApplication([])
+        panel = ContextPreviewPanel()
+
+        panel.start_protagonist_extraction()
+        assert panel._extract_protagonist_btn.isEnabled() is False
+
+        panel.finish_protagonist_extraction("completed")
+        assert panel._extract_protagonist_btn.isEnabled() is True
+
+
 if __name__ == "__main__":
     # 直接运行时执行所有测试
     pytest.main([__file__, "-v", "--tb=short"])

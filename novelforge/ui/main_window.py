@@ -181,6 +181,9 @@ class MainWindow(QMainWindow):
     _ontology_chunk_received = Signal(str)  # 世界观提取 chunk（跨线程）
     _ontology_done = Signal(object, str)    # 世界观提取完成（跨线程）：ontology, status
     _ontology_batch_done = Signal(int, int) # 世界观提取批次完成（跨线程）
+    _protagonist_chunk_received = Signal(str)  # 主角形象提取 chunk（跨线程）
+    _protagonist_done = Signal(object, str)    # 主角形象提取完成（跨线程）：profile, status
+    _protagonist_batch_done = Signal(int, int) # 主角形象提取批次完成（跨线程）
 
     def __init__(self, config_manager: ConfigManager) -> None:
         """初始化主窗口。
@@ -267,6 +270,9 @@ class MainWindow(QMainWindow):
         self._extract_stream_text_by_chapter: dict[str, str] = {}  # 上下文提取流式文本
         self._ontology_extracting: bool = False  # 世界观提取中标志（项目级）
         self._ontology_stream_text: str = ""  # 世界观提取流式文本缓冲
+        self._protagonist_extracting: bool = False  # 主角形象提取中标志（章节级）
+        self._protagonist_stream_text: str = ""  # 主角形象提取流式文本缓冲
+        self._protagonist_stream_text_by_chapter: dict[str, str] = {}  # 按章节缓冲主角提取流式文本
         self._continuation_chapter_id: str | None = None  # 单章续写发起章节
         self._continuation_stream_text_by_chapter: dict[str, str] = {}  # 续写流式文本
         self._audit_chapter_id: str | None = None  # 审计发起章节
@@ -297,6 +303,10 @@ class MainWindow(QMainWindow):
         self._ontology_chunk_received.connect(self._on_ontology_chunk_received)
         self._ontology_done.connect(self._on_ontology_done)
         self._ontology_batch_done.connect(self._on_ontology_batch_done)
+        # 连接主角形象提取信号（跨线程安全传递）
+        self._protagonist_chunk_received.connect(self._on_protagonist_chunk_received)
+        self._protagonist_done.connect(self._on_protagonist_done)
+        self._protagonist_batch_done.connect(self._on_protagonist_batch_done)
 
         # 创建菜单栏
         self._setup_menu_bar()
@@ -443,6 +453,8 @@ class MainWindow(QMainWindow):
         context_panel.extract_requested.connect(self._on_extract_requested)
         context_panel.extract_ontology_requested.connect(self._on_extract_ontology_requested)
         context_panel.view_ontology_requested.connect(self._on_view_ontology_requested)
+        context_panel.extract_protagonist_requested.connect(self._on_extract_protagonist_requested)
+        context_panel.view_protagonist_requested.connect(self._on_view_protagonist_requested)
         context_panel.view_extract_prompt_requested.connect(
             self._on_view_extract_prompt
         )
@@ -1179,6 +1191,14 @@ class MainWindow(QMainWindow):
                 self._ontology_stream_text, is_ontology=True
             )
             return
+        # 主角形象提取为章节级，切回发起章节恢复流式态
+        if (self._protagonist_extracting
+                and self._extracting_chapter_id == chapter.id
+                and self._protagonist_stream_text):
+            context_panel.restore_extraction_state(
+                self._protagonist_stream_text, is_protagonist=True
+            )
+            return
 
         # 1. 内存缓存优先
         if chapter.id in self._context_entries_by_chapter:
@@ -1219,15 +1239,26 @@ class MainWindow(QMainWindow):
                     if len(self._context_entries_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
                         oldest = next(iter(self._context_entries_by_chapter))
                         del self._context_entries_by_chapter[oldest]
-                    # 从 SQLite 缓存恢复主角形象档案到内存 LRU
-                    cached_protagonist = cached_data.get("protagonist_profile")
-                    if cached_protagonist:
+                    # 从独立缓存 key 恢复主角形象档案（与 ctx_extract 解耦）
+                    try:
+                        cached_protagonist_data = runner.run(
+                            self.context_extractor.load_cached_protagonist(
+                                self._current_project_id, chapter.id
+                            ),
+                            timeout=5,
+                        )
+                    except Exception as e:
+                        logger.warning("加载主角形象缓存失败: %s", e)
+                        cached_protagonist_data = None
+                    if cached_protagonist_data:
                         try:
-                            profile = ProtagonistProfile.model_validate(cached_protagonist)
-                            self._protagonist_profile_by_chapter[chapter.id] = profile
-                            self._protagonist_profile_by_chapter.move_to_end(chapter.id)
-                            if len(self._protagonist_profile_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
-                                self._protagonist_profile_by_chapter.popitem(last=False)
+                            profile_dict = cached_protagonist_data.get("protagonist_profile")
+                            if profile_dict:
+                                profile = ProtagonistProfile.model_validate(profile_dict)
+                                self._protagonist_profile_by_chapter[chapter.id] = profile
+                                self._protagonist_profile_by_chapter.move_to_end(chapter.id)
+                                if len(self._protagonist_profile_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+                                    self._protagonist_profile_by_chapter.popitem(last=False)
                         except Exception as e:
                             logger.warning("从缓存恢复 protagonist_profile 失败: %s", e)
                     self._current_context_entries = entries
@@ -2556,12 +2587,6 @@ class MainWindow(QMainWindow):
                 if len(self._context_entries_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
                     oldest = next(iter(self._context_entries_by_chapter))
                     del self._context_entries_by_chapter[oldest]
-                # 捕获主角形象档案到内存 LRU 缓存（跟随章节，仅反映至当前章节状态）
-                if result.protagonist_profile:
-                    self._protagonist_profile_by_chapter[chapter_id] = result.protagonist_profile
-                    self._protagonist_profile_by_chapter.move_to_end(chapter_id)
-                    if len(self._protagonist_profile_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
-                        self._protagonist_profile_by_chapter.popitem(last=False)
             self._set_status_message(
                 f"上下文提取完成: {len(result.entries)} 条 "
                 f"(耗时 {result.elapsed_seconds:.2f}s)"
@@ -2848,6 +2873,165 @@ class MainWindow(QMainWindow):
         layout.addWidget(btn)
         dialog.exec()
 
+    def _on_extract_protagonist_requested(self) -> None:
+        """提取主角形象（非阻塞，流式进度）。
+
+        用户在上下文预览面板点击"提取主角形象"按钮时触发。
+        全文拆分分析提取 8 维度 ProtagonistProfile，缓存到当前章节（独立缓存 key，
+        不固化到 Project）。
+        """
+        if not self._current_chapter:
+            QMessageBox.warning(self, "提示", "请先选择章节")
+            return
+
+        # 确保章节正文已加载（list_chapters 只加载元数据）
+        self._ensure_chapter_contents()
+
+        endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            self._on_open_settings()
+            return
+
+        if not self._current_chapters:
+            QMessageBox.warning(self, "提示", "无章节可提取主角形象")
+            return
+
+        # 加载项目对象
+        project = None
+        if self._current_project_id:
+            project = self.storage_service.load_project(self._current_project_id)
+        if project is None:
+            QMessageBox.warning(self, "提示", "项目加载失败")
+            return
+
+        # 读取 token_limit 与 lookback 配置（与上下文提取一致）
+        config = self.continuation_panel.context_preview_panel.get_lookback_config()
+        token_limit_override = config.get("token_limit", 0)
+        lookback = config.get("lookback", 0)
+
+        # 禁用按钮防止重复点击 + 启动流式进度展示
+        context_panel = self.continuation_panel.context_preview_panel
+        # 标记主角形象提取进行中（章节级，切回发起章节恢复 UI）
+        self._protagonist_extracting = True
+        self._protagonist_stream_text = ""
+        self._extracting_chapter_id = self._current_chapter.id
+        context_panel.start_protagonist_extraction()
+        self._set_status_message("正在提取主角形象（流式）...")
+
+        # 非阻塞提交：用 run_coroutine_threadsafe + 回调
+        from novelforge.services.async_runner import AsyncLoopRunner
+
+        runner = AsyncLoopRunner.instance()
+        loop = runner._loop
+
+        def on_chunk(text: str) -> None:
+            self._protagonist_chunk_received.emit(text)
+
+        def on_batch_complete(batch_idx: int, total_batches: int) -> None:
+            self._protagonist_batch_done.emit(batch_idx, total_batches)
+
+        future = asyncio.run_coroutine_threadsafe(
+            self.context_extractor.extract_protagonist_streaming(
+                project=project,
+                chapters=self._current_chapters,
+                current_chapter=self._current_chapter,
+                token_limit=token_limit_override,
+                lookback=lookback,
+                on_chunk=on_chunk,
+                on_batch_complete=on_batch_complete,
+            ),
+            loop,
+        )
+
+        def on_done(fut) -> None:
+            try:
+                profile, status = fut.result()
+                self._protagonist_done.emit(profile, status)
+            except Exception as e:
+                logger.error("主角形象提取异常: %s", e, exc_info=True)
+                self._protagonist_done.emit(None, f"failed: {e}")
+
+        future.add_done_callback(on_done)
+
+    @Slot(str)
+    def _on_protagonist_chunk_received(self, text: str) -> None:
+        """主角形象提取 chunk 回调：缓冲，面板处于提取态时更新 UI。
+
+        主角形象为章节级，章节切换后面板 _is_extracting 被重置；切回发起章节时
+        由 _load_context_entries_for_chapter 调 restore_extraction_state 恢复，
+        此处仅当面板仍处于提取态时更新 UI，避免污染新章节视图。
+        """
+        self._protagonist_stream_text += text
+        context_panel = self.continuation_panel.context_preview_panel
+        if context_panel._is_extracting:
+            context_panel.update_protagonist_progress(text)
+
+    @Slot(int, int)
+    def _on_protagonist_batch_done(self, batch_idx: int, total_batches: int) -> None:
+        """主角形象提取批次完成回调（UI 线程执行，由 Signal 触发）。"""
+        context_panel = self.continuation_panel.context_preview_panel
+        context_panel.update_protagonist_batch(batch_idx, total_batches)
+        self._set_status_message(
+            f"主角形象提取进度: 第 {batch_idx}/{total_batches} 批次完成"
+        )
+
+    @Slot(object, str)
+    def _on_protagonist_done(self, profile, status: str) -> None:
+        """主角形象提取完成回调：清理状态标记，更新内存 LRU，面板处于提取态时更新 UI。"""
+        context_panel = self.continuation_panel.context_preview_panel
+        # 面板处于提取态（用户未切走，或切回发起章节已恢复）时更新 UI
+        panel_active = context_panel._is_extracting
+        chapter_id = self._extracting_chapter_id
+
+        if profile is None:
+            if panel_active:
+                context_panel.fail_protagonist_extraction(status)
+            self._set_status_message(f"主角形象提取失败: {status}")
+            QMessageBox.critical(self, "提取失败", f"主角形象提取失败: {status}")
+        else:
+            # 归档到内存 LRU（章节级，不写回 Project）
+            if chapter_id:
+                self._protagonist_profile_by_chapter[chapter_id] = profile
+                self._protagonist_profile_by_chapter.move_to_end(chapter_id)
+                if len(self._protagonist_profile_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+                    self._protagonist_profile_by_chapter.popitem(last=False)
+            if panel_active:
+                context_panel.finish_protagonist_extraction(status)
+            self._set_status_message("主角形象提取完成，已缓存到当前章节")
+
+        # 清理状态标记与缓冲（所有分支均清理）
+        self._protagonist_extracting = False
+        self._protagonist_stream_text = ""
+        self._extracting_chapter_id = None
+
+    def _on_view_protagonist_requested(self) -> None:
+        """查看当前章节已提取的主角形象档案。"""
+        if not self._current_chapter:
+            QMessageBox.information(self, "提示", "请先选择章节")
+            return
+        chapter_id = self._current_chapter.id
+        profile = self._protagonist_profile_by_chapter.get(chapter_id)
+        if profile is None:
+            QMessageBox.information(
+                self, "提示",
+                "当前章节尚未提取主角形象，请先点击「提取主角形象」按钮"
+            )
+            return
+        text = self._format_protagonist_for_display(profile)
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"主角形象档案 - {self._current_chapter.title}")
+        dialog.resize(800, 600)
+        layout = QVBoxLayout(dialog)
+        edit = QPlainTextEdit()
+        edit.setReadOnly(True)
+        edit.setPlainText(text)
+        layout.addWidget(edit)
+        btn = QPushButton("关闭")
+        btn.clicked.connect(dialog.accept)
+        layout.addWidget(btn)
+        dialog.exec()
+
     @staticmethod
     def _format_ontology_for_display(wo) -> str:
         """格式化 WorldOntology 为可读文本（按 7 维度分节）。"""
@@ -2884,6 +3068,37 @@ class MainWindow(QMainWindow):
             lines.append(f"【{label}】({dim})")
             if value:
                 lines.append(_json.dumps(value, ensure_ascii=False, indent=2))
+            else:
+                lines.append("（空）")
+            lines.append("")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_protagonist_for_display(profile) -> str:
+        """格式化 ProtagonistProfile 为可读文本（按 8 维度分节展示）。"""
+        labels = {
+            "basic_anchors": "角色基础锚点",
+            "personality_system": "人格操作系统",
+            "motivation_system": "动力与动机系统",
+            "emotion_defense": "情感与防御机制",
+            "behavior_fingerprint": "行为指纹与身体语言",
+            "relationship_coordinate": "关系坐标系",
+            "growth_arc": "变化轨迹与弧光",
+            "ooc_redlines": "OOC红线与强制约束",
+        }
+        # 兼容 dict 与 ProtagonistProfile 实例
+        if hasattr(profile, "model_dump"):
+            data = profile.model_dump()
+        elif isinstance(profile, dict):
+            data = profile
+        else:
+            return f"（不支持的主角形象数据类型：{type(profile).__name__}）"
+        lines = ["# 主角形象心理学档案（8 维度）", ""]
+        for dim, label in labels.items():
+            value = data.get(dim, {})
+            lines.append(f"【{label}】({dim})")
+            if isinstance(value, dict) and value:
+                lines.append(json.dumps(value, ensure_ascii=False, indent=2))
             else:
                 lines.append("（空）")
             lines.append("")

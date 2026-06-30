@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-06-30：主角形象提取独立按钮
+
+### 背景
+
+将主角形象提取从"上下文提取副产品"模式解耦为独立流程，提供独立的"提取/查看"按钮，方便用户按需操作，与"提取世界观底层/查看世界观底层"按钮对称。原模式中主角形象作为上下文提取的副产品自动产出，与 8 维度条目共享缓存 key `ctx_extract:`，存在耦合难以独立触发与查看。
+
+### 核心改动
+
+- **`novelforge/services/context_extractor.py`**：新增独立缓存 key 前缀 `PROTAGONIST_CACHE_KEY_PREFIX = "protagonist"`（与 `ctx_extract:` 解耦避免互相覆盖）；新增公共方法 `extract_protagonist_streaming`（流式 + 多批次合并 + 批次级 2 次重试，镜像 `OntologyExtractor.extract_ontology_streaming` 模式）与 `load_cached_protagonist`（章节级独立加载）；`_extract_common` 不再调用 `_extract_protagonist`（完全解耦，ExtractResult.protagonist_profile 恒为 None）；新增辅助方法 `_build_protagonist_cache_key`/`_get_cached_protagonist`/`_save_cached_protagonist`
+- **`novelforge/ui/context_preview_panel.py`**：新增"提取主角形象"按钮（`#primaryBtn`）+ `extract_protagonist_requested` 信号 + "查看主角形象"按钮（`#secondaryBtn`）+ `view_protagonist_requested` 信号；新增 5 个流式方法 `start_protagonist_extraction`/`update_protagonist_progress`/`update_protagonist_batch`/`finish_protagonist_extraction`/`fail_protagonist_extraction` 复用 `_stream_view`；`restore_extraction_state` 新增 `is_protagonist` 参数（与 `is_ontology` 互斥，同时为 True 时以 `is_protagonist` 为准）
+- **`novelforge/ui/main_window.py`**（4 处改动）：①新增 6 个 protagonist 信号处理方法（`_on_extract_protagonist_requested`/`_on_protagonist_chunk_received`/`_on_protagonist_batch_done`/`_on_protagonist_done`/`_on_view_protagonist_requested`/`_format_protagonist_for_display`），镜像 ontology 模式但 `_on_protagonist_done` **不调 save_project**（章节级 LRU only 不持久化 Project），`_on_view_protagonist_requested` 从 `_protagonist_profile_by_chapter` 加载而非 `project.world_ontology`；②章节切换新增主角恢复分支（`_protagonist_stream_text` 缓冲 + `restore_extraction_state(is_protagonist=True)`）；③`_load_context_entries_for_chapter` 新增独立 protagonist 缓存恢复分支（调 `load_cached_protagonist` 用 `cached_protagonist_data.get("protagonist_profile")` key 还原）；④`_on_extract_done` 删除原 `result.protagonist_profile` 捕获代码（解耦后恒为 None）
+
+### 测试
+
+- `tests/test_protagonist_extraction.py`：+3 测试类 12 用例
+  - `TestExtractProtagonistStreaming`（5 用例）：单批次返回/多批次合并/提取+load_cached roundtrip/on_chunk 回调/2 次重试失败返回 None
+  - `TestExtractCommonNoProtagonist`（2 用例）：extract 结果 protagonist_profile 为 None/缓存不写入 protagonist 独立 key
+  - `TestContextPanelProtagonistButtons`（5 用例）：按钮存在/extract 信号发射/view 信号发射/start 禁用按钮/finish 恢复按钮
+- `python -m pytest tests/test_protagonist_extraction.py tests/test_volume_ui.py -q`：52 passed，无回归
+
+### 文档同步
+
+- `agent.md`：§3 services/context_extractor.py 描述更新（独立缓存 key + 公共方法 + 解耦）；§3 关键设计决策第 3 项"主角形象一致性提取"段落补充独立链路解耦说明；§5 context_preview_panel.py 描述新增 protagonist 按钮/信号/流式方法/restore_extraction_state 三参数；§5 main_window.py 描述新增 6 个 protagonist 处理方法 + 章节切换恢复 + 独立缓存加载 + 删除旧捕获代码
+
 ## 2026-06-30：批次提取失败自动重试
 
 ### 背景

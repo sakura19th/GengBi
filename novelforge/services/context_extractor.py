@@ -78,6 +78,9 @@ CACHE_CATEGORY = "context_extract"
 # 缓存 key 前缀
 CACHE_KEY_PREFIX = "ctx_extract"
 
+# 主角形象独立缓存 key 前缀（与 8 维度条目缓存解耦，避免互相覆盖）
+PROTAGONIST_CACHE_KEY_PREFIX = "protagonist"
+
 # ===== 主角形象提取常量（镜像 OntologyExtractor 模式）=====
 
 # 主角形象提取请求的 max_tokens（足够返回 8 维度 JSON）
@@ -1597,6 +1600,90 @@ class ContextExtractor:
         except Exception as e:
             logger.warning("保存缓存失败: %s", e)
 
+    # ===== 主角形象独立缓存（与 8 维度条目缓存解耦）=====
+
+    def _build_protagonist_cache_key(
+        self, project_id: str, chapter_id: str
+    ) -> str:
+        """构建主角形象独立缓存 key。
+
+        格式：``protagonist:{project_id}:{chapter_id}``
+
+        与 8 维度条目缓存（``ctx_extract:`` 前缀）解耦，避免两条提取链路互相覆盖。
+        """
+        return f"{PROTAGONIST_CACHE_KEY_PREFIX}:{project_id}:{chapter_id}"
+
+    async def _get_cached_protagonist(
+        self, cache_key: str, chapters_hash: str
+    ) -> ProtagonistProfile | None:
+        """从独立缓存读取主角形象，并校验 chapters_hash 是否匹配。
+
+        Args:
+            cache_key: 缓存 key（``protagonist:{project_id}:{chapter_id}``）
+            current_chapters_hash: 当前目标章节的内容哈希
+
+        Returns:
+            ProtagonistProfile 实例（hash 匹配时），不匹配或未命中返回 None
+        """
+        data = await self._get_cached_data(cache_key)
+        if data is None:
+            return None
+        cached_hash = data.get("chapters_hash", "")
+        if cached_hash != chapters_hash:
+            logger.info(
+                "主角形象缓存 chapters_hash 不匹配（%s != %s），需重新提取",
+                cached_hash[:8],
+                chapters_hash[:8],
+            )
+            return None
+        profile_data = data.get("protagonist_profile")
+        if not profile_data:
+            return None
+        try:
+            return ProtagonistProfile.model_validate(profile_data)
+        except Exception as e:
+            logger.warning("缓存 protagonist_profile 反序列化失败: %s", e)
+            return None
+
+    async def _save_cached_protagonist(
+        self,
+        cache_key: str,
+        profile: ProtagonistProfile,
+        chapters_hash: str,
+        ttl_hours: int,
+        batch_count: int = 1,
+        merged: bool = False,
+    ) -> None:
+        """保存主角形象到独立缓存（按章节绑定，含元数据）。
+
+        Args:
+            cache_key: 缓存 key（``protagonist:{project_id}:{chapter_id}``）
+            profile: ProtagonistProfile 实例
+            chapters_hash: 来源章节内容哈希（用于失效判断）
+            ttl_hours: 缓存有效期（小时）
+            batch_count: 拆分批次数
+            merged: 是否经过【信息汇总】环节
+        """
+        try:
+            data = {
+                "protagonist_profile": profile.model_dump(mode="json"),
+                "chapters_hash": chapters_hash,
+                "extracted_at": datetime.now().isoformat(),
+                "batch_count": batch_count,
+                "merged": merged,
+            }
+            await self.storage_service.storage.set_cache(
+                cache_key, data, ttl_hours=ttl_hours, category=CACHE_CATEGORY
+            )
+            logger.info(
+                "已保存主角形象缓存: %s (批次=%d, merged=%s)",
+                cache_key,
+                batch_count,
+                merged,
+            )
+        except Exception as e:
+            logger.warning("保存主角形象缓存失败: %s", e)
+
     def _get_llm_client(self) -> tuple[LLMClient, str] | None:
         """获取 LLM 客户端与默认模型。
 
@@ -1744,17 +1831,9 @@ class ContextExtractor:
         if cache_enabled and not force_refresh:
             cached = await self._get_cached_entries(cache_key, chapters_hash)
             if cached is not None:
-                # 从缓存 dict 提取 entries 与 protagonist_profile
+                # 从缓存 dict 提取 entries（protagonist 已移至独立缓存 key，
+                # 不再从 ctx_extract 缓存恢复，避免上下文提取与主角提取互相耦合）
                 cached_entries = cached.get("entries", [])
-                cached_protagonist_data = cached.get("protagonist_profile")
-                cached_protagonist: ProtagonistProfile | None = None
-                if cached_protagonist_data:
-                    try:
-                        cached_protagonist = ProtagonistProfile.model_validate(
-                            cached_protagonist_data
-                        )
-                    except Exception as e:
-                        logger.warning("缓存 protagonist_profile 反序列化失败: %s", e)
                 return ExtractResult(
                     entries=cached_entries,
                     status="completed",
@@ -1762,11 +1841,9 @@ class ContextExtractor:
                     from_cache=True,
                     batch_count=cached.get("batch_count", 1),
                     merged=cached.get("merged", False),
-                    protagonist_profile=cached_protagonist,
-                    protagonist_batch_count=cached.get(
-                        "protagonist_batch_count", 1
-                    ),
-                    protagonist_merged=cached.get("protagonist_merged", False),
+                    protagonist_profile=None,
+                    protagonist_batch_count=1,
+                    protagonist_merged=False,
                 )
 
         # 获取 LLM 客户端
@@ -2076,32 +2153,10 @@ class ContextExtractor:
             time.time() - start_time,
         )
 
-        # === 主角形象提取（与 8 维度共用批次划分，三大机制完整支持）===
-        # 复用已计算的 batches（不重复拆分），顺序执行独立提示词，
-        # 失败不阻塞 8 维度结果
-        protagonist_profile: ProtagonistProfile | None = None
-        protagonist_batch_count = 1
-        protagonist_merged = False
-        try:
-            protagonist_profile, protagonist_batch_count, protagonist_merged = (
-                await self._extract_protagonist(
-                    project=project,
-                    batches=batches,
-                    config=config,
-                    client=client,
-                    model=model,
-                    stream=stream,
-                    on_chunk=on_chunk,
-                    on_batch_complete=on_batch_complete,
-                )
-            )
-        except Exception as e:
-            logger.error(
-                "%s主角形象提取失败（不阻塞 8 维度结果）: %s",
-                log_prefix, e, exc_info=True,
-            )
+        # 主角形象提取已从上下文提取流程中移除（独立按钮触发，
+        # 见 extract_protagonist_streaming 公开方法），此处不再作为副产品产出。
 
-        # 保存缓存
+        # 保存缓存（protagonist 字段保留签名但不再填充有效数据）
         if cache_enabled and final_entries:
             await self._save_cached_entries(
                 cache_key,
@@ -2113,9 +2168,9 @@ class ContextExtractor:
                 lookback=lookback,
                 batch_count=batch_count,
                 merged=merged,
-                protagonist_profile=protagonist_profile,
-                protagonist_batch_count=protagonist_batch_count,
-                protagonist_merged=protagonist_merged,
+                protagonist_profile=None,
+                protagonist_batch_count=1,
+                protagonist_merged=False,
             )
 
         return ExtractResult(
@@ -2125,9 +2180,9 @@ class ContextExtractor:
             token_usage=total_token_usage,
             batch_count=batch_count,
             merged=merged,
-            protagonist_profile=protagonist_profile,
-            protagonist_batch_count=protagonist_batch_count,
-            protagonist_merged=protagonist_merged,
+            protagonist_profile=None,
+            protagonist_batch_count=1,
+            protagonist_merged=False,
         )
 
     async def extract(
@@ -2205,6 +2260,155 @@ class ContextExtractor:
             on_batch_complete=on_batch_complete,
         )
 
+    async def extract_protagonist_streaming(
+        self,
+        project: Project,
+        chapters: list[Chapter],
+        current_chapter: Chapter,
+        token_limit: int = 0,
+        lookback: int = 0,
+        on_chunk: Callable[[str], None] | None = None,
+        on_batch_complete: Callable[[int, int], None] | None = None,
+    ) -> tuple[ProtagonistProfile | None, str]:
+        """独立流式提取主角形象（镜像 OntologyExtractor.extract_ontology_streaming）。
+
+        与上下文提取（extract_streaming）解耦，单独触发主角形象 8 维度心理学档案提取，
+        结果保存到独立缓存 key（``protagonist:{project_id}:{chapter_id}``）。
+
+        流程：
+        1. 获取 endpoint/config/client/model
+        2. 计算 lookback chapters（复用 _get_lookback_chapters）
+        3. 调用 _split_chapters_by_token_limit 拆分 batches（token_limit=0 不拆分）
+        4. 调用 _extract_protagonist 复用现有完整逻辑（增量更新 + 合并 + 批次重试）
+        5. 保存到独立缓存 key
+        6. 返回 (ProtagonistProfile | None, 状态消息)
+
+        Args:
+            project: 项目对象
+            chapters: 项目所有章节
+            current_chapter: 当前续写章节
+            token_limit: token 限制（0=不拆分，>0 按章节边界拆分多批次）
+            lookback: 回溯章节数（0=全部前文）
+            on_chunk: 流式 chunk 回调（接收增量文本）
+            on_batch_complete: 批次完成回调（batch_idx, total_batches）
+
+        Returns:
+            (ProtagonistProfile | None, str) 元组：
+            - 成功：(ProtagonistProfile, 状态消息)
+            - 失败：(None, 错误消息)
+            - 取消：(None, "用户取消提取")
+        """
+        start_time = time.time()
+        config = self._get_extract_config(project)
+        extractor_model = config.get("extractor_model", "") or ""
+        cache_ttl_hours = int(
+            config.get("cache_ttl_hours", DEFAULT_CACHE_TTL_HOURS)
+        )
+        cache_enabled = bool(config.get("cache_enabled", True))
+
+        # 取消信号处理（与 _extract_common 一致）
+        cancelled_before_start = self._cancel_event.is_set()
+        self._cancel_event.clear()
+        if cancelled_before_start:
+            logger.info("主角形象提取在开始前已被取消")
+            return None, "用户取消提取"
+
+        # 0 章时跳过
+        if not chapters:
+            logger.info("无前文可提取主角形象，跳过")
+            return None, "无前文可提取"
+
+        # 获取前 N 章
+        target_chapters = self._get_lookback_chapters(
+            chapters, current_chapter, lookback
+        )
+        if not target_chapters:
+            return None, "无前文可提取"
+
+        # 获取 LLM 客户端
+        client_info = self._get_llm_client()
+        if client_info is None:
+            return None, "未配置 API 端点或 API Key 无效"
+        client, default_model = client_info
+        if extractor_model:
+            model = extractor_model
+        else:
+            model = default_model or DEFAULT_EXTRACTOR_MODEL
+
+        # 按 token 限制拆分批次
+        batches = self._split_chapters_by_token_limit(
+            target_chapters, token_limit, model
+        )
+        batch_count = len(batches)
+        logger.info(
+            "主角形象提取: %d 章拆分为 %d 批 (token_limit=%d)",
+            len(target_chapters),
+            batch_count,
+            token_limit,
+        )
+
+        # 适配 on_batch_complete 回调签名：
+        # _extract_protagonist 期望 (entries, batch_idx, total)，
+        # 公开方法对外暴露 (batch_idx, total) 与 ontology 一致
+        adapted_batch_cb: Callable[[list, int, int], None] | None = None
+        if on_batch_complete is not None:
+            def _adapt_batch(_entries, b_idx, b_total):
+                on_batch_complete(b_idx, b_total)
+            adapted_batch_cb = _adapt_batch
+
+        # 调用 _extract_protagonist 复用完整逻辑
+        try:
+            protagonist_profile, protagonist_batch_count, protagonist_merged = (
+                await self._extract_protagonist(
+                    project=project,
+                    batches=batches,
+                    config=config,
+                    client=client,
+                    model=model,
+                    stream=True,
+                    on_chunk=on_chunk,
+                    on_batch_complete=adapted_batch_cb,
+                )
+            )
+        except asyncio.CancelledError:
+            logger.info("主角形象提取被取消")
+            return None, "用户取消提取"
+        except Exception as e:
+            logger.error("主角形象提取异常: %s", e, exc_info=True)
+            return None, f"提取失败: {e}"
+
+        # 取消信号检查（提取过程中被取消）
+        if self._cancel_event.is_set():
+            return None, "用户取消提取"
+
+        if protagonist_profile is None:
+            return None, "主角形象提取失败（详见日志）"
+
+        # 保存到独立缓存
+        if cache_enabled:
+            project_id = project.id if project else "unknown"
+            chapter_id = current_chapter.id if current_chapter else "global"
+            chapters_hash = _compute_chapters_hash(target_chapters)
+            protagonist_cache_key = self._build_protagonist_cache_key(
+                project_id, chapter_id
+            )
+            await self._save_cached_protagonist(
+                protagonist_cache_key,
+                protagonist_profile,
+                chapters_hash,
+                cache_ttl_hours,
+                batch_count=protagonist_batch_count,
+                merged=protagonist_merged,
+            )
+
+        elapsed = time.time() - start_time
+        status_msg = (
+            f"主角形象提取完成（{protagonist_batch_count} 批，"
+            f"merged={protagonist_merged}，耗时 {elapsed:.2f}s）"
+        )
+        logger.info(status_msg)
+        return protagonist_profile, status_msg
+
     def build_prompt_for_preview(
         self,
         project: Project | None,
@@ -2256,6 +2460,21 @@ class ContextExtractor:
             缓存 dict（含 entries/elapsed_seconds/token_usage 等），未命中返回 None
         """
         cache_key = self._build_cache_key(project_id, chapter_id)
+        return await self._get_cached_data(cache_key)
+
+    async def load_cached_protagonist(
+        self, project_id: str, chapter_id: str
+    ) -> dict[str, Any] | None:
+        """加载章节的主角形象缓存（供章节切换时恢复，不校验 hash）。
+
+        Args:
+            project_id: 项目 ID
+            chapter_id: 章节 ID
+
+        Returns:
+            缓存 dict（含 protagonist_profile/batch_count/merged 等），未命中返回 None
+        """
+        cache_key = self._build_protagonist_cache_key(project_id, chapter_id)
         return await self._get_cached_data(cache_key)
 
     async def cancel(self) -> None:
