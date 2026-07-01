@@ -345,7 +345,11 @@ class VolumeOrchestrator(QThread):
         self._resume_event.clear()
 
         if self._client is None:
-            self._client = LLMClient(self.base_url, self.api_key)
+            self._client = LLMClient(
+                self.base_url,
+                self.api_key,
+                reasoning_effort=self.parameters.get("reasoning_effort", ""),
+            )
 
         artifacts = VolumeArtifacts()
 

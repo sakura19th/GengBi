@@ -85,25 +85,38 @@ class CustomAuditRuleService:
 
     # ===== LLM 客户端 =====
 
-    def _get_llm_client(self) -> tuple[LLMClient, str] | None:
-        """获取 LLM 客户端与默认模型。"""
-        default_ep = self.config_manager.get_default_endpoint()
-        if not default_ep:
-            logger.error("未配置默认 API 端点，无法结构化自定义设定")
+    def _get_llm_client(self, flow_key: str = "") -> tuple[LLMClient, str] | None:
+        """获取 LLM 客户端与默认模型。
+
+        Args:
+            flow_key: 流程键（如 "custom_rule_parsing"），空串用默认端点
+        """
+        if flow_key:
+            ep = self.config_manager.get_flow_endpoint(flow_key)
+        else:
+            ep = self.config_manager.get_default_endpoint()
+        if not ep:
+            logger.error("未配置 API 端点，无法结构化自定义设定")
             return None
 
-        api_key = self.config_manager.decrypt_api_key(default_ep.get("id", ""))
+        api_key = self.config_manager.decrypt_api_key(ep.get("id", ""))
         if not api_key:
             logger.error("API Key 无效，无法结构化自定义设定")
             return None
 
-        base_url = default_ep.get("base_url", "")
+        base_url = ep.get("base_url", "")
         if not base_url:
             logger.error("API base_url 为空，无法结构化自定义设定")
             return None
 
-        client = LLMClient(base_url=base_url, api_key=api_key, timeout=120)
-        model = default_ep.get("default_model", "")
+        reasoning_effort = ep.get("reasoning_effort", "") or ""
+        client = LLMClient(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=120,
+            reasoning_effort=reasoning_effort,
+        )
+        model = ep.get("default_model", "")
         return (client, model)
 
     # ===== 占位符格式化 =====
@@ -206,7 +219,7 @@ class CustomAuditRuleService:
         if not raw_input or not raw_input.strip():
             return None, "输入为空"
 
-        client_info = self._get_llm_client()
+        client_info = self._get_llm_client("custom_rule_parsing")
         if client_info is None:
             return None, "未配置 API 端点或 API Key 无效"
         client, model = client_info

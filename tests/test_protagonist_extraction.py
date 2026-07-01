@@ -715,7 +715,7 @@ class TestExtractProtagonistStreaming:
             {"basic_anchors": {"name": "主角"}}, ensure_ascii=False
         )
         client.add_stream_response(profile_json)
-        extractor._get_llm_client = lambda: (client, "gpt-4o-mini")  # type: ignore[assignment]
+        extractor._get_llm_client = lambda flow_key="": (client, "gpt-4o-mini")  # type: ignore[assignment]
 
         project, chapters = _make_protagonist_project()
         current_chapter = chapters[0]
@@ -761,7 +761,7 @@ class TestExtractProtagonistStreaming:
                 {"basic_anchors": {"name": "合并后主角"}}, ensure_ascii=False
             )
         )
-        extractor._get_llm_client = lambda: (client, "gpt-4o-mini")  # type: ignore[assignment]
+        extractor._get_llm_client = lambda flow_key="": (client, "gpt-4o-mini")  # type: ignore[assignment]
 
         profile = NovelProfile(
             title="测试",
@@ -810,7 +810,7 @@ class TestExtractProtagonistStreaming:
             ensure_ascii=False,
         )
         client.add_stream_response(profile_json)
-        extractor._get_llm_client = lambda: (client, "gpt-4o-mini")  # type: ignore[assignment]
+        extractor._get_llm_client = lambda flow_key="": (client, "gpt-4o-mini")  # type: ignore[assignment]
 
         project, chapters = _make_protagonist_project()
         current_chapter = chapters[0]
@@ -848,7 +848,7 @@ class TestExtractProtagonistStreaming:
             {"basic_anchors": {"name": "回调主角"}}, ensure_ascii=False
         )
         client.add_stream_response(profile_json)
-        extractor._get_llm_client = lambda: (client, "gpt-4o-mini")  # type: ignore[assignment]
+        extractor._get_llm_client = lambda flow_key="": (client, "gpt-4o-mini")  # type: ignore[assignment]
 
         project, chapters = _make_protagonist_project()
         current_chapter = chapters[0]
@@ -888,7 +888,7 @@ class TestExtractProtagonistStreaming:
         # 2 次失败（首次 + 重试 = 2 次）
         client.add_stream_error(LLMError("首次失败"))
         client.add_stream_error(LLMError("重试也失败"))
-        extractor._get_llm_client = lambda: (client, "gpt-4o-mini")  # type: ignore[assignment]
+        extractor._get_llm_client = lambda flow_key="": (client, "gpt-4o-mini")  # type: ignore[assignment]
 
         project, chapters = _make_protagonist_project()
         current_chapter = chapters[0]
@@ -927,7 +927,7 @@ class TestExtractCommonNoProtagonist:
                 "usage": {},
             }
         )
-        extractor._get_llm_client = lambda: (mock_client, "gpt-4o-mini")  # type: ignore[assignment]
+        extractor._get_llm_client = lambda flow_key="": (mock_client, "gpt-4o-mini")  # type: ignore[assignment]
 
         profile = NovelProfile(
             title="测试",
@@ -990,7 +990,7 @@ class TestExtractCommonNoProtagonist:
                 "usage": {},
             }
         )
-        extractor._get_llm_client = lambda: (mock_client, "gpt-4o-mini")  # type: ignore[assignment]
+        extractor._get_llm_client = lambda flow_key="": (mock_client, "gpt-4o-mini")  # type: ignore[assignment]
 
         profile = NovelProfile(
             title="测试",

@@ -67,6 +67,7 @@ class AuditWorker(QThread):
         messages: list[dict[str, Any]],
         temperature: float = 0.2,
         max_tokens: int = 3000,
+        reasoning_effort: str = "",
         parent=None,
     ) -> None:
         """初始化审计工作线程。
@@ -78,6 +79,7 @@ class AuditWorker(QThread):
             messages: 已组装好的审计提示词 messages
             temperature: 温度（审计报告用低温稳定输出，默认 0.2）
             max_tokens: 最大 token 数（默认 3000）
+            reasoning_effort: 思考强度（OpenAI o 系列/DeepSeek V4 等，空串不发送）
             parent: 父 QObject
         """
         super().__init__(parent)
@@ -87,6 +89,7 @@ class AuditWorker(QThread):
         self.messages = messages
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort or ""
 
         # 线程安全停止标志
         self._stop_event = threading.Event()
@@ -148,7 +151,11 @@ class AuditWorker(QThread):
 
         check_stop()
 
-        client = LLMClient(self.base_url, self.api_key)
+        client = LLMClient(
+            self.base_url,
+            self.api_key,
+            reasoning_effort=self.reasoning_effort,
+        )
 
         content_parts: list[str] = []
         char_count = 0

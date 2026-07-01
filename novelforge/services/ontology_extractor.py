@@ -384,31 +384,44 @@ class OntologyExtractor:
 
     # ===== LLM 客户端 =====
 
-    def _get_llm_client(self) -> tuple[LLMClient, str] | None:
+    def _get_llm_client(self, flow_key: str = "") -> tuple[LLMClient, str] | None:
         """获取 LLM 客户端与默认模型。
 
-        从配置中读取默认端点，解密 API Key，创建 LLMClient。
+        从配置中读取流程端点（flow_key 非空时）或默认端点，解密 API Key，创建 LLMClient。
+        端点的 reasoning_effort 一并传入 LLMClient。
+
+        Args:
+            flow_key: 流程键（如 "ontology_extraction"），空串用默认端点
 
         Returns:
             (LLMClient, model) 元组，配置缺失返回 None
         """
-        default_ep = self.config_manager.get_default_endpoint()
-        if not default_ep:
-            logger.error("未配置默认 API 端点，无法提取底层世界观")
+        if flow_key:
+            ep = self.config_manager.get_flow_endpoint(flow_key)
+        else:
+            ep = self.config_manager.get_default_endpoint()
+        if not ep:
+            logger.error("未配置 API 端点，无法提取底层世界观")
             return None
 
-        api_key = self.config_manager.decrypt_api_key(default_ep.get("id", ""))
+        api_key = self.config_manager.decrypt_api_key(ep.get("id", ""))
         if not api_key:
             logger.error("API Key 无效，无法提取底层世界观")
             return None
 
-        base_url = default_ep.get("base_url", "")
+        base_url = ep.get("base_url", "")
         if not base_url:
             logger.error("API base_url 为空，无法提取底层世界观")
             return None
 
-        client = LLMClient(base_url=base_url, api_key=api_key, timeout=300)
-        model = default_ep.get("default_model", "")
+        reasoning_effort = ep.get("reasoning_effort", "") or ""
+        client = LLMClient(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=300,
+            reasoning_effort=reasoning_effort,
+        )
+        model = ep.get("default_model", "")
         return (client, model)
 
     # ===== 字段级合并（增量更新核心） =====
@@ -742,7 +755,7 @@ class OntologyExtractor:
             return None, "无章节可提取"
 
         # 获取 LLM 客户端
-        client_info = self._get_llm_client()
+        client_info = self._get_llm_client("ontology_extraction")
         if client_info is None:
             return None, "未配置 API 端点或 API Key 无效"
         client, model = client_info

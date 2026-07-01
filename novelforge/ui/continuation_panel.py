@@ -467,6 +467,18 @@ class ContinuationPanel(QWidget):
             return self._endpoint_combo.itemData(idx)
         return None
 
+    def select_endpoint_by_id(self, endpoint_id: str) -> None:
+        """按 endpoint_id 选中端点下拉项，未找到则保持当前选中。
+
+        Args:
+            endpoint_id: 目标端点 ID
+        """
+        for i in range(self._endpoint_combo.count()):
+            data = self._endpoint_combo.itemData(i)
+            if data and data.get("id") == endpoint_id:
+                self._endpoint_combo.setCurrentIndex(i)
+                return
+
     def get_parameters(self) -> dict[str, Any]:
         """获取续写参数。"""
         return {

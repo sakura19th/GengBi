@@ -48,7 +48,7 @@ from novelforge.core.regex_engine import RegexEngine
 from novelforge.core.template_engine import TemplateEngine
 from novelforge.core.token_counter import TokenCounter
 from novelforge.core.variable_store import VariableStore
-from novelforge.models import Chapter, Continuation, ProtagonistProfile, VolumeRunConfig
+from novelforge.models import Chapter, Continuation, ProtagonistProfile, VolumeRunConfig, WritingPreset
 from novelforge.services.chapter_service import ChapterOperation, ChapterService
 from novelforge.services.context_extractor import ContextExtractor, ExtractResult
 from novelforge.services.continuation_worker import (
@@ -88,6 +88,7 @@ from novelforge.ui.worldbook_manager import WorldBookManager
 from novelforge.ui.audit_dialog import AuditDialog
 from novelforge.services.custom_audit_rule_service import CustomAuditRuleService
 from novelforge.ui.custom_rule_dialog import CustomRuleInputDialog, CustomRulesViewDialog
+from novelforge.ui.flow_endpoint_dialog import FlowEndpointDialog
 from novelforge.utils.paths import get_agent_prompt_path, get_theme_path, load_text_resource
 
 logger = logging.getLogger(__name__)
@@ -642,6 +643,10 @@ class MainWindow(QMainWindow):
 
         tools_menu.addSeparator()
 
+        flow_endpoint_action = QAction("流程端点配置(&E)...", self)
+        flow_endpoint_action.triggered.connect(self._on_open_flow_endpoint_dialog)
+        tools_menu.addAction(flow_endpoint_action)
+
         settings_action = QAction("设置(&S)...", self)
         settings_action.setShortcut(QKeySequence("Ctrl+,"))
         settings_action.triggered.connect(self._on_open_settings)
@@ -901,6 +906,30 @@ class MainWindow(QMainWindow):
         default_id = self.config_manager.get("default_endpoint_id", "")
         self.continuation_panel.set_endpoints(endpoints, default_id)
         # 模型由 _on_endpoint_changed 自动设置，无需手动调用 set_models
+        # 同步面板端点到当前模式的流程配置（流程指定即生效，面板仍可手动覆盖）
+        mode = self.continuation_panel.get_mode()
+        flow_key = "volume_continuation" if mode == "volume" else "single_continuation"
+        flow_ep = self.config_manager.get_flow_endpoint(flow_key)
+        if flow_ep:
+            self.continuation_panel.select_endpoint_by_id(flow_ep.get("id", ""))
+
+    def _resolve_reasoning_effort(
+        self, endpoint: dict, preset: WritingPreset | None = None
+    ) -> str:
+        """解析思考强度：预设级优先（更具体），其次端点级，均空则不发送。
+
+        Args:
+            endpoint: API 端点配置 dict
+            preset: 写作预设（可选），其 generation_params.reasoning_effort 优先
+
+        Returns:
+            reasoning_effort 字符串，空串表示不发送
+        """
+        if preset:
+            re = preset.generation_params.get("reasoning_effort", "")
+            if re and re.lower() not in {"none", "off"}:
+                return re
+        return endpoint.get("reasoning_effort", "") or ""
 
     def _refresh_presets(self) -> None:
         """刷新预设列表到续写面板（仅显示启用的预设）。"""
@@ -1667,6 +1696,9 @@ class MainWindow(QMainWindow):
         # 初始化按章节缓冲的流式输出（切回时恢复 UI）
         self._continuation_stream_text_by_chapter[self._continuation_chapter_id] = ""
 
+        # 注入思考强度（预设级优先，其次端点级）
+        params["reasoning_effort"] = self._resolve_reasoning_effort(endpoint, preset)
+
         # 创建并启动 worker（M4: 注入 extracted_context_snapshot）
         self._continuation_worker = ContinuationWorker(
             base_url=endpoint["base_url"],
@@ -1872,6 +1904,9 @@ class MainWindow(QMainWindow):
             except (RuntimeError, TypeError):
                 pass  # 信号可能已断开或对象已删除
             old_orchestrator.deleteLater()
+
+        # 注入思考强度（预设级优先，其次端点级）
+        params["reasoning_effort"] = self._resolve_reasoning_effort(endpoint, preset)
 
         # 创建 VolumeOrchestrator（不传 messages，传 preset/chapters/context_entries 等原始数据）
         self._volume_orchestrator = VolumeOrchestrator(
@@ -3644,8 +3679,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先生成续写后再审计")
             return
 
-        # 获取 endpoint/api_key/model
-        endpoint = self.continuation_panel.get_selected_endpoint()
+        # 获取 endpoint/api_key/model（流程配置优先，回退面板下拉）
+        endpoint = self.config_manager.get_flow_endpoint("single_audit")
+        if not endpoint:
+            endpoint = self.continuation_panel.get_selected_endpoint()
         if not endpoint:
             QMessageBox.warning(self, "提示", "请先配置 API 端点")
             self._on_open_settings()
@@ -3715,6 +3752,9 @@ class MainWindow(QMainWindow):
             old_audit_worker.deleteLater()
         self._audit_worker = None
 
+        # 解析思考强度（审计无预设，仅端点级）
+        reasoning_effort = self._resolve_reasoning_effort(endpoint)
+
         # 创建审计 worker
         self._audit_worker = AuditWorker(
             base_url=endpoint["base_url"],
@@ -3723,6 +3763,7 @@ class MainWindow(QMainWindow):
             messages=messages,
             temperature=0.2,
             max_tokens=3000,
+            reasoning_effort=reasoning_effort,
             parent=self,
         )
 
@@ -3921,6 +3962,9 @@ class MainWindow(QMainWindow):
         # 加载审计发起章节以取 metadata（避免用错章节元数据）
         origin_chapter = self.storage_service.load_chapter(audit_cid)
         chapter_metadata = dict(origin_chapter.metadata) if origin_chapter else {}
+
+        # 注入思考强度（重写是续写任务，用续写端点+预设）
+        params["reasoning_effort"] = self._resolve_reasoning_effort(endpoint, preset)
 
         # 创建修正 worker（created_by 标记为 audit_rewrite）
         self._continuation_worker = ContinuationWorker(
@@ -4321,6 +4365,12 @@ class MainWindow(QMainWindow):
             logger.info("变量已变更，缓存已失效")
         except Exception as e:
             logger.error("刷新变量缓存失败: %s", e, exc_info=True)
+
+    def _on_open_flow_endpoint_dialog(self) -> None:
+        """打开流程端点配置对话框，关闭后同步续写面板端点选择。"""
+        dialog = FlowEndpointDialog(self.config_manager, self)
+        dialog.exec()
+        self._refresh_endpoints()
 
     def _on_open_settings(self) -> None:
         """打开设置对话框。"""

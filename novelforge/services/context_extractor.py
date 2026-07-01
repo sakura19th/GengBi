@@ -1684,31 +1684,46 @@ class ContextExtractor:
         except Exception as e:
             logger.warning("保存主角形象缓存失败: %s", e)
 
-    def _get_llm_client(self) -> tuple[LLMClient, str] | None:
+    def _get_llm_client(self, flow_key: str = "") -> tuple[LLMClient, str] | None:
         """获取 LLM 客户端与默认模型。
 
-        从配置中读取默认端点，解密 API Key，创建 LLMClient。
+        优先使用流程端点配置（``flow_endpoints[flow_key]``），未配置或端点被删
+        则回退默认端点。解密 API Key，创建 LLMClient（含思考强度）。
+
+        Args:
+            flow_key: 流程标识（如 ``context_extraction``/``protagonist_extraction``），
+                空串表示用默认端点
 
         Returns:
             (LLMClient, model) 元组，配置缺失返回 None
         """
-        default_ep = self.config_manager.get_default_endpoint()
-        if not default_ep:
-            logger.error("未配置默认 API 端点，无法提取上下文")
+        ep = (
+            self.config_manager.get_flow_endpoint(flow_key)
+            if flow_key
+            else self.config_manager.get_default_endpoint()
+        )
+        if not ep:
+            logger.error("未配置 API 端点，无法提取上下文")
             return None
 
-        api_key = self.config_manager.decrypt_api_key(default_ep.get("id", ""))
+        api_key = self.config_manager.decrypt_api_key(ep.get("id", ""))
         if not api_key:
             logger.error("API Key 无效，无法提取上下文")
             return None
 
-        base_url = default_ep.get("base_url", "")
+        base_url = ep.get("base_url", "")
         if not base_url:
             logger.error("API base_url 为空，无法提取上下文")
             return None
 
-        client = LLMClient(base_url=base_url, api_key=api_key, timeout=300)
-        model = default_ep.get("default_model", "") or DEFAULT_EXTRACTOR_MODEL
+        reasoning_effort = ep.get("reasoning_effort", "") or ""
+        client = LLMClient(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=300,
+            reasoning_effort=reasoning_effort,
+        )
+        model = ep.get("default_model", "") or DEFAULT_EXTRACTOR_MODEL
         return client, model
 
     async def _extract_common(
@@ -1847,7 +1862,7 @@ class ContextExtractor:
                 )
 
         # 获取 LLM 客户端
-        client_info = self._get_llm_client()
+        client_info = self._get_llm_client("context_extraction")
         if client_info is None:
             return ExtractResult(
                 entries=[],
@@ -2326,7 +2341,7 @@ class ContextExtractor:
             return None, "无前文可提取"
 
         # 获取 LLM 客户端
-        client_info = self._get_llm_client()
+        client_info = self._get_llm_client("protagonist_extraction")
         if client_info is None:
             return None, "未配置 API 端点或 API Key 无效"
         client, default_model = client_info

@@ -9,7 +9,8 @@
         "config_version": 1,
         "api_endpoints": [
             {"id": str, "name": str, "base_url": str,
-             "api_key_encrypted": str, "default_model": str}
+             "api_key_encrypted": str, "default_model": str,
+             "reasoning_effort": str}
         ],
         "default_endpoint_id": str,
         "appearance": {
@@ -68,6 +69,7 @@ def get_default_config() -> dict[str, Any]:
         "config_version": CURRENT_CONFIG_VERSION,
         "api_endpoints": [],
         "default_endpoint_id": "",
+        "flow_endpoints": {},  # {flow_key: endpoint_id}，未配置的流程回退默认端点
         "appearance": {
             "theme": "dark",
             "font_family": "Microsoft YaHei",
@@ -288,6 +290,7 @@ class ConfigManager:
             endpoint.setdefault("base_url", "")
             endpoint.setdefault("api_key_encrypted", "")
             endpoint.setdefault("default_model", "")
+            endpoint.setdefault("reasoning_effort", "")
 
             self.config.setdefault("api_endpoints", []).append(endpoint)
             # 若无默认端点，设为第一个
@@ -325,6 +328,42 @@ class ConfigManager:
         """设置默认 API 端点。"""
         with self._lock:
             self.config["default_endpoint_id"] = endpoint_id
+            self.save()
+
+    # ===== 流程端点配置 =====
+
+    def get_flow_endpoints(self) -> dict[str, str]:
+        """获取流程端点映射 ``{flow_key: endpoint_id}``，未配置返回 ``{}``。"""
+        return self.config.get("flow_endpoints", {})
+
+    def get_flow_endpoint(self, flow_key: str) -> dict[str, Any] | None:
+        """解析流程端点。
+
+        若 ``flow_endpoints[flow_key]`` 存在且对应端点仍存在则返回该端点，
+        否则回退到默认端点。
+
+        Args:
+            flow_key: 流程标识（如 ``single_continuation``/``context_extraction``）
+
+        Returns:
+            端点字典，无可用端点时返回 None
+        """
+        mapping = self.config.get("flow_endpoints", {})
+        ep_id = mapping.get(flow_key, "")
+        if ep_id:
+            ep = self.get_endpoint(ep_id)
+            if ep:
+                return ep
+        return self.get_default_endpoint()
+
+    def set_flow_endpoints(self, mapping: dict[str, str]) -> None:
+        """保存流程端点映射并持久化。
+
+        Args:
+            mapping: ``{flow_key: endpoint_id}``，endpoint_id 为空串表示用默认端点
+        """
+        with self._lock:
+            self.config["flow_endpoints"] = mapping
             self.save()
 
     # ===== 配置项访问 =====

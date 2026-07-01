@@ -103,6 +103,7 @@ class LLMClient:
         base_url: str,
         api_key: str,
         timeout: float = 300.0,
+        reasoning_effort: str | None = None,
     ) -> None:
         """初始化 LLM 客户端。
 
@@ -110,6 +111,8 @@ class LLMClient:
             base_url: API 基础 URL（如 ``https://api.openai.com/v1``）
             api_key: API Key
             timeout: 超时秒数（非流式=total 总超时；流式=sock_read 分块间超时）
+            reasoning_effort: 思考强度（OpenAI o 系列/DeepSeek V4 等 OpenAI 兼容网关
+                支持，取值 auto/minimal/low/medium/high/max；空串/none/off 表示不发送）
         """
         # 参数校验
         if not (base_url.startswith("http://") or base_url.startswith("https://")):
@@ -122,6 +125,8 @@ class LLMClient:
 
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
+        # 思考强度：非空且不属于禁用集合时写入 payload
+        self.reasoning_effort = reasoning_effort or ""
         # 非流式：total 总超时
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         # 流式：无 total 限制，sock_read 控制分块间超时（检测死连接，不杀长流）
@@ -192,6 +197,9 @@ class LLMClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        # 思考强度：非空且不属于禁用集合时写入 payload
+        if self.reasoning_effort and self.reasoning_effort.lower() not in {"", "none", "off"}:
+            payload["reasoning_effort"] = self.reasoning_effort
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -415,6 +423,9 @@ class LLMClient:
             "top_p": top_p,
             "max_tokens": max_tokens,
         }
+        # 思考强度：非空且不属于禁用集合时写入 payload
+        if self.reasoning_effort and self.reasoning_effort.lower() not in {"", "none", "off"}:
+            payload["reasoning_effort"] = self.reasoning_effort
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",

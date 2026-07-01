@@ -293,7 +293,11 @@ class ContinuationWorker(QThread):
 
         check_stop()
 
-        client = LLMClient(self.base_url, self.api_key)
+        client = LLMClient(
+            self.base_url,
+            self.api_key,
+            reasoning_effort=self.parameters.get("reasoning_effort", ""),
+        )
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []

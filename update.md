@@ -4,6 +4,108 @@
 
 ---
 
+## 2026-07-01：修复编辑保存端点后闪退
+
+### 背景
+
+用户反馈：编辑已有 API 端点点击保存后闪退，控制台报 `QThread: Destroyed while thread '' is still running` 及 aiohttp 未关闭连接警告。
+
+### 根因
+
+`EndpointEditDialog._load_data()` 编辑已有端点时自动触发 `_on_fetch_models()` 启动 `ModelFetchWorker`（QThread，parent=dialog）拉取模型列表。用户点 OK 时网络请求尚未完成，`self.accept()` 关闭并销毁对话框，其子 QThread 被销毁时仍在运行 → 闪退。附带 `ModelFetchWorker.run()` 未调 `client.close()` 导致 aiohttp session 泄漏。
+
+### 核心改动
+
+- **`novelforge/ui/settings_dialog.py`**：
+  - `ModelFetchWorker.run()`：增加内层 try/finally 调 `loop.run_until_complete(client.close())` 关闭 aiohttp ClientSession，修复未关闭连接警告。
+  - `EndpointEditDialog._on_fetch_models`：worker 创建时 parent 改为 None（解耦对话框生命周期），连接 `finished` → `deleteLater` 让线程结束后自清理（fire-and-forget）。
+  - `EndpointEditDialog.closeEvent`（新增）：对话框关闭时若 worker 仍在运行，断开 `models_fetched`/`error` 信号避免回调已销毁 UI；worker 在后台安全完成并自清理，不阻塞 UI、不闪退。
+
+### 设计决策
+
+1. parent=None + finished→deleteLater 而非 `wait()`：`fetch_models` 超时 30s，`wait()` 会冻结 UI 最多 30s；fire-and-forget 模式不阻塞、不闪退，资源在 run() finally 中清理。
+2. closeEvent 覆盖 accept/reject/Escape/X 按钮全部关闭路径。
+3. 保留 `_load_data` 自动拉取模型（UX 有用），修复线程生命周期后自动拉取安全。
+4. 字体警告 `QFont::setPointSize: Point size <= 0 (-1)` 是既有告警，与闪退无关，不在本次范围。
+
+### 测试
+
+- 追加 `tests/test_settings_dialog_endpoint_edit.py` 1 用例：`test_edit_dialog_close_while_fetching_does_not_crash`——stub `ModelFetchWorker` 为慢速线程（run 中 sleep 0.5s），触发自动拉取后立即 `dialog.close()`，断言无异常、对话框正常关闭、worker 可安全 wait 完成。
+- `python -m pytest tests/ -q`：564 passed, 13 skipped, 0 failed。
+
+### 文档同步
+
+- 更新 `agent.md`：settings_dialog.py 条目补注 ModelFetchWorker 生命周期解耦 + closeEvent 修复说明。
+
+---
+
+## 2026-07-01：修复已有端点无法编辑
+
+### 背景
+
+用户反馈：设置对话框中点击"编辑"按钮无法编辑已有 API 端点（点击无反应）。
+
+### 根因
+
+`QPushButton.clicked(bool)` 信号把 `False` 传给 `_on_edit_endpoint(self, item=None)` 的 `item` 参数。`if item is None` 无法捕获 `False`（`False is not None`），随后 `if not item`（`not False` 为 `True`）提前 return，`EndpointEditDialog` 从未构造。双击列表项正常（`itemDoubleClicked` 传 `QListWidgetItem` 实例，truthy）。
+
+其他按钮（新建/删除/设为默认）的槽方法不接受 `item` 参数，`clicked(bool)` 的 bool 被 Qt 自动丢弃，工作正常。只有 `_on_edit_endpoint` 因同时承担"按钮点击"与"列表双击"两个角色而引入 `item` 参数，被 `clicked(False)` 误伤。
+
+### 核心改动
+
+- **`novelforge/ui/settings_dialog.py`**：L499 用 lambda 包裹编辑按钮点击连接 `self._edit_btn.clicked.connect(lambda: self._on_edit_endpoint())`，确保 `item` 取默认 `None`；L504 双击连接保持不变。
+
+### 测试
+
+- 新增 `tests/test_settings_dialog_endpoint_edit.py` 2 用例：点击"编辑"按钮后 stub 的 `EndpointEditDialog` 被构造且加载选中端点（回归）+ 双击列表项同样触发编辑（回归保护）。
+- `python -m pytest tests/ -q`：563 passed, 13 skipped, 0 failed。
+
+### 文档同步
+
+- 更新 `agent.md`：settings_dialog.py 条目补注编辑按钮 lambda 修复说明。
+
+---
+
+## 2026-07-01：API 端点思考强度 + 流程端点配置
+
+### 背景
+
+1. 用户希望在 API 端点管理中为支持推理的模型（如 DeepSeek V4 max 思考、OpenAI o 系列）配置思考强度，避免每个模型私有参数各自适配。
+2. 不同流程（单章续写/卷续写/审计/上下文提取/世界观提取/主角提取/自定义设定解析）希望独立选择 API 端点，默认沿用端点管理总默认端点，也可指定其它已配置端点。
+
+### 核心改动
+
+- **`novelforge/services/llm_client.py`**：`__init__` 新增 `reasoning_effort` 参数；`stream_chat_completion` 与 `chat_completion` 在 reasoning_effort 非空且不属于禁用集合 `{"", "none", "off"}` 时写入 payload `reasoning_effort` 字段（OpenAI 兼容网关统一字段）。
+- **`novelforge/ui/settings_dialog.py`**：新增 `REASONING_EFFORT_OPTIONS` 7 档（不发送/auto/minimal/low/medium/high/max）+ `_reasoning_effort_combo` 下拉，端点编辑表单含此字段，保存/加载 roundtrip。
+- **`novelforge/core/config.py`**：新增 `flow_endpoints: {}` 默认字段（{flow_key: endpoint_id} 映射）；`add_endpoint` setdefault `reasoning_effort` 字段；新增 `get_flow_endpoints`/`get_flow_endpoint(flow_key)`（未配置/端点被删回退默认端点）/`set_flow_endpoints(mapping)` 三方法；无需迁移版本（setdefault 自动补全）。
+- **`novelforge/ui/flow_endpoint_dialog.py`**（新文件）：`FLOW_DEFINITIONS` 7 流程清单 + `FlowEndpointDialog` 为每流程提供端点下拉（默认=端点管理默认端点，可选其它已配置端点），保存调 `set_flow_endpoints` 持久化。
+- **3 个 worker**（`continuation_worker.py`/`volume_orchestrator.py`/`audit_worker.py`）：从 parameters/`__init__` 读取 reasoning_effort 传入 LLMClient。
+- **3 个提取器/服务**（`context_extractor.py`/`ontology_extractor.py`/`custom_audit_rule_service.py`）：`_get_llm_client(flow_key="")` 支持流程端点解析 + reasoning_effort 注入，调用点传对应 flow_key（context_extraction/ontology_extraction/protagonist_extraction/custom_rule_parsing）。
+- **`novelforge/ui/continuation_panel.py`**：新增 `select_endpoint_by_id` 方法供流程配置同步面板下拉。
+- **`novelforge/ui/main_window.py`**：工具菜单新增"流程端点配置(&E)..."入口；`_on_open_flow_endpoint_dialog` 弹对话框后调 `_refresh_endpoints` 同步面板端点到当前模式流程配置；`_resolve_reasoning_effort(endpoint, preset)` 解析思考强度（预设级 generation_params.reasoning_effort 优先，其次端点级，均空不发送）激活预设管理器原有死字段；4 处 worker 注入点（单章续写/卷续写/单章审计/审计后重写）调用此方法；single_audit 流程端点配置优先回退面板下拉。
+
+### 设计决策
+
+1. 统一 `reasoning_effort` 字段（OpenAI 兼容），不区分厂商私有格式。
+2. 预设级优先于端点级（激活预设管理器现有死字段，更具体的配置胜出）。
+3. 流程指定即生效，提取器/审计直接用配置，续写/卷续写通过面板同步。
+4. 审计重写用续写端点（非审计端点）。
+5. 不新增迁移版本（`flow_endpoints` + `reasoning_effort` 通过 setdefault 自动补全）。
+
+### 测试
+
+- 新增 `tests/test_reasoning_effort.py` 12 用例：LLMClient 存储/注入条件（high 注入、空串跳过、none/off 大小写不敏感跳过、max 注入）+ `_resolve_reasoning_effort` 优先级（预设优先、预设 none/off 忽略、端点回退、无预设、均空、端点缺字段）。
+- 新增 `tests/test_flow_endpoint_config.py` 9 用例：ConfigManager flow_endpoints CRUD（未配置/已配置/端点被删回退/无端点/roundtrip/默认空）+ FlowEndpointDialog（7 流程/加载保存 roundtrip/默认选中）。
+- 修复 `tests/test_protagonist_extraction.py` 7 处 `_get_llm_client` lambda stub 回归（签名从 `lambda:` 改为 `lambda flow_key="":` 适配 context_extractor 新签名）。
+- `python -m pytest tests/ -q`：561 passed, 13 skipped, 0 failed。
+
+### 文档同步
+
+- 更新 `agent.md`：6 处描述同步（settings_dialog reasoning_effort 下拉 / config.py flow_endpoints + 3 方法 / 新增 flow_endpoint_dialog 模块条目 / main_window 工具菜单入口 + _resolve_reasoning_effort + 4 注入点 / ontology_extractor + custom_audit_rule_service _get_llm_client flow_key 改造）。
+- 更新 `update.md`：顶部追加本条目。
+
+---
+
 ## 2026-07-01：修复章节保存报错 + 正文丢失 + 编辑器新增保存按钮
 
 ### 背景

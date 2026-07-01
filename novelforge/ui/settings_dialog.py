@@ -42,9 +42,20 @@ from PySide6.QtWidgets import (
 from novelforge.core.config import ConfigManager
 from novelforge.services.async_runner import AsyncLoopRunner
 from novelforge.services.llm_client import LLMClient, LLMError
-from novelforge.ui.helpers import parse_token_limit
+from novelforge.ui.helpers import parse_token_limit, select_combo_by_id
 
 logger = logging.getLogger(__name__)
+
+# 思考强度选项：(显示文本, 发送值)。「不发送」=空串，表示不写入 payload
+REASONING_EFFORT_OPTIONS: list[tuple[str, str]] = [
+    ("不发送", ""),
+    ("auto", "auto"),
+    ("minimal", "minimal"),
+    ("low", "low"),
+    ("medium", "medium"),
+    ("high", "high"),
+    ("max", "max"),
+]
 
 
 class ModelFetchWorker(QThread):
@@ -75,8 +86,12 @@ class ModelFetchWorker(QThread):
         try:
             asyncio.set_event_loop(loop)
             client = LLMClient(self._base_url, self._api_key, timeout=30.0)
-            models = loop.run_until_complete(client.fetch_models())
-            self.models_fetched.emit(models)
+            try:
+                models = loop.run_until_complete(client.fetch_models())
+                self.models_fetched.emit(models)
+            finally:
+                # 关闭 aiohttp ClientSession，避免未关闭连接警告
+                loop.run_until_complete(client.close())
         except Exception as e:
             logger.error("获取模型列表失败: %s", e)
             self.error.emit(str(e))
@@ -181,6 +196,18 @@ class EndpointEditDialog(QDialog):
 
         form.addRow("默认模型:", model_layout)
 
+        # 思考强度（reasoning_effort）：OpenAI o 系列/DeepSeek V4 等兼容网关支持
+        self._reasoning_effort_combo = QComboBox()
+        for label, value in REASONING_EFFORT_OPTIONS:
+            self._reasoning_effort_combo.addItem(label, value)
+        self._reasoning_effort_combo.setToolTip(
+            "思考强度（reasoning_effort），覆盖 OpenAI o 系列"
+            "（minimal/low/medium/high）、DeepSeek V4（max）等 OpenAI 兼容网关；\n"
+            "「不发送」表示不写入该字段，由模型默认行为决定。\n"
+            "不支持该字段的网关会忽略它，无副作用。"
+        )
+        form.addRow("思考强度:", self._reasoning_effort_combo)
+
         self._default_check = QCheckBox("设为默认端点")
         form.addRow("", self._default_check)
 
@@ -208,9 +235,24 @@ class EndpointEditDialog(QDialog):
         self._default_check.setChecked(
             self._config_manager.get("default_endpoint_id", "") == endpoint_id
         )
+        # 思考强度：按保存值选中对应项
+        select_combo_by_id(
+            self._reasoning_effort_combo, self._endpoint.get("reasoning_effort", "")
+        )
         # 若已有 base_url 和解密的 API key，自动拉取模型列表
         if self._endpoint.get("base_url", "").strip() and self._decrypted_key:
             self._on_fetch_models()
+
+    def closeEvent(self, event) -> None:
+        """关闭对话框时清理模型获取线程，避免回调到已销毁的 UI。"""
+        if self._model_fetch_worker and self._model_fetch_worker.isRunning():
+            try:
+                self._model_fetch_worker.models_fetched.disconnect()
+                self._model_fetch_worker.error.disconnect()
+            except (RuntimeError, TypeError):
+                pass  # 信号可能已断开
+            # worker parent=None + finished→deleteLater，可安全在后台完成并自清理
+        super().closeEvent(event)
 
     def _on_toggle_key_visible(self, checked: bool) -> None:
         """切换 API Key 显示。"""
@@ -248,9 +290,12 @@ class EndpointEditDialog(QDialog):
         self._fetch_models_btn.setEnabled(False)
         self._fetch_models_btn.setText("获取中...")
 
-        self._model_fetch_worker = ModelFetchWorker(base_url, api_key, self)
+        # parent=None：解耦对话框生命周期，避免对话框关闭时 QThread 被强制销毁
+        self._model_fetch_worker = ModelFetchWorker(base_url, api_key, None)
         self._model_fetch_worker.models_fetched.connect(self._on_models_fetched)
         self._model_fetch_worker.error.connect(self._on_fetch_error)
+        # 线程结束后自动清理（fire-and-forget，不随对话框销毁）
+        self._model_fetch_worker.finished.connect(self._model_fetch_worker.deleteLater)
         self._model_fetch_worker.start()
 
     def _on_models_fetched(self, models: list) -> None:
@@ -308,6 +353,7 @@ class EndpointEditDialog(QDialog):
             "base_url": base_url,
             "api_key": api_key,  # 明文，由 ConfigManager 加密
             "default_model": self._model_combo.currentText().strip(),
+            "reasoning_effort": self._reasoning_effort_combo.currentData(),
             "is_default": self._default_check.isChecked(),
         }
         self.accept()
@@ -468,7 +514,9 @@ class SettingsDialog(QDialog):
 
         # 连接信号
         self._add_btn.clicked.connect(self._on_add_endpoint)
-        self._edit_btn.clicked.connect(self._on_edit_endpoint)
+        # 用 lambda 包裹：避免 clicked(bool) 把 False 传给 item 参数
+        # （False is not None，但 not False 为 True，会导致提前 return）
+        self._edit_btn.clicked.connect(lambda: self._on_edit_endpoint())
         self._delete_btn.clicked.connect(self._on_delete_endpoint)
         self._set_default_btn.clicked.connect(self._on_set_default)
         self._endpoint_list.itemDoubleClicked.connect(self._on_edit_endpoint)
@@ -487,7 +535,8 @@ class SettingsDialog(QDialog):
                 f"名称: {name}\n"
                 f"URL: {ep.get('base_url', '')}\n"
                 f"API Key: {mask_api_key(ep.get('api_key_encrypted', ''))}\n"
-                f"默认模型: {ep.get('default_model', '未设置')}"
+                f"默认模型: {ep.get('default_model', '未设置')}\n"
+                f"思考强度: {ep.get('reasoning_effort', '') or '不发送'}"
             )
             self._endpoint_list.addItem(item)
 
