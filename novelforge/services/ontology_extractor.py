@@ -747,236 +747,243 @@ class OntologyExtractor:
             return None, "未配置 API 端点或 API Key 无效"
         client, model = client_info
 
-        # 按章节 index 排序，确保批次顺序正确
-        sorted_chapters = sorted(chapters, key=lambda c: c.index)
+        try:
+            # 按章节 index 排序，确保批次顺序正确
+            sorted_chapters = sorted(chapters, key=lambda c: c.index)
 
-        # 按 token 限制拆分批次
-        batches = self._split_chapters_by_token_limit(
-            sorted_chapters, token_limit, model
-        )
-        batch_count = len(batches)
-        logger.info(
-            "底层世界观提取: %d 章拆分为 %d 批 (token_limit=%d)",
-            len(sorted_chapters), batch_count, token_limit,
-        )
+            # 按 token 限制拆分批次
+            batches = self._split_chapters_by_token_limit(
+                sorted_chapters, token_limit, model
+            )
+            batch_count = len(batches)
+            logger.info(
+                "底层世界观提取: %d 章拆分为 %d 批 (token_limit=%d)",
+                len(sorted_chapters), batch_count, token_limit,
+            )
 
-        # 逐批调用 LLM，每批携带前批累积的 WorldOntology
-        accumulated_ontology: dict[str, Any] = {}
-        batch_results: list[dict[str, Any]] = []  # 各批次独立结果，供汇总环节使用
-        batch_ranges: list[tuple[int, int]] = []  # 各批次章节区间
+            # 逐批调用 LLM，每批携带前批累积的 WorldOntology
+            accumulated_ontology: dict[str, Any] = {}
+            batch_results: list[dict[str, Any]] = []  # 各批次独立结果，供汇总环节使用
+            batch_ranges: list[tuple[int, int]] = []  # 各批次章节区间
 
-        for batch_idx, batch_chapters in enumerate(batches):
-            # 取消信号检查
-            if stop_event is not None and stop_event.is_set():
-                logger.info("底层世界观提取被取消（批次 %d/%d 前）",
-                            batch_idx + 1, batch_count)
-                return None, "用户取消提取"
-
-            batch_start = min(ch.index for ch in batch_chapters)
-            batch_end = max(ch.index for ch in batch_chapters)
-            batch_ranges.append((batch_start, batch_end))
-
-            # 多批次时插入分隔标记
-            if batch_count > 1 and on_chunk is not None:
-                separator = (
-                    f"\n\n--- 批次 {batch_idx + 1}/{batch_count} "
-                    f"(章节 {batch_start}-{batch_end}) ---\n\n"
-                )
-                try:
-                    on_chunk(separator)
-                except Exception as e:
-                    logger.warning("on_chunk 回调异常: %s", e)
-
-            # 构建提示词（首批 accumulated=None → 注入"（首批提取，无前序参考）"）
-            chapters_text = self._build_chapters_text(batch_chapters)
-            try:
-                prompt = self._build_ontology_prompt(
-                    project, chapters_text,
-                    accumulated_ontology=accumulated_ontology or None,
-                )
-            except Exception as e:
-                logger.error("构建底层世界观提示词失败: %s", e, exc_info=True)
-                return None, f"构建提示词失败: {e}"
-
-            # 调用 LLM（2 次尝试：温度 0.2 / 0.0，仅 2 次均失败才中止整体提取）
-            messages = [{"role": "user", "content": prompt}]
-            extract_temperatures = [
-                ONTOLOGY_EXTRACT_TEMPERATURE,
-                ONTOLOGY_EXTRACT_TEMPERATURE_RETRY,
-            ]
-            batch_ontology: dict[str, Any] | None = None
-            last_error = ""
-
-            for attempt, temperature in enumerate(extract_temperatures):
+            for batch_idx, batch_chapters in enumerate(batches):
                 # 取消信号检查
                 if stop_event is not None and stop_event.is_set():
+                    logger.info("底层世界观提取被取消（批次 %d/%d 前）",
+                                batch_idx + 1, batch_count)
                     return None, "用户取消提取"
-                try:
-                    response = await client.chat_completion(
-                        messages=messages,
-                        model=model,
-                        temperature=temperature,
-                        max_tokens=ONTOLOGY_EXTRACT_MAX_TOKENS,
-                        stop_event=stop_event,
+
+                batch_start = min(ch.index for ch in batch_chapters)
+                batch_end = max(ch.index for ch in batch_chapters)
+                batch_ranges.append((batch_start, batch_end))
+
+                # 多批次时插入分隔标记
+                if batch_count > 1 and on_chunk is not None:
+                    separator = (
+                        f"\n\n--- 批次 {batch_idx + 1}/{batch_count} "
+                        f"(章节 {batch_start}-{batch_end}) ---\n\n"
                     )
+                    try:
+                        on_chunk(separator)
+                    except Exception as e:
+                        logger.warning("on_chunk 回调异常: %s", e)
+
+                # 构建提示词（首批 accumulated=None → 注入"（首批提取，无前序参考）"）
+                chapters_text = self._build_chapters_text(batch_chapters)
+                try:
+                    prompt = self._build_ontology_prompt(
+                        project, chapters_text,
+                        accumulated_ontology=accumulated_ontology or None,
+                    )
+                except Exception as e:
+                    logger.error("构建底层世界观提示词失败: %s", e, exc_info=True)
+                    return None, f"构建提示词失败: {e}"
+
+                # 调用 LLM（2 次尝试：温度 0.2 / 0.0，仅 2 次均失败才中止整体提取）
+                messages = [{"role": "user", "content": prompt}]
+                extract_temperatures = [
+                    ONTOLOGY_EXTRACT_TEMPERATURE,
+                    ONTOLOGY_EXTRACT_TEMPERATURE_RETRY,
+                ]
+                batch_ontology: dict[str, Any] | None = None
+                last_error = ""
+
+                for attempt, temperature in enumerate(extract_temperatures):
                     # 取消信号检查
                     if stop_event is not None and stop_event.is_set():
                         return None, "用户取消提取"
-                    # 解析响应
-                    choices = response.get("choices", [])
-                    if not choices:
+                    try:
+                        response = await client.chat_completion(
+                            messages=messages,
+                            model=model,
+                            temperature=temperature,
+                            max_tokens=ONTOLOGY_EXTRACT_MAX_TOKENS,
+                            stop_event=stop_event,
+                        )
+                        # 取消信号检查
+                        if stop_event is not None and stop_event.is_set():
+                            return None, "用户取消提取"
+                        # 解析响应
+                        choices = response.get("choices", [])
+                        if not choices:
+                            last_error = (
+                                f"批次 {batch_idx + 1}/{batch_count} 响应无 choices"
+                            )
+                            logger.warning(
+                                "批次 %d/%d 第 %d 次尝试无 choices",
+                                batch_idx + 1, batch_count, attempt + 1,
+                            )
+                            if attempt < len(extract_temperatures) - 1:
+                                continue
+                            return None, last_error
+                        message = choices[0].get("message", {})
+                        content = message.get("content", "") or ""
+
+                        # 推送本批次内容到 on_chunk（供 UI 显示）
+                        if on_chunk is not None and content:
+                            try:
+                                on_chunk(content)
+                            except Exception as e:
+                                logger.warning("on_chunk 回调异常: %s", e)
+
+                        # 解析 JSON → dict（仅保留 7 大维度字段）
+                        batch_ontology = _parse_ontology_response(content)
+                        break  # 成功，退出重试循环
+                    except asyncio.CancelledError:
+                        logger.info(
+                            "底层世界观提取被取消（批次 %d/%d 第 %d 次尝试）",
+                            batch_idx + 1, batch_count, attempt + 1,
+                        )
+                        return None, "用户取消提取"
+                    except json.JSONDecodeError as e:
                         last_error = (
-                            f"批次 {batch_idx + 1}/{batch_count} 响应无 choices"
+                            f"批次 {batch_idx + 1}/{batch_count} JSON 解析失败: {e}"
                         )
                         logger.warning(
-                            "批次 %d/%d 第 %d 次尝试无 choices",
-                            batch_idx + 1, batch_count, attempt + 1,
+                            "批次 %d/%d 第 %d 次尝试 JSON 解析失败: %s, content=%s",
+                            batch_idx + 1, batch_count, attempt + 1, e, content[:200],
                         )
                         if attempt < len(extract_temperatures) - 1:
                             continue
                         return None, last_error
-                    message = choices[0].get("message", {})
-                    content = message.get("content", "") or ""
+                    except asyncio.TimeoutError as e:
+                        last_error = f"批次 {batch_idx + 1}/{batch_count} 超时: {e}"
+                        logger.warning(
+                            "批次 %d/%d 第 %d 次尝试超时: %s",
+                            batch_idx + 1, batch_count, attempt + 1, e,
+                        )
+                        if attempt < len(extract_temperatures) - 1:
+                            continue
+                        return None, last_error
+                    except (AuthError, RateLimitError, APIError, LLMError) as e:
+                        last_error = f"批次 {batch_idx + 1}/{batch_count} LLM 调用失败: {e}"
+                        logger.warning(
+                            "批次 %d/%d 第 %d 次尝试 LLM 调用失败: %s",
+                            batch_idx + 1, batch_count, attempt + 1, e,
+                        )
+                        if attempt < len(extract_temperatures) - 1:
+                            continue
+                        return None, last_error
+                    except Exception as e:
+                        last_error = f"批次 {batch_idx + 1}/{batch_count} 提取异常: {e}"
+                        logger.error(
+                            "批次 %d/%d 第 %d 次尝试异常: %s",
+                            batch_idx + 1, batch_count, attempt + 1, e, exc_info=True,
+                        )
+                        if attempt < len(extract_temperatures) - 1:
+                            continue
+                        return None, last_error
 
-                    # 推送本批次内容到 on_chunk（供 UI 显示）
-                    if on_chunk is not None and content:
-                        try:
-                            on_chunk(content)
-                        except Exception as e:
-                            logger.warning("on_chunk 回调异常: %s", e)
+                # 记录本批次独立结果（供汇总环节使用）
+                # 循环仅 break（成功）或 return（失败）退出，此处 batch_ontology 必非 None
+                assert batch_ontology is not None
+                batch_results.append(batch_ontology)
 
-                    # 解析 JSON → dict（仅保留 7 大维度字段）
-                    batch_ontology = _parse_ontology_response(content)
-                    break  # 成功，退出重试循环
-                except asyncio.CancelledError:
-                    logger.info(
-                        "底层世界观提取被取消（批次 %d/%d 第 %d 次尝试）",
-                        batch_idx + 1, batch_count, attempt + 1,
-                    )
-                    return None, "用户取消提取"
-                except json.JSONDecodeError as e:
-                    last_error = (
-                        f"批次 {batch_idx + 1}/{batch_count} JSON 解析失败: {e}"
-                    )
-                    logger.warning(
-                        "批次 %d/%d 第 %d 次尝试 JSON 解析失败: %s, content=%s",
-                        batch_idx + 1, batch_count, attempt + 1, e, content[:200],
-                    )
-                    if attempt < len(extract_temperatures) - 1:
-                        continue
-                    return None, last_error
-                except asyncio.TimeoutError as e:
-                    last_error = f"批次 {batch_idx + 1}/{batch_count} 超时: {e}"
-                    logger.warning(
-                        "批次 %d/%d 第 %d 次尝试超时: %s",
-                        batch_idx + 1, batch_count, attempt + 1, e,
-                    )
-                    if attempt < len(extract_temperatures) - 1:
-                        continue
-                    return None, last_error
-                except (AuthError, RateLimitError, APIError, LLMError) as e:
-                    last_error = f"批次 {batch_idx + 1}/{batch_count} LLM 调用失败: {e}"
-                    logger.warning(
-                        "批次 %d/%d 第 %d 次尝试 LLM 调用失败: %s",
-                        batch_idx + 1, batch_count, attempt + 1, e,
-                    )
-                    if attempt < len(extract_temperatures) - 1:
-                        continue
-                    return None, last_error
-                except Exception as e:
-                    last_error = f"批次 {batch_idx + 1}/{batch_count} 提取异常: {e}"
-                    logger.error(
-                        "批次 %d/%d 第 %d 次尝试异常: %s",
-                        batch_idx + 1, batch_count, attempt + 1, e, exc_info=True,
-                    )
-                    if attempt < len(extract_temperatures) - 1:
-                        continue
-                    return None, last_error
+                # 增量合并到 accumulated_ontology（核心：增量更新）
+                accumulated_ontology = self._merge_ontology_fields(
+                    accumulated_ontology, batch_ontology
+                )
 
-            # 记录本批次独立结果（供汇总环节使用）
-            # 循环仅 break（成功）或 return（失败）退出，此处 batch_ontology 必非 None
-            assert batch_ontology is not None
-            batch_results.append(batch_ontology)
+                logger.info(
+                    "批次 %d/%d 完成: 章节 %d-%d (累计 %d 维度非空)",
+                    batch_idx + 1, batch_count,
+                    batch_start, batch_end,
+                    sum(1 for v in accumulated_ontology.values() if v),
+                )
 
-            # 增量合并到 accumulated_ontology（核心：增量更新）
-            accumulated_ontology = self._merge_ontology_fields(
-                accumulated_ontology, batch_ontology
+                # 增量更新 UI（批次完成回调）
+                if on_batch_complete is not None:
+                    try:
+                        on_batch_complete(batch_idx + 1, batch_count)
+                    except Exception as e:
+                        logger.warning("on_batch_complete 回调异常: %s", e)
+
+            # 【信息汇总】环节：batch_count > 1 时调用 _run_ontology_merge 语义整合
+            merged = False
+            if batch_count > 1:
+                merged_ontology = await self._run_ontology_merge(
+                    batch_results=batch_results,
+                    accumulated_ontology=accumulated_ontology,
+                    llm_client=client,
+                    model=model,
+                    on_chunk=on_chunk,
+                    stop_event=stop_event,
+                    batch_ranges=batch_ranges,
+                )
+                if merged_ontology is not None:
+                    accumulated_ontology = merged_ontology
+                    merged = True
+                    logger.info("底层世界观【信息汇总】环节完成")
+                else:
+                    # 汇总失败：降级使用累积结果（_run_ontology_merge 内部已降级处理）
+                    logger.warning("底层世界观【信息汇总】环节失败，降级使用累积结果")
+
+            # 取消信号检查
+            if stop_event is not None and stop_event.is_set():
+                return None, "用户取消提取"
+
+            # 构建 WorldOntology 对象
+            all_chapter_indices = [ch.index for ch in sorted_chapters]
+            source_chapter_range = (
+                (min(all_chapter_indices), max(all_chapter_indices))
+                if all_chapter_indices else None
+            )
+            ontology = WorldOntology(
+                **accumulated_ontology,
+                extracted_at=datetime.now(),
+                source_chapter_range=source_chapter_range,
             )
 
-            logger.info(
-                "批次 %d/%d 完成: 章节 %d-%d (累计 %d 维度非空)",
-                batch_idx + 1, batch_count,
-                batch_start, batch_end,
-                sum(1 for v in accumulated_ontology.values() if v),
-            )
+            # 保存到 Project.world_ontology + 世界书条目
+            try:
+                project.world_ontology = ontology
+                worldbook_id = self._save_ontology_to_worldbook(project, ontology)
+                project.worldbook_id = worldbook_id
+                project.updated_at = datetime.now()
+                # 协程内直接 await 异步存储层，绕过同步包装避免重入死锁
+                await self.storage_service.storage.save_project(project.model_dump(mode="json"))
+                logger.info(
+                    "底层世界观已固化到项目 %s: worldbook_id=%s",
+                    project.id, worldbook_id,
+                )
+            except Exception as e:
+                logger.error("保存底层世界观到项目失败: %s", e, exc_info=True)
+                # 保存失败仍返回 ontology（已在内存中构造完成）
+                return ontology, f"提取完成但保存失败: {e}"
 
-            # 增量更新 UI（批次完成回调）
-            if on_batch_complete is not None:
-                try:
-                    on_batch_complete(batch_idx + 1, batch_count)
-                except Exception as e:
-                    logger.warning("on_batch_complete 回调异常: %s", e)
-
-        # 【信息汇总】环节：batch_count > 1 时调用 _run_ontology_merge 语义整合
-        merged = False
-        if batch_count > 1:
-            merged_ontology = await self._run_ontology_merge(
-                batch_results=batch_results,
-                accumulated_ontology=accumulated_ontology,
-                llm_client=client,
-                model=model,
-                on_chunk=on_chunk,
-                stop_event=stop_event,
-                batch_ranges=batch_ranges,
-            )
-            if merged_ontology is not None:
-                accumulated_ontology = merged_ontology
-                merged = True
-                logger.info("底层世界观【信息汇总】环节完成")
+            # 构建状态消息
+            if batch_count == 1:
+                status_msg = "提取完成（1 批次）"
+            elif merged:
+                status_msg = f"提取完成（{batch_count} 批次，已合并）"
             else:
-                # 汇总失败：降级使用累积结果（_run_ontology_merge 内部已降级处理）
-                logger.warning("底层世界观【信息汇总】环节失败，降级使用累积结果")
+                status_msg = f"提取完成（{batch_count} 批次，合并失败降级使用累积结果）"
 
-        # 取消信号检查
-        if stop_event is not None and stop_event.is_set():
-            return None, "用户取消提取"
-
-        # 构建 WorldOntology 对象
-        all_chapter_indices = [ch.index for ch in sorted_chapters]
-        source_chapter_range = (
-            (min(all_chapter_indices), max(all_chapter_indices))
-            if all_chapter_indices else None
-        )
-        ontology = WorldOntology(
-            **accumulated_ontology,
-            extracted_at=datetime.now(),
-            source_chapter_range=source_chapter_range,
-        )
-
-        # 保存到 Project.world_ontology + 世界书条目
-        try:
-            project.world_ontology = ontology
-            worldbook_id = self._save_ontology_to_worldbook(project, ontology)
-            project.worldbook_id = worldbook_id
-            project.updated_at = datetime.now()
-            # 协程内直接 await 异步存储层，绕过同步包装避免重入死锁
-            await self.storage_service.storage.save_project(project.model_dump(mode="json"))
-            logger.info(
-                "底层世界观已固化到项目 %s: worldbook_id=%s",
-                project.id, worldbook_id,
-            )
-        except Exception as e:
-            logger.error("保存底层世界观到项目失败: %s", e, exc_info=True)
-            # 保存失败仍返回 ontology（已在内存中构造完成）
-            return ontology, f"提取完成但保存失败: {e}"
-
-        # 构建状态消息
-        if batch_count == 1:
-            status_msg = "提取完成（1 批次）"
-        elif merged:
-            status_msg = f"提取完成（{batch_count} 批次，已合并）"
-        else:
-            status_msg = f"提取完成（{batch_count} 批次，合并失败降级使用累积结果）"
-
-        logger.info("底层世界观提取完成: %s", status_msg)
-        return ontology, status_msg
+            logger.info("底层世界观提取完成: %s", status_msg)
+            return ontology, status_msg
+        finally:
+            # 释放 aiohttp session，避免 Unclosed client session 警告
+            try:
+                await client.close()
+            except Exception as e:
+                logger.warning("关闭 LLMClient 失败: %s", e)

@@ -5,7 +5,7 @@
 
 # 启用的审计维度
 {{audit_dimensions}}
-（逗号分隔的维度名列表，取值 consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance）
+（逗号分隔的维度名列表，取值 consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance/custom_rules_compliance）
 
 # 前文参考（最近 10 章正文）
 {{previous_chapters_text}}
@@ -25,6 +25,10 @@
 {{world_ontology}}
 （若为"（无世界观底层）"则跳过世界观一致性维度审计；否则请严格对照此元规则审计大纲中的事件/设定是否符合因果架构、时空规则、守恒律）
 
+# 自定义设定/审计必查项
+{{custom_audit_rules}}
+（若为"（无自定义设定）"则跳过 custom_rules_compliance 维度审计；否则**必须严格对照每条规则的 audit_criteria 逐条检查**，违反 severity=critical 的规则时该维度 score ≤ 3，整体 passed=false）
+
 # 用户指定的审计重点
 {{audit_focus}}
 （用户在审计前输入的需着重审计的部分；若为"（用户未指定重点）"则按各维度均衡审计）
@@ -35,6 +39,8 @@
 **用户特别关注**：请优先检查用户在"审计重点"中指出的部分，确保相关问题在 revised_outline 中得到改善。
 
 **用户指令遵从性审计**：请检查修订后的大纲是否满足 user_directive_analysis.required_elements 中的所有必备要素，是否着重体现了 emphasized_elements 中的强调部分。未满足时 user_directive_compliance 维度应低分，并在 issues 中明确指出缺失的要素，在 suggestions 中给出补充建议。conflicts 中标注的冲突需在修订大纲中明确处理并说明取舍依据。
+
+**自定义设定遵从性审计**：当上方"自定义设定/审计必查项"段非"（无自定义设定）"时，请逐条对照每条自定义规则的 audit_criteria 检查修订后的大纲是否满足，违反 severity=critical 的规则时该维度 score ≤ 3 且整体 passed=false，并在 issues 中明确指出违反的具体条款，在 suggestions 中给出修订建议。无自定义设定时跳过本维度审计。
 
 请对每个启用的审计维度进行评分与问题诊断，并基于审计结果修订原大纲，产出终稿 VolumeOutline。各维度定义如下：
 
@@ -49,13 +55,14 @@
 - protagonist_consistency（主角一致性）：大纲中主角的行为/决策/目标是否符合 protagonist_profile 中的性格铁律、动机优先级、核心恐惧、OOC红线？**一票否决**：该维度 score ≤ 4 时整体 passed=false。若大纲中主角任何行为违反 OOC 红线（绝对不能做的事），或决策模式不符合校验优先级（性格铁律>动机优先级>核心恐惧>默认防御>剧情需要），该维度直接 0 分，整体 passed=false
 - worldview_consistency（世界观一致性）：大纲中的事件/设定是否符合 world_ontology 中的因果架构、时空规则、守恒律？**严格给分**：违反底层世界观元规则时该维度 score ≤ 3
 - user_directive_compliance（用户指令遵从性）：修订后的大纲是否满足 user_directive_analysis.required_elements 中的所有必备要素？是否着重体现了 emphasized_elements 中的强调部分？**严格给分**：未满足 required_elements 任一项时该维度 score ≤ 3；conflicts 中的冲突未在修订大纲中明确处理的也应低分
+- custom_rules_compliance（自定义设定遵从性）：修订后的大纲是否满足每条自定义规则的 requirement 与 audit_criteria？**严格给分**：违反 severity=critical 的规则时该维度 score ≤ 3，整体 passed=false；违反 severity=major 的规则时该维度 score ≤ 5
 
 仅审计上述启用的维度，未启用的维度可跳过。
 
 # 输出格式
 请输出严格的 JSON 对象（OutlineAuditReport），包含以下字段：
 - dimensions：数组，各启用维度的审计结果，每项含：
-  - dimension：字符串，维度名（consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance）
+  - dimension：字符串，维度名（consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance/custom_rules_compliance）
   - score：整数，该维度评分（1-10，10 为最佳）
   - issues：数组，该维度发现的具体问题列表（每项为字符串）
   - suggestions：数组，针对该问题的具体修订建议列表（每项为字符串）

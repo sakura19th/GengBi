@@ -11,6 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from novelforge.models.context import ContextEntry
+from novelforge.models.protagonist import ProtagonistProfile
 from novelforge.models.volume import VolumeArtifacts
 
 
@@ -50,6 +51,7 @@ class Continuation(BaseModel):
     reasoning_content: str | None = None
     agent_artifacts: dict[str, Any] | None = None
     volume_artifacts: VolumeArtifacts | None = None
+    highlights: list[dict[str, Any]] = Field(default_factory=list)  # 输出栏高亮：[{start, end, color, note}]
 
 
 class Chapter(BaseModel):
@@ -82,3 +84,4 @@ class Chapter(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
+    protagonist_profile: ProtagonistProfile | None = None

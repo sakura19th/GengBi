@@ -4,6 +4,83 @@
 
 ---
 
+## 2026-07-01：主角形象章节级持久化 + 世界观序列化修复
+
+### 背景
+
+1. 主角形象提取结果仅存内存 LRU + 24h TTL cache 表，未落盘到 chapters 表，进程重启/缓存过期后丢失。
+2. 自定义规则生成时世界观底层显示"（世界观底层序列化失败）"——WorldOntology.extracted_at 为 datetime 对象，model_dump() 返回 dict 含 datetime，json.dumps 无法序列化 → TypeError 被静默 except 吞掉 → 返回占位文本。
+
+### 核心改动
+
+- **`novelforge/models/chapter.py`**：Chapter 新增 `protagonist_profile: ProtagonistProfile | None` 字段
+- **`novelforge/core/storage.py`**：chapters 表 SCHEMA 加 `protagonist_profile TEXT` 列；新增 `_migrate_chapters_columns` 幂等迁移旧库；新增 `update_chapter_protagonist` 单列 UPDATE 方法（避免 save_chapter 用空 content 覆盖正文）；`_row_to_chapter` row[8] + len(row) 防御；save_chapter INSERT/UPSERT 加列
+- **`novelforge/services/storage_service.py`**：新增 `update_chapter_protagonist` 同步代理
+- **`novelforge/ui/main_window.py`**：`_on_protagonist_done` 提取完成后落盘 chapters 表 + LRU 热缓存；`_load_context_entries_for_chapter` 独立恢复分支优先 chapter.protagonist_profile → 兜底 cache 表 → LRU（与 ctx_extract 解耦）；4 个使用点（单章续写/卷级/查看/审计）改为优先 chapter 字段兜底 LRU
+- **`novelforge/services/custom_audit_rule_service.py`**：`_format_world_ontology` 改用 `model_dump(mode="json")` 递归转 datetime→ISO 字符串 + `except Exception as e: logger.warning` 暴露根因
+
+### 修复效果
+
+- 主角形象提取完成后持久化到当前章节，切换章节/重启进程后可从 chapter.protagonist_profile 恢复
+- 自定义规则生成时世界观底层正确序列化为 JSON（含 extracted_at ISO 时间戳），不再显示"序列化失败"
+
+## 2026-06-30：自定义设定流式窗口 + 跨线程/session 泄漏修复
+
+### 背景
+
+新增自定义设定时输出完成后卡死，且与其它功能不一致（无流式窗口）。同时控制台报三类错误：`ERROR asyncio: Unclosed client session` / `ERROR asyncio: Unclosed connector` / `QObject::setParent: Cannot set parent, new parent is in a different thread`。
+
+### 核心改动
+
+- **`novelforge/services/custom_audit_rule_service.py`**：`parse_rule_streaming` 由非流式 `chat_completion` 改为 `stream_chat_completion` 真流式 async iterator，逐 chunk 经 `on_chunk(content)` 回调推送 UI；整个 client 使用包裹 `try/finally`，`finally` 中 `await client.close()` 释放 aiohttp session，消除 Unclosed client session/connector 警告
+- **`novelforge/services/ontology_extractor.py`**：`extract_ontology_streaming` 同样补 `try/finally: await client.close()`，消除 ontology 链路 session 泄漏
+- **`novelforge/ui/context_preview_panel.py`**：新增 4 个 custom_rule 流式方法 `start_custom_rule_parsing`/`update_custom_rule_progress`/`finish_custom_rule_parsing`/`fail_custom_rule_parsing`，复用 `_stream_view`，与 ontology/protagonist 互斥（单次 LLM 调用无批次概念）
+- **`novelforge/ui/main_window.py`**：新增 2 个类级信号 `_custom_rule_chunk_received(str)`/`_custom_rule_done(object,str)` + `__init__` 连接；重写 `_on_add_custom_rule_requested` 调 `start_custom_rule_parsing` 启动流式 UI，`on_chunk`/`on_done` 闭包仅 emit 信号不直接调 GUI；新增槽 `_on_custom_rule_chunk_received`/`_on_custom_rule_done` 在 UI 线程执行 finish/fail + QMessageBox，消除 `QObject::setParent` 跨线程违规与卡死
+
+### 根因
+
+1. `QObject::setParent` + 卡死：`on_done` 回调在 asyncio 后台线程运行却直接调 `QMessageBox`（parent=MainWindow 在 UI 线程），违反 Qt 跨线程 GUI 规则 → 改为仅 emit 信号，槽方法在 UI 线程执行
+2. `Unclosed client session/connector`：`_get_client` 创建 `LLMClient` 但全程未 `await client.close()`，aiohttp session 在 GC 时触发警告 → `try/finally` 兜底关闭
+3. 无流式窗口：原用非流式 `chat_completion`，MainWindow 未传 `on_chunk`、未调 `start_*` UI 方法 → 改用 `stream_chat_completion` + 4 个流式 UI 方法 + 信号槽
+
+### 文档同步
+
+- `agent.md`：4 处描述更新（custom_audit_rule_service.py 流式+finally / ontology_extractor.py finally / context_preview_panel.py 4 custom_rule 流式方法 / main_window.py §12 信号+槽+重写说明）
+
+---
+
+## 2026-06-30：自定义审计必查项 + 输出栏高亮
+
+### 背景
+
+用户希望输入自定义设定/要求（如"主角不得杀人""禁止穿越时空"），由 AI 结合世界观底层与上下文结构化为"要求 + 审计向"两字段，保存到项目全局，作为审计必查项注入续写生成与审计全链路；审计不通过则一票否决。参考世界观底层提取模式，在上下文预览面板按钮旁增加"新增自定义设定"和"查看自定义设定"按钮。同时需求 4：输出栏可自行选中对应高亮让我记住（右键菜单 + 多色 4 色：黄/绿/蓝/红 + 可选备注 + 持久化）。
+
+### 核心改动
+
+- **新增数据模型** `novelforge/models/custom_audit_rule.py`：`CustomAuditRule`（id/title/raw_input/requirement/audit_criteria/severity/created_at）；`Project.custom_audit_rules: list[Any]` 字段保存全局自定义设定；`Continuation.highlights: list[dict]` 字段保存输出栏高亮 {start,end,color,note}
+- **新增服务** `novelforge/services/custom_audit_rule_service.py`：`CustomAuditRuleService.parse_rule_streaming` 异步协程加载 `phase_custom_rule_parse.txt` 模板，注入 raw_input + world_ontology + context_entries，AI 结构化为 requirement + audit_criteria，2 次重试温度 0.2/0.0，协程内 `await storage_service.storage.save_project` 持久化避免重入死锁
+- **新增 UI** `novelforge/ui/custom_rule_dialog.py`：`CustomRuleInputDialog`（输入 raw_input）+ `CustomRulesViewDialog`（列表展示 + 删除回调）
+- **上下文预览面板** `context_preview_panel.py`：新增"新增自定义设定"按钮 + `add_custom_rule_requested` 信号 + "查看自定义设定"按钮 + `view_custom_rules_requested` 信号，4 个提取按钮 setEnabled 同步联动
+- **续写面板** `continuation_panel.py`：输出框启用右键菜单高亮——4 色（黄#FFFACD/绿#C8FFB4/蓝#B4DCFF/红#FFB4B4）+ 可选备注（QInputDialog）+ 清除选区/全部；7 方法（`_on_output_context_menu`/`_prompt_note_and_add`/`_add_highlight`/`_clear_highlights_in_range`/`_clear_all_highlights`/`apply_highlights`/`set_highlights`）；`highlights_changed = Signal(list)` 通知 MainWindow 持久化；`set_current_swipe` 加载 `swipe.highlights` + `apply_highlights`
+- **主窗口** `main_window.py`：CustomAuditRuleService 实例 + 5 槽方法（`_format_custom_audit_rules`/`_on_add_custom_rule_requested`/`_on_view_custom_rules_requested`/`_delete_custom_rule`/`_on_highlights_changed`）；3 处注入：单章续写 assemble 传 `custom_audit_rules`、单章审计 `rendered.replace("{{custom_audit_rules}}", custom_rules_str)`、VolumeOrchestrator 构造传 `custom_audit_rules`
+- **存储层** `core/storage.py`：continuations 表新增 `highlights TEXT` 列（幂等迁移 `_migrate_continuations_columns`），INSERT/SELECT/`_row_to_continuation` 同步处理（JSON 序列化/反序列化）
+- **提示词组装** `core/prompt_assembler.py`：`assemble` + `_build_macro_context` 支持 `custom_audit_rules` 参数，经 `_format_custom_audit_rules` 格式化填入 `{{custom_audit_rules}}` 宏
+- **卷编排器** `services/volume_orchestrator.py`：`__init__` 接收 `custom_audit_rules` 参数，9 处 phase 方法注入 `{{custom_audit_rules}}` 宏
+- **默认预设** `default_preset.json`：main 提示词在【主角信息】段后追加【自定义设定/审计必查项】段注入 `{{custom_audit_rules}}`
+- **审计维度同步**：`agent.py` `VALID_CRITIQUE_CATEGORIES` 15 值（+custom_rules_compliance）、`volume.py` `DEFAULT_AUDIT_DIMENSIONS` 12 维度（+custom_rules_compliance）、`phase_verify.txt` 15 维度、`phase_outline_audit.txt` 12 维度、`phase_single_audit.txt` 6 维度；10 个 phase 模板 + phase_custom_rule_parse.txt 均含 `{{custom_audit_rules}}` 占位符段；`custom_rules_compliance` 为单一合并维度一票否决（未满足 high 严重度项判 critical，score ≤ 2）
+
+### 测试
+
+- `tests/test_volume_prompts.py`：5 个测试 macros 字典追加 `"{{custom_audit_rules}}": "（无自定义设定）"`；`test_phase_verify_template_14_dimensions` 断言从"十四个维度"改为"十五个维度"，维度列表追加 `custom_rules_compliance`
+- `tests/test_volume_models.py`：`test_volume_run_config_default_audit_dimensions` 与 `test_volume_run_config_audit_dimensions_independent` 的 `len == 11` 改为 `len == 12`，期望列表追加 `custom_rules_compliance`
+- `tests/test_volume_orchestrator.py`：`test_style_audit_dimension` 的 `len(DEFAULT_AUDIT_DIMENSIONS) == 11` 改为 `== 12`
+- `python -m pytest tests/test_volume_ui.py tests/test_volume_prompts.py tests/test_volume_models.py -q`：89 passed
+- 全量回归：8 处测试同步修复后无新增失败；7 个 context extraction 失败为预先存在（主角提取解耦未同步测试，`context_extractor.py:2156` 注释明确"主角形象提取已从上下文提取流程中移除"），与本任务无关
+
+### 文档同步
+
+- `agent.md`：架构分层新增 3 模块（custom_audit_rule.py/custom_audit_rule_service.py/custom_rule_dialog.py）；更新 agent.py（14→15 值）、volume.py（11→12 维度）、storage.py（highlights 列）、prompt_assembler.py（custom_audit_rules 参数）、volume_orchestrator.py（custom_audit_rules 参数 + 9 处注入）、context_preview_panel.py（2 信号+2 按钮）、continuation_panel.py（右键高亮）、main_window.py（5 槽方法+3 处注入）、default_preset.json（{{custom_audit_rules}} 宏）、phase_verify.txt（14→15 维度）；§9 OutlineAuditReport 12 维度；§10 额外注入宏新增 `{{custom_audit_rules}}`；§11 单章审计 6 维度；新增 §12"自定义设定/审计必查项"设计决策小节；测试描述同步维度计数
+
 ## 2026-06-30：主角形象提取独立按钮
 
 ### 背景

@@ -72,6 +72,8 @@ class Project(BaseModel):
     - ``worldbook_id``：项目专属世界书 ID（存储世界观底层条目，由 OntologyExtractor 创建）
     - ``world_ontology``：底层世界观元描述（全文提取一次固化，不随章节变化；
       底层世界观是世界运行的元规则，核心字段变化率 < 5%）
+    - ``custom_audit_rules``：用户自定义设定/审计必查项列表（用户输入 → AI 结构化，
+      作为审计必查项注入续写生成与审计全链路，单一合并维度 custom_rules_compliance 一票否决）
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -88,3 +90,4 @@ class Project(BaseModel):
     chapter_split_rule: ChapterSplitRule = Field(default_factory=ChapterSplitRule)
     worldbook_id: str = ""  # 项目专属世界书 ID（存储世界观底层条目）
     world_ontology: Any | None = None  # WorldOntology 模型实例（全文提取一次固化）
+    custom_audit_rules: list[Any] = Field(default_factory=list)  # list[CustomAuditRule]，Any 避免循环导入

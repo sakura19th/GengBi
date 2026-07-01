@@ -76,6 +76,7 @@ def get_default_config() -> dict[str, Any]:
         },
         "continuation": {
             "default_lookback_chapters": 5,
+            "default_target_words": 2000,
             "default_temperature": 0.8,
             "auto_save": True,
             "show_token_count": True,

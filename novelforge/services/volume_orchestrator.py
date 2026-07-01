@@ -139,6 +139,7 @@ class VolumeOrchestrator(QThread):
         chapter_id: str = "",
         world_ontology: WorldOntology | None = None,
         protagonist_profile: ProtagonistProfile | None = None,
+        custom_audit_rules: list[Any] | None = None,
         parent=None,
     ) -> None:
         """初始化卷级编排器。
@@ -165,6 +166,7 @@ class VolumeOrchestrator(QThread):
             chapter_id: 章节 ID
             world_ontology: 底层世界观元描述（从 Project 读取，全文固化）
             protagonist_profile: 主角形象档案（从当前章节缓存读取，反映至当前章节状态）
+            custom_audit_rules: 自定义设定/审计必查项列表（从 Project 读取，注入各阶段提示词作为硬约束）
             parent: 父 QObject
         """
         super().__init__(parent)
@@ -200,6 +202,8 @@ class VolumeOrchestrator(QThread):
         self.world_ontology = world_ontology
         # 主角形象档案（跟随章节缓存，反映至当前章节状态，注入各阶段提示词）
         self.protagonist_profile = protagonist_profile
+        # 自定义设定/审计必查项（项目级全局，注入各阶段提示词作为硬约束，一票否决）
+        self.custom_audit_rules = custom_audit_rules
 
         # 线程安全停止
         self._stop_event = threading.Event()
@@ -217,10 +221,6 @@ class VolumeOrchestrator(QThread):
         self._writing_messages: list[dict[str, Any]] = []
         self._writing_model: str = ""
 
-        # 章节文本缓存（深度分析与卷大纲阶段共用，避免重复拼接）
-        self._chapters_text: str = ""
-        # 续写点前文文本缓存（深度分析实质性剧情分析/卷大纲使用）
-        self._lookback_chapters_text: str = ""
         # 用户输入的审计重点提示（before_audit 检查点设置，多轮审计共享）
         self._audit_focus: str = ""
 
@@ -348,11 +348,6 @@ class VolumeOrchestrator(QThread):
             self._client = LLMClient(self.base_url, self.api_key)
 
         artifacts = VolumeArtifacts()
-
-        # 预构建章节文本缓存（深度分析与卷大纲阶段共用）
-        self._chapters_text = self._build_chapters_text()
-        # 续写点前文文本缓存（深度分析实质性剧情分析/卷大纲使用）
-        self._lookback_chapters_text = self._build_lookback_chapters_text()
 
         try:
             # ===== 阶段 1：前文深度分析 =====
@@ -736,14 +731,14 @@ class VolumeOrchestrator(QThread):
     async def _run_deep_analysis(self) -> DeepAnalysis | None:
         """阶段①：前文深度分析，产出 DeepAnalysis。
 
-        前文章节文本全量注入（不裁剪，用户有 1M 上下文）。
+        基于插入点前 10 章正文（含当前章 + 本卷已生成章节，动态滑动），不分析全文。
         max_tokens 按深度调整：light=8000 / standard=20000 / thorough=50000 /
         exhaustive=不设上限（200000 近似）。
         失败/解析失败重试一次（温度归零），再失败返回 None（降级，不阻塞）。
 
         支持按 token 切分与增量更新：
-        - ``analysis_chunk_tokens`` 为 0 时不切分，全量发送一次调用
-        - ``analysis_chunk_tokens`` > 0 时按章节边界累积 token 切分，逐块调用，
+        - ``analysis_chunk_tokens`` 为 0 时不切分，单次发送插入点前 10 章
+        - ``analysis_chunk_tokens`` > 0 时按章节边界累积 token 切分前 10 章，逐块调用，
           每块携带已有分析内容（增量补充），最终合并为完整 DeepAnalysis
         """
         template = self._load_volume_template("deep_analysis")
@@ -752,13 +747,12 @@ class VolumeOrchestrator(QThread):
         max_tokens = _ANALYSIS_MAX_TOKENS.get(depth, 8000)
         chunk_tokens = self.config.analysis_chunk_tokens
 
-        # 切分章节：基于 lookback chapters（插入点之前），用户要求只分析插入点之前
-        # （lookback chapters = chapters[0..current_chapter_index]，含当前章）
-        lookback_chapters = (
-            self.chapters[:self._current_chapter_index + 1]
-            if self._current_chapter_index >= 0
-            else self.chapters
-        )
+        # 只分析插入点前 10 章（与不切分/汇总分支一致，基于有效章节序列）
+        effective_chapters = self._get_effective_chapters()
+        if len(effective_chapters) > 10:
+            lookback_chapters = effective_chapters[-10:]
+        else:
+            lookback_chapters = effective_chapters
         chapter_chunks = self._split_chapters_by_tokens(
             lookback_chapters, chunk_tokens
         )
@@ -838,6 +832,7 @@ class VolumeOrchestrator(QThread):
             "{{writing_style}}": self._get_profile_field("writing_style"),
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{chapters_text}}": chapters_text,
             "{{analysis_depth}}": depth,
             "{{max_analysis_entries}}": str(max_entries),
@@ -914,6 +909,7 @@ class VolumeOrchestrator(QThread):
             "{{writing_style}}": self._get_profile_field("writing_style"),
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{deep_analysis}}": deep_analysis_text,
             "{{context_entries}}": self._build_context_entries_text(),
             "{{user_input}}": self.user_input or "",
@@ -1086,6 +1082,7 @@ class VolumeOrchestrator(QThread):
         macros = {
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{deep_analysis}}": deep_analysis_text,
             "{{user_directive_analysis}}": (
                 json.dumps(
@@ -1192,6 +1189,7 @@ class VolumeOrchestrator(QThread):
         macros = {
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{volume_outline}}": outline_text,
             "{{audit_dimensions}}": dimensions,
             "{{previous_chapters_text}}": previous_chapters_text,
@@ -1300,6 +1298,7 @@ class VolumeOrchestrator(QThread):
             "{{pacing_speed}}": self.config.pacing_speed,
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{custom_audit_rules}}": self._format_custom_audit_rules(),
         }
         system_prompt = self._apply_macros(template, macros)
         messages = [{"role": "system", "content": system_prompt}]
@@ -1380,6 +1379,7 @@ class VolumeOrchestrator(QThread):
             plan_text = ""
         macros = {
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{world_ontology}}": self._format_world_ontology(),
             "{{volume_outline}}": outline_text,
             "{{chapter_plan}}": plan_text,
@@ -1654,6 +1654,7 @@ class VolumeOrchestrator(QThread):
         macros = {
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{original_content}}": original_content,
             "{{revision_guidance}}": guidance_text,
             "{{critique}}": critique_text,
@@ -1764,6 +1765,7 @@ class VolumeOrchestrator(QThread):
         macros = {
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{snapshot}}": snapshot_text,
             "{{outline}}": outline_text,
             "{{written_text}}": written_text,
@@ -1833,6 +1835,7 @@ class VolumeOrchestrator(QThread):
             outline_text = "（无大纲）"
         macros = {
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{world_ontology}}": self._format_world_ontology(),
             "{{written_text}}": written_text,
             "{{critique}}": critique_text,
@@ -2064,6 +2067,31 @@ class VolumeOrchestrator(QThread):
         except Exception as e:
             logger.warning("ProtagonistProfile 序列化失败: %s", e)
             return "（主角形象档案序列化失败，请基于已有前文自行推断主角性格）"
+
+    def _format_custom_audit_rules(self) -> str:
+        """格式化自定义设定列表为提示词注入文本。
+
+        Returns:
+            可读文本（编号 + severity + title + requirement + audit_criteria）；
+            无自定义设定时返回占位提示文字。
+        """
+        rules = self.custom_audit_rules
+        if not rules:
+            return "（无自定义设定）"
+        parts: list[str] = []
+        for i, rule in enumerate(rules, 1):
+            if hasattr(rule, "model_dump"):
+                r = rule.model_dump(mode="json")
+            elif isinstance(rule, dict):
+                r = rule
+            else:
+                continue
+            parts.append(
+                f"{i}. [{r.get('severity', 'critical').upper()}] {r.get('title', '未命名')}\n"
+                f"   要求：{r.get('requirement', '')}\n"
+                f"   审计向：{r.get('audit_criteria', '')}"
+            )
+        return "\n".join(parts) if parts else "（无自定义设定）"
 
     def _has_world_info_before_marker(self) -> bool:
         """检测 preset 是否有 worldInfoBefore marker。"""

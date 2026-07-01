@@ -739,8 +739,8 @@ class TestE2EContextExtraction:
         assert result1.from_cache is False
         assert result2.status == "completed"
         assert result2.from_cache is True
-        # LLM 应只被调用一次（第二次命中缓存）+ 2 次主角形象提取（解析失败重试 1 次，最终失败被捕获）
-        assert mock_client.chat_completion.call_count == 3
+        # LLM 应只被调用一次（第二次命中缓存）（主角形象已解耦为独立链路）
+        assert mock_client.chat_completion.call_count == 1
 
 
 class TestE2EExport:

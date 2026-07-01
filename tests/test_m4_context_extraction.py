@@ -836,8 +836,8 @@ class TestContextExtractor:
             )
         )
         assert result.status == "completed"
-        # 1 次 8 维度提取 + 2 次主角形象提取（解析失败重试 1 次，最终失败被捕获不阻塞结果）
-        assert mock_client.chat_completion.call_count == 3
+        # 1 次 8 维度提取（主角形象已解耦为独立链路）
+        assert mock_client.chat_completion.call_count == 1
 
     def test_extract_cache_hit(self) -> None:
         """测试缓存命中。"""
@@ -921,8 +921,8 @@ class TestContextExtractor:
         assert result.from_cache is False
         # 缓存不应被读取
         storage_service.storage.get_cache.assert_not_called()
-        # LLM 应被调用：1 次 8 维度提取 + 2 次主角形象提取（解析失败重试 1 次，最终失败被捕获不阻塞结果）
-        assert mock_client.chat_completion.call_count == 3
+        # LLM 应被调用：1 次 8 维度提取（主角形象已解耦为独立链路）
+        assert mock_client.chat_completion.call_count == 1
 
     def test_extract_llm_failure(self) -> None:
         """测试 LLM 调用失败。"""
@@ -1085,8 +1085,8 @@ class TestContextExtractor:
         assert result.status != "failed"
         assert len(result.entries) == 1
         assert result.entries[0].uid == "char_1"
-        # 8 维度首次失败+第二次成功（2 次）+ 主角形象 1 次成功 = 3 次 LLM 调用
-        assert mock_client.chat_completion.call_count == 3
+        # 8 维度首次失败+第二次成功（2 次）= 2 次 LLM 调用（主角形象已解耦为独立链路）
+        assert mock_client.chat_completion.call_count == 2
 
     def test_extract_batch_retry_exhausted_fails(self) -> None:
         """单批次 2 次均抛 LLMError → status failed，call_count==2。"""
@@ -1264,8 +1264,8 @@ class TestContextExtractor:
         assert result.merged is True
         assert result.batch_count == 3
         assert len(result.entries) == 3
-        # 3 批 8 维度 + 1 次汇总 + 2 次主角形象提取（StopAsyncIteration 重试 1 次，最终失败被捕获不阻塞结果）
-        assert mock_client.chat_completion.call_count == 6
+        # 3 批 8 维度 + 1 次汇总 = 4 次 LLM 调用（主角形象已解耦为独立链路）
+        assert mock_client.chat_completion.call_count == 4
         # 验证第 4 次调用（汇总）的 prompt 含批次标记
         merge_call = mock_client.chat_completion.call_args_list[3]
         merge_prompt = merge_call.kwargs["messages"][0]["content"]
@@ -1310,8 +1310,8 @@ class TestContextExtractor:
         assert result.merged is False
         assert result.batch_count == 1
         assert len(result.entries) == 2
-        # 1 次 8 维度提取 + 2 次主角形象提取（解析失败重试 1 次，最终失败被捕获不阻塞结果）
-        assert mock_client.chat_completion.call_count == 3
+        # 1 次 8 维度提取（主角形象已解耦为独立链路）
+        assert mock_client.chat_completion.call_count == 1
 
     def test_merge_failure_degrades_to_all_entries(self) -> None:
         """测试【信息汇总】失败时降级使用 best-effort uid 替换合并结果。
@@ -1359,8 +1359,8 @@ class TestContextExtractor:
         assert result.batch_count == 3
         # best-effort uid 替换合并：dup_1 被更新（2 次），loc_2 新增 → 2 条
         assert len(result.entries) == 2
-        # 3 批 8 维度 + 1 次汇总失败 + 2 次主角形象提取（StopAsyncIteration 重试 1 次，最终失败被捕获不阻塞结果）
-        assert mock_client.chat_completion.call_count == 6
+        # 3 批 8 维度 + 1 次汇总失败 = 4 次 LLM 调用（主角形象已解耦为独立链路）
+        assert mock_client.chat_completion.call_count == 4
 
     def test_extract_result_merged_field(self) -> None:
         """测试 ExtractResult.merged 字段默认值与赋值。"""

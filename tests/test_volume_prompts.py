@@ -416,6 +416,7 @@ def test_macro_replacement_deep_analysis() -> None:
         "{{protagonist_profile}}": '{"basic_anchors": {}}',
         "{{context_entries}}": "## 人物\n- 主角林晨",
         "{{user_input}}": "请加强主角内心戏",
+        "{{custom_audit_rules}}": "（无自定义设定）",
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -443,6 +444,7 @@ def test_macro_replacement_volume_outline() -> None:
         "{{world_ontology}}": '{"existential_topology": {}}',
         "{{protagonist_profile}}": '{"basic_anchors": {}}',
         "{{user_directive_analysis}}": '{"required_elements": ["宝物"]}',
+        "{{custom_audit_rules}}": "（无自定义设定）",
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -468,6 +470,7 @@ def test_macro_replacement_outline_audit() -> None:
         "{{world_ontology}}": '{"existential_topology": {}}',
         "{{protagonist_profile}}": '{"basic_anchors": {}}',
         "{{user_directive_analysis}}": '{"required_elements": ["宝物"]}',
+        "{{custom_audit_rules}}": "（无自定义设定）",
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -492,6 +495,7 @@ def test_macro_replacement_chapter_outline() -> None:
         "{{context_entries}}": "## 人物\n- 主角林晨",
         "{{world_ontology}}": '{"existential_topology": {}}',
         "{{protagonist_profile}}": '{"basic_anchors": {}}',
+        "{{custom_audit_rules}}": "（无自定义设定）",
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -569,8 +573,9 @@ def test_phase_chapter_rewrite_placeholders() -> None:
     # 含"重写完整章节"强调语
     assert "重写完整章节" in template
     assert "严禁续写或追加" in template
-    # 宏替换无残留
+    # 宏替换无残留（含 custom_audit_rules 占位符）
     macros = {ph: "测试值" for ph in expected_placeholders}
+    macros["{{custom_audit_rules}}"] = "（无自定义设定）"
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
 
@@ -579,7 +584,7 @@ def test_phase_chapter_rewrite_placeholders() -> None:
 
 
 def test_phase_verify_template_14_dimensions() -> None:
-    """phase_verify.txt 含 14 个审计维度定义。"""
+    """phase_verify.txt 含 15 个审计维度定义（含 custom_rules_compliance）。"""
     template = load_text_resource(get_agent_prompt_path("verify"))
     # 11 个原有维度
     original_dims = [
@@ -589,10 +594,12 @@ def test_phase_verify_template_14_dimensions() -> None:
     ]
     # 3 个新维度
     new_dims = ["outline_alignment", "detail_outline_alignment", "chapter_transition"]
-    for dim in original_dims + new_dims:
+    # 第 15 维度：自定义设定遵从性
+    custom_dim = ["custom_rules_compliance"]
+    for dim in original_dims + new_dims + custom_dim:
         assert dim in template, f"phase_verify.txt 缺少维度: {dim}"
-    # 含"十四个维度"
-    assert "十四个维度" in template
+    # 含"十五个维度"
+    assert "十五个维度" in template
 
 
 def test_phase_verify_previous_chapter_text_placeholder() -> None:

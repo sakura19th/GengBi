@@ -359,6 +359,7 @@ class PromptAssembler:
         skip_history: bool = False,
         world_ontology: Any = None,
         protagonist_profile: Any = None,
+        custom_audit_rules: Any = None,
     ) -> AssembleResult:
         """组装提示词 messages。
 
@@ -390,6 +391,7 @@ class PromptAssembler:
             current_chapter, novel_profile, target_words,
             project_id=project_id, chapter_metadata=chapter_metadata,
             world_ontology=world_ontology, protagonist_profile=protagonist_profile,
+            custom_audit_rules=custom_audit_rules,
         )
 
         # M3: 构建模板渲染上下文（局部变量，线程安全；供 _process_content 使用）
@@ -594,6 +596,7 @@ class PromptAssembler:
         chapter_metadata: dict[str, Any] | None = None,
         world_ontology: Any = None,
         protagonist_profile: Any = None,
+        custom_audit_rules: Any = None,
     ) -> MacroContext:
         """构建宏替换上下文。"""
         # 获取章节标题和序号
@@ -651,6 +654,26 @@ class PromptAssembler:
                     )
             except Exception as e:
                 logger.debug("protagonist_profile 序列化失败: %s", e)
+        # 注入 custom_audit_rules 到 extra（供 {{custom_audit_rules}} 宏替换）
+        if custom_audit_rules is not None:
+            try:
+                if isinstance(custom_audit_rules, list):
+                    items = []
+                    for r in custom_audit_rules:
+                        if hasattr(r, "model_dump"):
+                            items.append(r.model_dump(mode="json"))
+                        elif isinstance(r, dict):
+                            items.append(r)
+                    ctx.extra["custom_audit_rules"] = json.dumps(
+                        items, ensure_ascii=False, indent=2,
+                    )
+                elif hasattr(custom_audit_rules, "model_dump"):
+                    ctx.extra["custom_audit_rules"] = json.dumps(
+                        custom_audit_rules.model_dump(mode="json"),
+                        ensure_ascii=False, indent=2,
+                    )
+            except Exception as e:
+                logger.debug("custom_audit_rules 序列化失败: %s", e)
         return ctx
 
     def _stage1_sort(

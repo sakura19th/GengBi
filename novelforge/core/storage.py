@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS projects (
     extract_config TEXT,
     chapter_split_rule TEXT DEFAULT '{}',
     world_ontology TEXT,
-    worldbook_id TEXT DEFAULT ''
+    worldbook_id TEXT DEFAULT '',
+    custom_audit_rules TEXT
 );
 
 -- 章节元数据表（正文存文件系统）
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS chapters (
     metadata TEXT DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    protagonist_profile TEXT,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_chapters_project ON chapters(project_id, "index");
@@ -89,6 +91,7 @@ CREATE TABLE IF NOT EXISTS continuations (
     reasoning_content TEXT,
     agent_artifacts TEXT,
     volume_artifacts TEXT,
+    highlights TEXT,
     FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_continuations_chapter ON continuations(chapter_id);
@@ -367,6 +370,11 @@ class Storage:
                 "ALTER TABLE continuations ADD COLUMN volume_artifacts TEXT"
             )
             logger.info("已为 continuations 表添加 volume_artifacts 列")
+        if "highlights" not in column_names:
+            await self._conn.execute(
+                "ALTER TABLE continuations ADD COLUMN highlights TEXT"
+            )
+            logger.info("已为 continuations 表添加 highlights 列")
         if "parent_id" not in column_names:
             await self._conn.execute(
                 "ALTER TABLE continuations ADD COLUMN parent_id TEXT"
@@ -378,7 +386,7 @@ class Storage:
         )
 
     async def _migrate_projects_columns(self) -> None:
-        """幂等迁移：为 projects 表补充 world_ontology / worldbook_id 列。
+        """幂等迁移：为 projects 表补充 world_ontology / worldbook_id / custom_audit_rules 列。
 
         SQLite 不支持 ADD COLUMN IF NOT EXISTS，需先查 PRAGMA table_info
         检测列是否存在，再决定是否 ALTER TABLE。
@@ -398,6 +406,28 @@ class Storage:
                 "ALTER TABLE projects ADD COLUMN worldbook_id TEXT DEFAULT ''"
             )
             logger.info("已为 projects 表添加 worldbook_id 列")
+        if "custom_audit_rules" not in column_names:
+            await self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN custom_audit_rules TEXT"
+            )
+            logger.info("已为 projects 表添加 custom_audit_rules 列")
+
+    async def _migrate_chapters_columns(self) -> None:
+        """幂等迁移：为旧版 chapters 表补充 protagonist_profile 列。
+
+        SQLite 不支持 ADD COLUMN IF NOT EXISTS，需先查 PRAGMA table_info
+        检测列是否存在，再决定是否 ALTER TABLE。
+        """
+        async with self._conn.execute(
+            "PRAGMA table_info(chapters)"
+        ) as cursor:
+            columns = await cursor.fetchall()
+        column_names = {col[1] for col in columns}
+        if "protagonist_profile" not in column_names:
+            await self._conn.execute(
+                "ALTER TABLE chapters ADD COLUMN protagonist_profile TEXT"
+            )
+            logger.info("已为 chapters 表添加 protagonist_profile 列")
 
     async def close(self) -> None:
         """关闭数据库连接。"""
@@ -439,8 +469,8 @@ class Storage:
             """INSERT INTO projects
                (id, name, created_at, updated_at, source_file, novel_profile,
                 preset_id, regex_script_ids, extract_config, chapter_split_rule,
-                world_ontology, worldbook_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                world_ontology, worldbook_id, custom_audit_rules)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                    name=excluded.name,
                    created_at=excluded.created_at,
@@ -452,7 +482,8 @@ class Storage:
                    extract_config=excluded.extract_config,
                    chapter_split_rule=excluded.chapter_split_rule,
                    world_ontology=excluded.world_ontology,
-                   worldbook_id=excluded.worldbook_id""",
+                   worldbook_id=excluded.worldbook_id,
+                   custom_audit_rules=excluded.custom_audit_rules""",
             (
                 project["id"],
                 project.get("name", ""),
@@ -470,6 +501,9 @@ class Storage:
                 if project.get("world_ontology") is not None
                 else None,
                 project.get("worldbook_id", ""),
+                json.dumps(project.get("custom_audit_rules"), ensure_ascii=False, default=str)
+                if project.get("custom_audit_rules")
+                else None,
             ),
         )
         await self.conn.commit()
@@ -526,6 +560,7 @@ class Storage:
             "chapter_split_rule": json.loads(row[9]) if row[9] else {},
             "world_ontology": json.loads(row[10]) if len(row) > 10 and row[10] else None,
             "worldbook_id": row[11] if len(row) > 11 and row[11] else "",
+            "custom_audit_rules": json.loads(row[12]) if len(row) > 12 and row[12] else [],
         }
 
     # ===== 章节操作 =====
@@ -572,8 +607,8 @@ class Storage:
             await self.conn.execute(
                 """INSERT INTO chapters
                    (id, project_id, "index", title, word_count, metadata,
-                    created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, protagonist_profile)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                        project_id=excluded.project_id,
                        "index"=excluded."index",
@@ -581,7 +616,8 @@ class Storage:
                        word_count=excluded.word_count,
                        metadata=excluded.metadata,
                        created_at=excluded.created_at,
-                       updated_at=excluded.updated_at""",
+                       updated_at=excluded.updated_at,
+                       protagonist_profile=excluded.protagonist_profile""",
                 (
                     chapter_id,
                     project_id,
@@ -591,6 +627,8 @@ class Storage:
                     json.dumps(chapter.get("metadata", {}), ensure_ascii=False),
                     chapter["created_at"],
                     chapter["updated_at"],
+                    json.dumps(chapter.get("protagonist_profile"), ensure_ascii=False)
+                    if chapter.get("protagonist_profile") else None,
                 ),
             )
             await self.conn.commit()
@@ -617,6 +655,23 @@ class Storage:
         await self.conn.execute(
             'UPDATE chapters SET "index" = ?, updated_at = ? WHERE id = ?',
             (new_index, datetime.now().isoformat(), chapter_id),
+        )
+        await self.conn.commit()
+
+    async def update_chapter_protagonist(
+        self, chapter_id: str, protagonist_profile_json: str | None
+    ) -> None:
+        """只更新章节的 protagonist_profile 列，不触碰正文文件。
+
+        用于主角形象提取完成落盘，避免 save_chapter 用空 content 覆盖正文。
+
+        Args:
+            chapter_id: 章节 ID
+            protagonist_profile_json: ProtagonistProfile 的 JSON 字符串，None 清空
+        """
+        await self.conn.execute(
+            "UPDATE chapters SET protagonist_profile = ? WHERE id = ?",
+            (protagonist_profile_json, chapter_id),
         )
         await self.conn.commit()
 
@@ -678,7 +733,7 @@ class Storage:
             "parent_id, status, created_by, parameters_snapshot, preset_id, "
             "preset_snapshot, regex_script_ids_snapshot, "
             "extracted_context_snapshot, prompt_snapshot, reasoning_content, "
-            "agent_artifacts, volume_artifacts "
+            "agent_artifacts, volume_artifacts, highlights "
             f"FROM continuations WHERE chapter_id IN ({placeholders}) "
             "ORDER BY created_at ASC",
             tuple(chapter_ids),
@@ -777,8 +832,8 @@ class Storage:
                 await self.conn.execute(
                     """INSERT INTO chapters
                        (id, project_id, "index", title, word_count, metadata,
-                        created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, protagonist_profile)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(id) DO UPDATE SET
                            project_id=excluded.project_id,
                            "index"=excluded."index",
@@ -786,7 +841,8 @@ class Storage:
                            word_count=excluded.word_count,
                            metadata=excluded.metadata,
                            created_at=excluded.created_at,
-                           updated_at=excluded.updated_at""",
+                           updated_at=excluded.updated_at,
+                           protagonist_profile=excluded.protagonist_profile""",
                     (
                         chapter_id,
                         project_id,
@@ -796,6 +852,7 @@ class Storage:
                         "{}",
                         now,
                         now,
+                        None,
                     ),
                 )
                 rebuilt += 1
@@ -847,6 +904,7 @@ class Storage:
             "metadata": json.loads(row[5]) if row[5] else {},
             "created_at": row[6],
             "updated_at": row[7],
+            "protagonist_profile": json.loads(row[8]) if len(row) > 8 and row[8] else None,
         }
 
     # ===== 续写版本操作 =====
@@ -863,8 +921,8 @@ class Storage:
                 parent_id, status, created_by, parameters_snapshot, preset_id,
                 preset_snapshot, regex_script_ids_snapshot,
                 extracted_context_snapshot, prompt_snapshot, reasoning_content,
-                agent_artifacts, volume_artifacts)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                agent_artifacts, volume_artifacts, highlights)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 continuation["id"],
                 continuation["chapter_id"],
@@ -892,6 +950,9 @@ class Storage:
                 json.dumps(continuation.get("volume_artifacts"), ensure_ascii=False)
                 if continuation.get("volume_artifacts")
                 else None,
+                json.dumps(continuation.get("highlights", []), ensure_ascii=False)
+                if continuation.get("highlights")
+                else None,
             ),
         )
         await self.conn.commit()
@@ -903,7 +964,7 @@ class Storage:
             "parent_id, status, created_by, parameters_snapshot, preset_id, "
             "preset_snapshot, regex_script_ids_snapshot, "
             "extracted_context_snapshot, prompt_snapshot, reasoning_content, "
-            "agent_artifacts, volume_artifacts "
+            "agent_artifacts, volume_artifacts, highlights "
             "FROM continuations WHERE chapter_id = ? ORDER BY created_at ASC",
             (chapter_id,),
         ) as cursor:
@@ -939,6 +1000,7 @@ class Storage:
             "reasoning_content": row[15] if len(row) > 15 else None,
             "agent_artifacts": json.loads(row[16]) if len(row) > 16 and row[16] else None,
             "volume_artifacts": json.loads(row[17]) if len(row) > 17 and row[17] else None,
+            "highlights": json.loads(row[18]) if len(row) > 18 and row[18] else [],
         }
 
     # ===== 历史日志操作 =====

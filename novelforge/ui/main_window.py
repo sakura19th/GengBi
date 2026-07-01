@@ -86,6 +86,8 @@ from novelforge.ui.settings_dialog import SettingsDialog
 from novelforge.ui.template_editor import TemplateEditor
 from novelforge.ui.worldbook_manager import WorldBookManager
 from novelforge.ui.audit_dialog import AuditDialog
+from novelforge.services.custom_audit_rule_service import CustomAuditRuleService
+from novelforge.ui.custom_rule_dialog import CustomRuleInputDialog, CustomRulesViewDialog
 from novelforge.utils.paths import get_agent_prompt_path, get_theme_path, load_text_resource
 
 logger = logging.getLogger(__name__)
@@ -184,6 +186,8 @@ class MainWindow(QMainWindow):
     _protagonist_chunk_received = Signal(str)  # 主角形象提取 chunk（跨线程）
     _protagonist_done = Signal(object, str)    # 主角形象提取完成（跨线程）：profile, status
     _protagonist_batch_done = Signal(int, int) # 主角形象提取批次完成（跨线程）
+    _custom_rule_chunk_received = Signal(str)  # 自定义设定流式 chunk（跨线程）
+    _custom_rule_done = Signal(object, str)    # 自定义设定完成（跨线程）：rule, status
 
     def __init__(self, config_manager: ConfigManager) -> None:
         """初始化主窗口。
@@ -223,6 +227,10 @@ class MainWindow(QMainWindow):
         # 世界观底层提取器（全文拆分分析提取 7 维度 WorldOntology）
         self.ontology_extractor = OntologyExtractor(
             self.storage_service, config_manager, token_counter=self.token_counter
+        )
+        # 自定义设定/审计必查项 AI 结构化服务（用户输入 → AI 结构化为 CustomAuditRule）
+        self.custom_rule_service = CustomAuditRuleService(
+            self.storage_service, config_manager
         )
         # M4: 当前续写使用的上下文条目（提取后存入，供 worker 快照使用）
         self._current_context_entries: list = []
@@ -307,6 +315,8 @@ class MainWindow(QMainWindow):
         self._protagonist_chunk_received.connect(self._on_protagonist_chunk_received)
         self._protagonist_done.connect(self._on_protagonist_done)
         self._protagonist_batch_done.connect(self._on_protagonist_batch_done)
+        self._custom_rule_chunk_received.connect(self._on_custom_rule_chunk_received)
+        self._custom_rule_done.connect(self._on_custom_rule_done)
 
         # 创建菜单栏
         self._setup_menu_bar()
@@ -455,6 +465,8 @@ class MainWindow(QMainWindow):
         context_panel.view_ontology_requested.connect(self._on_view_ontology_requested)
         context_panel.extract_protagonist_requested.connect(self._on_extract_protagonist_requested)
         context_panel.view_protagonist_requested.connect(self._on_view_protagonist_requested)
+        context_panel.add_custom_rule_requested.connect(self._on_add_custom_rule_requested)
+        context_panel.view_custom_rules_requested.connect(self._on_view_custom_rules_requested)
         context_panel.view_extract_prompt_requested.connect(
             self._on_view_extract_prompt
         )
@@ -465,6 +477,7 @@ class MainWindow(QMainWindow):
         # swipe 元信息与限速提示路由到状态栏（替代已删除的 _swipe_info_label）
         self.continuation_panel.swipe_info_requested.connect(self._set_status_message)
         self.continuation_panel.toast_requested.connect(self._on_toast_requested)
+        self.continuation_panel.highlights_changed.connect(self._on_highlights_changed)
 
     def _setup_menu_bar(self) -> None:
         """创建菜单栏。"""
@@ -977,6 +990,7 @@ class MainWindow(QMainWindow):
             cont = self.config_manager.get_continuation_settings()
             self.continuation_panel.set_parameters({
                 "temperature": cont.get("default_temperature", 0.8),
+                "target_words": cont.get("default_target_words", 2000),
                 "lookback_chapters": cont.get("default_lookback_chapters", 5),
             })
         except Exception as e:
@@ -1200,7 +1214,36 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # 1. 内存缓存优先
+        # 1. 独立恢复主角形象档案（优先持久化字段，兜底 cache 表）
+        if chapter.id not in self._protagonist_profile_by_chapter:
+            if chapter.protagonist_profile is not None:
+                self._protagonist_profile_by_chapter[chapter.id] = chapter.protagonist_profile
+                self._protagonist_profile_by_chapter.move_to_end(chapter.id)
+                if len(self._protagonist_profile_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+                    self._protagonist_profile_by_chapter.popitem(last=False)
+            elif self._current_project_id:
+                try:
+                    from novelforge.services.async_runner import AsyncLoopRunner
+
+                    runner = AsyncLoopRunner.instance()
+                    cached_protagonist_data = runner.run(
+                        self.context_extractor.load_cached_protagonist(
+                            self._current_project_id, chapter.id
+                        ),
+                        timeout=5,
+                    )
+                    if cached_protagonist_data:
+                        profile_dict = cached_protagonist_data.get("protagonist_profile")
+                        if profile_dict:
+                            profile = ProtagonistProfile.model_validate(profile_dict)
+                            self._protagonist_profile_by_chapter[chapter.id] = profile
+                            self._protagonist_profile_by_chapter.move_to_end(chapter.id)
+                            if len(self._protagonist_profile_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+                                self._protagonist_profile_by_chapter.popitem(last=False)
+                except Exception as e:
+                    logger.warning("加载主角形象缓存失败: %s", e)
+
+        # 2. 内存缓存优先
         if chapter.id in self._context_entries_by_chapter:
             entries = self._context_entries_by_chapter[chapter.id]
             # 缓存命中：更新访问顺序（LRU）
@@ -1239,28 +1282,7 @@ class MainWindow(QMainWindow):
                     if len(self._context_entries_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
                         oldest = next(iter(self._context_entries_by_chapter))
                         del self._context_entries_by_chapter[oldest]
-                    # 从独立缓存 key 恢复主角形象档案（与 ctx_extract 解耦）
-                    try:
-                        cached_protagonist_data = runner.run(
-                            self.context_extractor.load_cached_protagonist(
-                                self._current_project_id, chapter.id
-                            ),
-                            timeout=5,
-                        )
-                    except Exception as e:
-                        logger.warning("加载主角形象缓存失败: %s", e)
-                        cached_protagonist_data = None
-                    if cached_protagonist_data:
-                        try:
-                            profile_dict = cached_protagonist_data.get("protagonist_profile")
-                            if profile_dict:
-                                profile = ProtagonistProfile.model_validate(profile_dict)
-                                self._protagonist_profile_by_chapter[chapter.id] = profile
-                                self._protagonist_profile_by_chapter.move_to_end(chapter.id)
-                                if len(self._protagonist_profile_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
-                                    self._protagonist_profile_by_chapter.popitem(last=False)
-                        except Exception as e:
-                            logger.warning("从缓存恢复 protagonist_profile 失败: %s", e)
+                    # protagonist 恢复已移至方法开头的独立步骤（优先持久化字段）
                     self._current_context_entries = entries
                     context_panel.load_entries_for_chapter(entries, meta=meta)
                     return
@@ -1475,6 +1497,7 @@ class MainWindow(QMainWindow):
         try:
             cont = self.config_manager.config.setdefault("continuation", {})
             cont["default_temperature"] = params.get("temperature", 0.8)
+            cont["default_target_words"] = params.get("target_words", 2000)
             cont["default_lookback_chapters"] = params.get("lookback_chapters", 5)
             self.config_manager.save()
         except Exception as e:
@@ -1567,6 +1590,7 @@ class MainWindow(QMainWindow):
                 protagonist_profile=self._protagonist_profile_by_chapter.get(
                     self._current_chapter.id if self._current_chapter else ""
                 ),
+                custom_audit_rules=project.custom_audit_rules if project else None,
             )
         except Exception as e:
             logger.error("提示词组装失败: %s", e, exc_info=True)
@@ -1871,6 +1895,7 @@ class MainWindow(QMainWindow):
             chapter_id=self._current_chapter.id,
             world_ontology=project.world_ontology if project else None,
             protagonist_profile=self._protagonist_profile_by_chapter.get(self._current_chapter.id),
+            custom_audit_rules=project.custom_audit_rules if project else None,
             parent=self,
         )
         self._volume_orchestrator.debug_mode = self._debug_mode
@@ -2990,15 +3015,19 @@ class MainWindow(QMainWindow):
             self._set_status_message(f"主角形象提取失败: {status}")
             QMessageBox.critical(self, "提取失败", f"主角形象提取失败: {status}")
         else:
-            # 归档到内存 LRU（章节级，不写回 Project）
+            # 落盘到 chapters 表 protagonist_profile 列 + 内存 LRU 热缓存
             if chapter_id:
                 self._protagonist_profile_by_chapter[chapter_id] = profile
                 self._protagonist_profile_by_chapter.move_to_end(chapter_id)
                 if len(self._protagonist_profile_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
                     self._protagonist_profile_by_chapter.popitem(last=False)
+                try:
+                    self.storage_service.update_chapter_protagonist(chapter_id, profile)
+                except Exception as e:
+                    logger.warning("主角形象持久化失败 chapter=%s: %s", chapter_id, e)
             if panel_active:
                 context_panel.finish_protagonist_extraction(status)
-            self._set_status_message("主角形象提取完成，已缓存到当前章节")
+            self._set_status_message("主角形象提取完成，已保存到当前章节并持久化")
 
         # 清理状态标记与缓冲（所有分支均清理）
         self._protagonist_extracting = False
@@ -3429,6 +3458,176 @@ class MainWindow(QMainWindow):
             pass
         return "（无主角形象档案）"
 
+    @staticmethod
+    def _format_custom_audit_rules(rules: list) -> str:
+        """格式化自定义设定列表为审计/续写提示词注入文本。"""
+        if not rules:
+            return "（无自定义设定）"
+        parts: list[str] = []
+        for i, rule in enumerate(rules, 1):
+            if hasattr(rule, "model_dump"):
+                r = rule.model_dump(mode="json")
+            elif isinstance(rule, dict):
+                r = rule
+            else:
+                continue
+            parts.append(
+                f"{i}. [{r.get('severity', 'critical').upper()}] {r.get('title', '未命名')}\n"
+                f"   要求：{r.get('requirement', '')}\n"
+                f"   审计向：{r.get('audit_criteria', '')}"
+            )
+        return "\n".join(parts) if parts else "（无自定义设定）"
+
+    def _on_add_custom_rule_requested(self) -> None:
+        """新增自定义设定：弹输入对话框 → AI 流式结构化 → 持久化到 Project。
+
+        参考 ontology 流式模式：start_custom_rule_parsing 启动流式 UI →
+        on_chunk 闭包 emit _custom_rule_chunk_received 信号 →
+        on_done 闭包仅 emit _custom_rule_done 信号（不直接调 GUI，避免跨线程违规）→
+        槽方法 _on_custom_rule_done 在 UI 线程执行 finish/fail + QMessageBox。
+        """
+        if not self._current_project_id:
+            QMessageBox.warning(self, "提示", "请先选择项目")
+            return
+        try:
+            project = self.storage_service.load_project(self._current_project_id)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"加载项目失败: {e}")
+            return
+        if project is None:
+            QMessageBox.warning(self, "提示", "项目加载失败")
+            return
+
+        dialog = CustomRuleInputDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        raw_input = dialog.get_input()
+        if not raw_input:
+            return
+
+        # 复用当前章节的上下文条目作为结构化参考
+        context_entries = getattr(self, "_current_context_entries", None)
+
+        # 启动流式 UI（复用 _stream_view，与 ontology/protagonist 互斥）
+        context_panel = self.continuation_panel.context_preview_panel
+        context_panel.start_custom_rule_parsing()
+        self._set_status_message("正在结构化自定义设定（流式）...")
+
+        from novelforge.services.async_runner import AsyncLoopRunner
+
+        runner = AsyncLoopRunner.instance()
+        loop = runner._loop
+
+        def on_chunk(text: str) -> None:
+            # 跨线程安全：仅 emit 信号，槽方法在 UI 线程更新 _stream_view
+            self._custom_rule_chunk_received.emit(text)
+
+        future = asyncio.run_coroutine_threadsafe(
+            self.custom_rule_service.parse_rule_streaming(
+                project=project,
+                raw_input=raw_input,
+                context_entries=context_entries,
+                on_chunk=on_chunk,
+            ),
+            loop,
+        )
+
+        def on_done(fut) -> None:
+            # 跨线程安全：仅 emit 信号，槽方法在 UI 线程执行 QMessageBox
+            try:
+                rule, status = fut.result()
+                self._custom_rule_done.emit(rule, status)
+            except Exception as e:
+                logger.error("自定义设定结构化异常: %s", e, exc_info=True)
+                self._custom_rule_done.emit(None, f"failed: {e}")
+
+        future.add_done_callback(on_done)
+
+    @Slot(str)
+    def _on_custom_rule_chunk_received(self, text: str) -> None:
+        """自定义设定流式 chunk 到达（UI 线程）：追加到 stream_view。"""
+        self.continuation_panel.context_preview_panel.update_custom_rule_progress(text)
+
+    @Slot(object, str)
+    def _on_custom_rule_done(self, rule: object, status: str) -> None:
+        """自定义设定结构化完成（UI 线程）：finish/fail UI + QMessageBox 提示。"""
+        context_panel = self.continuation_panel.context_preview_panel
+        if rule is not None:
+            context_panel.finish_custom_rule_parsing(status)
+            title = getattr(rule, "title", "")
+            self._set_status_message(f"已新增自定义设定：{title}")
+            QMessageBox.information(
+                self, "成功", f"已新增自定义设定：\n{title}\n\n{status}"
+            )
+        else:
+            context_panel.fail_custom_rule_parsing(status)
+            self._set_status_message("自定义设定新增失败")
+            QMessageBox.warning(self, "失败", f"新增自定义设定失败：\n{status}")
+
+    def _on_view_custom_rules_requested(self) -> None:
+        """查看已新增的自定义设定列表，支持删除。"""
+        if not self._current_project_id:
+            QMessageBox.warning(self, "提示", "请先选择项目")
+            return
+        try:
+            project = self.storage_service.load_project(self._current_project_id)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"加载项目失败: {e}")
+            return
+        if project is None:
+            QMessageBox.warning(self, "提示", "项目加载失败")
+            return
+
+        rules = project.custom_audit_rules or []
+        if not rules:
+            QMessageBox.information(self, "提示", "尚未新增自定义设定")
+            return
+
+        dialog = CustomRulesViewDialog(
+            rules, on_delete=self._delete_custom_rule, parent=self
+        )
+        dialog.exec()
+
+    def _delete_custom_rule(self, rule_id: str) -> None:
+        """删除指定 ID 的自定义设定并持久化。"""
+        if not self._current_project_id or not rule_id:
+            return
+        try:
+            project = self.storage_service.load_project(self._current_project_id)
+        except Exception as e:
+            logger.error("删除自定义设定时加载项目失败: %s", e, exc_info=True)
+            return
+        if project is None:
+            return
+
+        original_count = len(project.custom_audit_rules or [])
+        project.custom_audit_rules = [
+            r for r in (project.custom_audit_rules or [])
+            if (r.id if hasattr(r, "id") else r.get("id", "")) != rule_id
+        ]
+        if len(project.custom_audit_rules) == original_count:
+            return  # 无变化
+
+        try:
+            self.storage_service.save_project(project)
+            self._set_status_message("已删除自定义设定")
+        except Exception as e:
+            logger.error("删除自定义设定持久化失败: %s", e, exc_info=True)
+            QMessageBox.warning(self, "失败", f"删除自定义设定持久化失败: {e}")
+
+    def _on_highlights_changed(self, highlights: list) -> None:
+        """输出栏高亮变化时持久化到当前 swipe。"""
+        if not self._current_chapter:
+            return
+        swipe = self.continuation_panel.current_swipe
+        if swipe is None:
+            return
+        try:
+            swipe.highlights = list(highlights)
+            self.storage_service.save_continuation(swipe, self._current_chapter.id)
+        except Exception as e:
+            logger.error("高亮持久化失败: %s", e, exc_info=True)
+
     def _on_audit_continuation(self) -> None:
         """审计当前续写：流式生成审计报告。
 
@@ -3481,15 +3680,22 @@ class MainWindow(QMainWindow):
         world_ontology_str = self._format_world_ontology(
             project.world_ontology if project else None
         )
-        protagonist_profile_str = self._format_protagonist_profile(
-            self._protagonist_profile_by_chapter.get(self._current_chapter.id)
+        protagonist_profile = (
+            self._current_chapter.protagonist_profile
+            if self._current_chapter and self._current_chapter.protagonist_profile
+            else self._protagonist_profile_by_chapter.get(self._current_chapter.id)
         )
+        protagonist_profile_str = self._format_protagonist_profile(protagonist_profile)
 
         # 简单字符串替换（与 VolumeOrchestrator 一致，不用 MacroEngine）
         rendered = template.replace("{{user_input}}", user_input)
         rendered = rendered.replace("{{written_text}}", swipe.content)
         rendered = rendered.replace("{{world_ontology}}", world_ontology_str)
         rendered = rendered.replace("{{protagonist_profile}}", protagonist_profile_str)
+        custom_rules_str = self._format_custom_audit_rules(
+            project.custom_audit_rules if project else None
+        )
+        rendered = rendered.replace("{{custom_audit_rules}}", custom_rules_str)
 
         messages = [{"role": "system", "content": rendered}]
 

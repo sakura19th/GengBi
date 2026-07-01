@@ -1814,7 +1814,7 @@ def test_style_audit_dimension() -> None:
     from novelforge.utils.paths import get_volume_prompt_path, load_text_resource
 
     assert "style" in DEFAULT_AUDIT_DIMENSIONS
-    assert len(DEFAULT_AUDIT_DIMENSIONS) == 11
+    assert len(DEFAULT_AUDIT_DIMENSIONS) == 12
 
     audit_template = load_text_resource(get_volume_prompt_path("outline_audit"))
     assert "style" in audit_template

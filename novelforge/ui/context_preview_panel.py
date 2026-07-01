@@ -278,6 +278,8 @@ class ContextPreviewPanel(QWidget):
     view_ontology_requested = Signal()
     extract_protagonist_requested = Signal()
     view_protagonist_requested = Signal()
+    add_custom_rule_requested = Signal()
+    view_custom_rules_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """初始化预览面板。"""
@@ -399,6 +401,22 @@ class ContextPreviewPanel(QWidget):
             self._on_view_protagonist_clicked
         )
         extract_row.addWidget(self._view_protagonist_btn)
+
+        self._add_custom_rule_btn = QPushButton("新增自定义设定")
+        self._add_custom_rule_btn.setObjectName("primaryBtn")
+        self._add_custom_rule_btn.setToolTip(
+            "输入自定义设定，AI 结合世界观底层结构化为审计必查项（一票否决）"
+        )
+        self._add_custom_rule_btn.clicked.connect(self._on_add_custom_rule_clicked)
+        extract_row.addWidget(self._add_custom_rule_btn)
+
+        self._view_custom_rules_btn = QPushButton("查看自定义设定")
+        self._view_custom_rules_btn.setObjectName("secondaryBtn")
+        self._view_custom_rules_btn.setToolTip(
+            "查看已新增的自定义设定/审计必查项列表，可删除"
+        )
+        self._view_custom_rules_btn.clicked.connect(self._on_view_custom_rules_clicked)
+        extract_row.addWidget(self._view_custom_rules_btn)
 
         extract_row.addWidget(QLabel("前文:"))
 
@@ -840,6 +858,14 @@ class ContextPreviewPanel(QWidget):
         """查看主角形象按钮点击，发射信号给 MainWindow。"""
         self.view_protagonist_requested.emit()
 
+    def _on_add_custom_rule_clicked(self) -> None:
+        """新增自定义设定按钮点击，发射信号给 MainWindow。"""
+        self.add_custom_rule_requested.emit()
+
+    def _on_view_custom_rules_clicked(self) -> None:
+        """查看自定义设定按钮点击，发射信号给 MainWindow。"""
+        self.view_custom_rules_requested.emit()
+
     def _on_view_prompt_clicked(self) -> None:
         """查看提示词按钮点击。"""
         self.view_extract_prompt_requested.emit()
@@ -931,6 +957,8 @@ class ContextPreviewPanel(QWidget):
         self._extract_btn.setEnabled(False)
         self._extract_ontology_btn.setEnabled(False)
         self._extract_protagonist_btn.setEnabled(False)
+        self._add_custom_rule_btn.setEnabled(False)
+        self._view_custom_rules_btn.setEnabled(False)
         self._set_label_state(self._status_label, "世界观提取中", "textInfo")
         self._loading_timer.start()
         # 显示流式输出查看区并清空内容
@@ -991,6 +1019,8 @@ class ContextPreviewPanel(QWidget):
         self._extract_btn.setEnabled(True)
         self._extract_ontology_btn.setEnabled(True)
         self._extract_protagonist_btn.setEnabled(True)
+        self._add_custom_rule_btn.setEnabled(True)
+        self._view_custom_rules_btn.setEnabled(True)
         self._set_label_state(self._status_label, "世界观提取完成", "textSuccess")
         self._stream_group.setTitle("世界观流式输出（接收完成）")
 
@@ -1009,6 +1039,8 @@ class ContextPreviewPanel(QWidget):
         self._extract_btn.setEnabled(True)
         self._extract_ontology_btn.setEnabled(True)
         self._extract_protagonist_btn.setEnabled(True)
+        self._add_custom_rule_btn.setEnabled(True)
+        self._view_custom_rules_btn.setEnabled(True)
         self._set_label_state(self._status_label, "世界观提取失败", "textDanger")
         self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
         self._stream_group.setTitle("世界观流式输出（已中断）")
@@ -1029,6 +1061,8 @@ class ContextPreviewPanel(QWidget):
         self._extract_btn.setEnabled(False)
         self._extract_ontology_btn.setEnabled(False)
         self._extract_protagonist_btn.setEnabled(False)
+        self._add_custom_rule_btn.setEnabled(False)
+        self._view_custom_rules_btn.setEnabled(False)
         self._set_label_state(self._status_label, "主角形象提取中", "textInfo")
         self._loading_timer.start()
         # 显示流式输出查看区并清空内容
@@ -1089,6 +1123,8 @@ class ContextPreviewPanel(QWidget):
         self._extract_btn.setEnabled(True)
         self._extract_ontology_btn.setEnabled(True)
         self._extract_protagonist_btn.setEnabled(True)
+        self._add_custom_rule_btn.setEnabled(True)
+        self._view_custom_rules_btn.setEnabled(True)
         self._set_label_state(self._status_label, "主角形象提取完成", "textSuccess")
         self._stream_group.setTitle("主角形象流式输出（接收完成）")
 
@@ -1107,9 +1143,102 @@ class ContextPreviewPanel(QWidget):
         self._extract_btn.setEnabled(True)
         self._extract_ontology_btn.setEnabled(True)
         self._extract_protagonist_btn.setEnabled(True)
+        self._add_custom_rule_btn.setEnabled(True)
+        self._view_custom_rules_btn.setEnabled(True)
         self._set_label_state(self._status_label, "主角形象提取失败", "textDanger")
         self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
         self._stream_group.setTitle("主角形象流式输出（已中断）")
+
+    # ===== 自定义设定结构化流式接口（复用 _stream_view，镜像 ontology）=====
+
+    def start_custom_rule_parsing(self) -> None:
+        """开始自定义设定结构化：复用 stream_view 显示流式输出，禁用按钮。"""
+        self._is_extracting = True
+        self._loading_frame_index = 0
+        self._loading_label.setText(LOADING_FRAMES[0])
+        self._loading_label.setVisible(True)
+        self._loading_text.setText("自定义设定结构化中...")
+        self._loading_text.setVisible(True)
+        self._cancel_btn.setEnabled(False)
+        self._add_btn.setEnabled(False)
+        self._clear_btn.setEnabled(False)
+        self._extract_btn.setEnabled(False)
+        self._extract_ontology_btn.setEnabled(False)
+        self._extract_protagonist_btn.setEnabled(False)
+        self._add_custom_rule_btn.setEnabled(False)
+        self._view_custom_rules_btn.setEnabled(False)
+        self._set_label_state(self._status_label, "自定义设定结构化中", "textInfo")
+        self._loading_timer.start()
+        # 显示流式输出查看区并清空内容
+        self._stream_view.clear()
+        self._stream_view.setPlaceholderText("等待自定义设定流式输出...")
+        self._stream_group.setVisible(True)
+        self._stream_group.setChecked(True)
+        self._stream_group.setTitle("自定义设定流式输出（实时接收中...）")
+
+    def update_custom_rule_progress(self, text: str) -> None:
+        """追加自定义设定结构化 chunk 到 stream_view。
+
+        Args:
+            text: 新接收的 chunk 文本
+        """
+        if not self._is_extracting:
+            return
+        self._stream_view.insertPlainText(text)
+        cursor = self._stream_view.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self._stream_view.setTextCursor(cursor)
+        # 累积字符数显示进度
+        current = self._loading_text.text()
+        if "自定义设定结构化中" in current and "已接收" in current:
+            import re
+            m = re.search(r"(\d+)", current)
+            count = int(m.group(1)) if m else 0
+            count += len(text)
+            self._loading_text.setText(f"自定义设定结构化中... 已接收 {count} 字符")
+        else:
+            self._loading_text.setText(f"自定义设定结构化中... 已接收 {len(text)} 字符")
+
+    def finish_custom_rule_parsing(self, status: str) -> None:
+        """自定义设定结构化完成：停止 loading，更新标题。
+
+        Args:
+            status: 完成状态消息
+        """
+        self._is_extracting = False
+        self._loading_timer.stop()
+        self._loading_label.setVisible(False)
+        self._loading_text.setVisible(False)
+        self._add_btn.setEnabled(True)
+        self._clear_btn.setEnabled(True)
+        self._extract_btn.setEnabled(True)
+        self._extract_ontology_btn.setEnabled(True)
+        self._extract_protagonist_btn.setEnabled(True)
+        self._add_custom_rule_btn.setEnabled(True)
+        self._view_custom_rules_btn.setEnabled(True)
+        self._set_label_state(self._status_label, "自定义设定结构化完成", "textSuccess")
+        self._stream_group.setTitle("自定义设定流式输出（接收完成）")
+
+    def fail_custom_rule_parsing(self, error: str) -> None:
+        """自定义设定结构化失败：停止 loading，显示错误。
+
+        Args:
+            error: 错误信息
+        """
+        self._is_extracting = False
+        self._loading_timer.stop()
+        self._loading_label.setVisible(False)
+        self._loading_text.setVisible(False)
+        self._add_btn.setEnabled(True)
+        self._clear_btn.setEnabled(True)
+        self._extract_btn.setEnabled(True)
+        self._extract_ontology_btn.setEnabled(True)
+        self._extract_protagonist_btn.setEnabled(True)
+        self._add_custom_rule_btn.setEnabled(True)
+        self._view_custom_rules_btn.setEnabled(True)
+        self._set_label_state(self._status_label, "自定义设定结构化失败", "textDanger")
+        self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
+        self._stream_group.setTitle("自定义设定流式输出（已中断）")
 
     def restore_extraction_state(
         self, stream_text: str, is_ontology: bool = False, is_protagonist: bool = False

@@ -29,6 +29,7 @@ import logging
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -37,6 +38,8 @@ from PySide6.QtWidgets import (
     QFrame,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
@@ -60,6 +63,14 @@ UI_THROTTLE_MS = 50
 
 # 光标闪烁间隔（毫秒）
 CURSOR_BLINK_MS = 500
+
+# 高亮颜色 4 色（黄/绿/蓝/红），背景半透明
+_HIGHLIGHT_COLORS: dict[str, str] = {
+    "黄": "#FFFACD",
+    "绿": "#C8FFB4",
+    "蓝": "#B4DCFF",
+    "红": "#FFB4B4",
+}
 
 
 class ContinuationPanel(QWidget):
@@ -100,6 +111,8 @@ class ContinuationPanel(QWidget):
     swipe_info_requested = Signal(str)
     # 请求 MainWindow 在状态栏显示临时提示（限速等，3 秒后由 MainWindow 还原）
     toast_requested = Signal(str)
+    # 高亮变化通知 MainWindow 持久化 [{start,end,color,note}]
+    highlights_changed = Signal(list)
 
     def __init__(self, parent=None) -> None:
         """初始化续写控制面板。"""
@@ -169,6 +182,14 @@ class ContinuationPanel(QWidget):
         self._temp_spin.setValue(0.8)
         config_form.addRow("温度:", self._temp_spin)
 
+        # 目标字数（单章续写目标字数，注入 {{target_words}} 宏）
+        self._target_words_spin = QSpinBox()
+        self._target_words_spin.setRange(500, 20000)
+        self._target_words_spin.setValue(2000)
+        self._target_words_spin.setSingleStep(500)
+        self._target_words_spin.setToolTip("单章目标字数（500-20000）")
+        config_form.addRow("目标字数:", self._target_words_spin)
+
         # 回溯章节数（0=全部前文，上限 99999 实际不限制）
         self._lookback_spin = QSpinBox()
         self._lookback_spin.setRange(0, 99999)
@@ -214,6 +235,10 @@ class ContinuationPanel(QWidget):
         self._output_edit = QPlainTextEdit()
         self._output_edit.setReadOnly(True)
         self._output_edit.setPlaceholderText("续写输出将显示在此处...")
+        # 启用右键菜单高亮（4 色 + 可选备注，持久化到 swipe.highlights）
+        self._output_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._output_edit.customContextMenuRequested.connect(self._on_output_context_menu)
+        self._current_highlights: list[dict] = []  # 当前 swipe 的高亮列表
         self._auto_scroll_check = QCheckBox("自动滚动跟随")
         self._auto_scroll_check.setChecked(True)
 
@@ -267,7 +292,7 @@ class ContinuationPanel(QWidget):
         self._wheel_filter = WheelEventFilter(self)
         for combo in (self._mode_combo, self._preset_combo, self._endpoint_combo, self._model_combo):
             combo.installEventFilter(self._wheel_filter)
-        for spin in (self._temp_spin, self._lookback_spin):
+        for spin in (self._temp_spin, self._target_words_spin, self._lookback_spin):
             spin.installEventFilter(self._wheel_filter)
 
     def _setup_timers(self) -> None:
@@ -446,6 +471,7 @@ class ContinuationPanel(QWidget):
         """获取续写参数。"""
         return {
             "temperature": self._temp_spin.value(),
+            "target_words": self._target_words_spin.value(),
             "lookback_chapters": self._lookback_spin.value(),
             "preset_id": self.get_selected_preset_id(),
             "top_p": 1.0,
@@ -457,6 +483,8 @@ class ContinuationPanel(QWidget):
         """设置续写参数（重写时沿用上次参数）。"""
         if "temperature" in params:
             self._temp_spin.setValue(params["temperature"])
+        if "target_words" in params:
+            self._target_words_spin.setValue(int(params["target_words"]))
         if "lookback_chapters" in params:
             self._lookback_spin.setValue(params["lookback_chapters"])
 
@@ -639,6 +667,9 @@ class ContinuationPanel(QWidget):
         if swipe:
             # 显示 swipe 内容
             self._output_edit.setPlainText(swipe.content)
+            # 加载该 swipe 已持久化的高亮
+            self._current_highlights = list(getattr(swipe, "highlights", []) or [])
+            self.apply_highlights()
             # 显示元数据
             self._set_swipe_info(
                 f"模型: {swipe.model} | "
@@ -650,15 +681,118 @@ class ContinuationPanel(QWidget):
             )
         else:
             self._output_edit.clear()
+            self._current_highlights = []
+            self.apply_highlights()
             self._set_swipe_info("无续写版本", "metaText")
 
         self._update_button_states()
+
+    # ===== 输出栏右键高亮（4 色 + 可选备注，持久化到 swipe.highlights）=====
+
+    def _on_output_context_menu(self, pos) -> None:
+        """输出栏右键菜单：选中文本后可选 4 色高亮 + 备注，或清除高亮。"""
+        cursor = self._output_edit.textCursor()
+        start = cursor.selectionStart()
+        end = cursor.selectionEnd()
+        has_selection = start != end
+
+        menu = QMenu(self._output_edit)
+
+        # 高亮颜色子菜单（仅在选中文本时可用）
+        color_menu = menu.addMenu("高亮选中")
+        if not has_selection:
+            color_menu.setEnabled(False)
+        else:
+            for color_name, color_hex in _HIGHLIGHT_COLORS.items():
+                action = color_menu.addAction(color_name)
+                action.triggered.connect(
+                    lambda checked=False, ch=color_hex: self._prompt_note_and_add(start, end, ch)
+                )
+
+        menu.addSeparator()
+
+        # 清除当前选区高亮
+        clear_sel_action = menu.addAction("清除当前选区高亮")
+        clear_sel_action.setEnabled(has_selection)
+        clear_sel_action.triggered.connect(lambda: self._clear_highlights_in_range(start, end))
+
+        # 清除全部高亮
+        clear_all_action = menu.addAction("清除全部高亮")
+        clear_all_action.setEnabled(bool(self._current_highlights))
+        clear_all_action.triggered.connect(self._clear_all_highlights)
+
+        menu.exec(self._output_edit.viewport().mapToGlobal(pos))
+
+    def _prompt_note_and_add(self, start: int, end: int, color_hex: str) -> None:
+        """弹出备注输入对话框，然后添加高亮。"""
+        note, ok = QInputDialog.getText(
+            self._output_edit, "高亮备注", "请输入备注（可选，留空直接确认）："
+        )
+        if not ok:
+            return
+        self._add_highlight(start, end, color_hex, note.strip())
+
+    def _add_highlight(self, start: int, end: int, color: str, note: str) -> None:
+        """添加一条高亮并持久化。"""
+        self._current_highlights.append({
+            "start": int(start),
+            "end": int(end),
+            "color": color,
+            "note": note,
+        })
+        self.apply_highlights()
+        self.highlights_changed.emit(list(self._current_highlights))
+
+    def _clear_highlights_in_range(self, start: int, end: int) -> None:
+        """清除与给定区间重叠的高亮条目。"""
+        lo, hi = (start, end) if start <= end else (end, start)
+        before_count = len(self._current_highlights)
+        self._current_highlights = [
+            h for h in self._current_highlights
+            if not (int(h.get("start", 0)) < hi and int(h.get("end", 0)) > lo)
+        ]
+        if len(self._current_highlights) != before_count:
+            self.apply_highlights()
+            self.highlights_changed.emit(list(self._current_highlights))
+
+    def _clear_all_highlights(self) -> None:
+        """清除全部高亮。"""
+        if not self._current_highlights:
+            return
+        self._current_highlights = []
+        self.apply_highlights()
+        self.highlights_changed.emit([])
+
+    def apply_highlights(self) -> None:
+        """将 _current_highlights 应用到 _output_edit（setExtraSelections）。"""
+        from PySide6.QtWidgets import QTextEdit
+
+        selections = []
+        for h in self._current_highlights:
+            sel = QTextEdit.ExtraSelection()
+            sel.format.setBackground(QColor(h.get("color", "#FFFACD")))
+            cursor = self._output_edit.textCursor()
+            try:
+                cursor.setPosition(int(h.get("start", 0)))
+                cursor.setPosition(int(h.get("end", 0)), QTextCursor.MoveMode.KeepAnchor)
+            except Exception:
+                continue
+            sel.cursor = cursor
+            selections.append(sel)
+        self._output_edit.setExtraSelections(selections)
+
+    def set_highlights(self, highlights: list[dict]) -> None:
+        """设置当前输出栏高亮（不触发持久化信号，供加载时回填）。"""
+        self._current_highlights = list(highlights or [])
+        self.apply_highlights()
 
     def clear_output(self) -> None:
         """清空输出区。"""
         self._output_edit.clear()
         self._current_swipe = None
         self._all_swipes = []
+        self._current_highlights = []
+        self.apply_highlights()
         self._set_swipe_info("无续写版本", "metaText")
         self._update_button_states()
 

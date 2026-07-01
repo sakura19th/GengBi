@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +20,7 @@ from novelforge.core.storage import (
     get_chapter_file_path,
     get_default_storage_path,
 )
-from novelforge.models import Chapter, Continuation, Project
+from novelforge.models import Chapter, Continuation, Project, ProtagonistProfile
 from novelforge.services.async_runner import AsyncLoopRunner
 from novelforge.utils.ids import generate_id
 
@@ -110,6 +111,20 @@ class StorageService:
                 data["world_ontology"] = WorldOntology.model_validate(wo)
             except Exception:
                 logger.warning("world_ontology 还原失败，保留 dict")
+        # custom_audit_rules 从 DB 加载为 list[dict]，逐项还原为 CustomAuditRule 实例
+        rules = data.get("custom_audit_rules")
+        if isinstance(rules, list):
+            restored: list[Any] = []
+            for item in rules:
+                if isinstance(item, dict):
+                    try:
+                        from novelforge.models.custom_audit_rule import CustomAuditRule
+                        restored.append(CustomAuditRule.model_validate(item))
+                    except Exception:
+                        restored.append(item)
+                else:
+                    restored.append(item)
+            data["custom_audit_rules"] = restored
         return Project.model_validate(data)
 
     def list_projects(self) -> list[Project]:
@@ -138,6 +153,23 @@ class StorageService:
         """
         self._runner.run(
             self.storage.update_chapter_index(chapter_id, new_index)
+        )
+
+    def update_chapter_protagonist(
+        self, chapter_id: str, profile: ProtagonistProfile | None
+    ) -> None:
+        """只更新章节的 protagonist_profile 列，不触碰正文文件。
+
+        用于主角形象提取完成落盘，避免 save_chapter 用空 content 覆盖正文。
+        """
+        if profile is None:
+            json_str: str | None = None
+        else:
+            json_str = json.dumps(
+                profile.model_dump(mode="json"), ensure_ascii=False
+            )
+        self._runner.run(
+            self.storage.update_chapter_protagonist(chapter_id, json_str)
         )
 
     def load_chapter(self, chapter_id: str) -> Chapter | None:
