@@ -417,6 +417,7 @@ class MainWindow(QMainWindow):
         # 编辑器信号
         self.chapter_editor.split_requested.connect(self._on_split_chapter_from_editor)
         self.chapter_editor.saved.connect(self._on_chapter_saved)
+        self.chapter_editor.save_requested.connect(self._on_save)
         self.chapter_editor.word_count_changed.connect(self._on_word_count_changed)
 
         # 续写面板信号

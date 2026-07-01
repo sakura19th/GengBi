@@ -53,6 +53,7 @@ class ChapterEditor(QWidget):
 
     content_changed = Signal(str)
     saved = Signal()
+    save_requested = Signal()
     split_requested = Signal(int)
     word_count_changed = Signal(int)
 
@@ -101,6 +102,10 @@ class ChapterEditor(QWidget):
         self._save_status_label.setObjectName("textSecondary")
         toolbar_layout.addWidget(self._save_status_label)
 
+        # 保存按钮
+        self._save_btn = QPushButton("保存")
+        toolbar_layout.addWidget(self._save_btn)
+
         # 编辑/预览切换按钮
         self._edit_btn = QPushButton("编辑")
         self._edit_btn.setCheckable(True)
@@ -118,6 +123,7 @@ class ChapterEditor(QWidget):
         """连接信号。"""
         self._edit_btn.toggled.connect(self._on_edit_toggled)
         self._editor.textChanged.connect(self._on_text_changed)
+        self._save_btn.clicked.connect(self.save_requested.emit)
 
     def _set_save_status(self, text: str, state: str) -> None:
         """更新保存状态标签文本与状态色（对象名驱动，由全局 QSS 接管）。
@@ -246,9 +252,11 @@ class ChapterEditor(QWidget):
         if locked:
             self._editor.setReadOnly(True)
             self._edit_btn.setEnabled(False)
+            self._save_btn.setEnabled(False)
             self._set_save_status("续写中...", "textInfo")
         else:
             self._edit_btn.setEnabled(True)
+            self._save_btn.setEnabled(True)
             self._editor.setReadOnly(not self._is_edit_mode)
             if self._has_unsaved_changes:
                 self._set_save_status("未保存修改", "textWarning")

@@ -344,6 +344,8 @@ class Storage:
         await self._migrate_continuations_columns()
         # 幂等迁移：为旧版 projects 表补充 world_ontology / worldbook_id 列
         await self._migrate_projects_columns()
+        # 幂等迁移：为旧版 chapters 表补充 protagonist_profile 列
+        await self._migrate_chapters_columns()
 
         await self._conn.commit()
         logger.info("数据库连接成功: %s（日志模式: %s）", self._db_path, journal_mode)
@@ -633,12 +635,22 @@ class Storage:
             )
             await self.conn.commit()
         except Exception as e:
-            # SQLite 写入失败，删除已写入的文件并回滚
+            # SQLite 写入失败，回滚章节文件
             logger.error("SQLite 写入章节失败，回滚文件: %s", e)
-            try:
-                chapter_file.unlink(missing_ok=True)
-            except OSError:
-                pass
+            if existed_before and old_bytes is not None:
+                # 已存在章节：恢复旧正文，避免误删原有内容
+                try:
+                    chapter_file.write_bytes(old_bytes)
+                except OSError as restore_err:
+                    logger.error(
+                        "回滚恢复旧章节文件失败 %s: %s", chapter_file, restore_err
+                    )
+            else:
+                # 新章节（文件原本不存在）：删除刚写入的文件
+                try:
+                    chapter_file.unlink(missing_ok=True)
+                except OSError:
+                    pass
             raise
 
     async def update_chapter_index(

@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-07-01：修复章节保存报错 + 正文丢失 + 编辑器新增保存按钮
+
+### 背景
+
+1. 编辑章节保存时报错 `sqlite3.OperationalError: table chapters has no column named protagonist_profile`，保存失败。
+2. 报错后该章正文文件被删除，章节内容消失。根因：`save_chapter` 回滚时无条件删文件，未用已捕获的旧正文恢复。
+3. 编辑器工具栏仅有"编辑"按钮，无可见"保存"按钮（仅 Ctrl+S 菜单与 5 秒自动保存）。
+
+### 核心改动
+
+- **`novelforge/core/storage.py`**：
+  - open 流程补调 `await self._migrate_chapters_columns()`（迁移函数早已实现但漏调用，旧库缺 `protagonist_profile` 列导致保存报错）。
+  - `save_chapter` 回滚区分已存在/新章节：已存在章节 SQLite 写入失败时用 `chapter_file.write_bytes(old_bytes)` 恢复旧正文而非删文件（修复编辑现有章节保存失败时正文丢失）；新章节仍 `unlink` 删刚写入文件。
+- **`novelforge/ui/chapter_editor.py`**：新增 `save_requested = Signal()`；工具栏在"编辑"按钮前插入"保存"按钮 `_save_btn`；`_setup_connections` 连接 `_save_btn.clicked` → `save_requested.emit`；`set_streaming_locked` 流式输出时禁用保存按钮。
+- **`novelforge/ui/main_window.py`**：`_connect_signals` 连接 `chapter_editor.save_requested` → `_on_save`，复用 Ctrl+S 落盘链路（`save_now()` + `storage_service.save_chapter()`）。
+
+### 测试
+
+- `python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"`：468 passed, 13 skipped, 12 deselected，无回归。
+
+### 文档同步
+
+- 更新 `agent.md`：`core/storage.py` 条目补注 open 流程调用迁移 + 回滚恢复 old_bytes；`ui/chapter_editor.py` 条目补注保存按钮 + save_requested 信号。
+
+---
+
 ## 2026-07-01：主角形象章节级持久化 + 世界观序列化修复
 
 ### 背景
