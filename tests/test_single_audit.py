@@ -85,6 +85,48 @@ class TestSingleAuditTemplate:
         assert "【世界观一致性审计】" in content
 
 
+class TestAuditRewriteTemplate:
+    """审计后修改提示词模板测试（新统一流程）。"""
+
+    def test_audit_rewrite_template_exists(self) -> None:
+        """模板文件应存在。"""
+        path = get_agent_prompt_path("audit_rewrite")
+        assert path.exists(), f"模板文件不存在: {path}"
+
+    def test_audit_rewrite_template_placeholders(self) -> None:
+        """模板应含 9 个占位符，不含 revision_guidance。"""
+        path = get_agent_prompt_path("audit_rewrite")
+        content = load_text_resource(path)
+
+        # 必须含的占位符
+        assert "{{original_content}}" in content
+        assert "{{critique}}" in content
+        assert "{{world_ontology}}" in content
+        assert "{{protagonist_profile}}" in content
+        assert "{{custom_audit_rules}}" in content
+        assert "{{previous_chapters_text}}" in content
+        assert "{{chapter_plan}}" in content
+        assert "{{outline}}" in content
+        assert "{{pacing_speed}}" in content
+        assert "{{target_words}}" in content
+
+        # 不应含 revision_guidance（新流程审计报告即修改意见）
+        assert "{{revision_guidance}}" not in content
+
+    def test_audit_rewrite_template_focus(self) -> None:
+        """模板应聚焦修改意见，含严格输出要求。"""
+        path = get_agent_prompt_path("audit_rewrite")
+        content = load_text_resource(path)
+
+        # 聚焦修改意见
+        assert "修改意见" in content
+        assert "审计结果与修改意见" in content
+        # 严格输出要求
+        assert "重写完整正文" in content
+        assert "严禁续写或追加" in content
+        assert "直接输出正文" in content
+
+
 # ===== AuditWorker 测试 =====
 
 

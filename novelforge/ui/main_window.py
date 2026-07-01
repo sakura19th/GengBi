@@ -3777,9 +3777,11 @@ class MainWindow(QMainWindow):
         self._set_status_message("已取消审计")
 
     def _on_audit_accepted(self, audit_text: str) -> None:
-        """用户采纳审计报告：基于审计意见重写续写内容。
+        """用户采纳审计报告：基于审计结果与修改意见重写续写内容。
 
-        构造修正 messages = 原续写 messages + 原续写内容 + 审计意见 + 修正要求，
+        新流程：加载 phase_audit_rewrite.txt 独立模板，注入世界观底层、
+        主角信息、当前需修改正文、审计结果与修改意见等占位符，
+        构造全新 messages（不复用正文生成的提示词快照），
         新建 ContinuationWorker 流式输出修正后正文，作为新 swipe 保存到审计发起章节。
         """
         # 使用审计发起章节（避免用户切换章节后 rewrite 存入错误章节）
@@ -3794,28 +3796,6 @@ class MainWindow(QMainWindow):
         # 清理审计 worker 与对话框引用
         self._audit_worker = None
         self._audit_dialog = None
-
-        # 获取原续写的 messages 快照（上次续写时记录）
-        original_messages = list(self._continuation_prompt_messages)
-        if not original_messages:
-            QMessageBox.warning(self, "修正失败", "无法获取原续写提示词，请重新续写后再审计")
-            return
-
-        # 构造修正 messages：追加原内容 + 审计意见 + 修正要求
-        revision_messages = list(original_messages)
-        revision_messages.append({
-            "role": "user",
-            "content": f"【原续写内容（需修正）】\n{original_swipe.content}",
-        })
-        revision_messages.append({
-            "role": "user",
-            "content": (
-                f"【审计报告】\n{audit_text}\n\n"
-                "【修正要求】\n请基于上述审计报告的修改意见，重写原续写内容。"
-                "保留优点，修正指出的问题，保持字数与风格基本一致。"
-                "直接输出修正后的完整正文，不要包含解释。"
-            ),
-        })
 
         # 获取生成参数（复用上次续写参数）
         params = dict(self._continuation_parameters) if self._continuation_parameters else {}
@@ -3834,6 +3814,64 @@ class MainWindow(QMainWindow):
             self._on_open_settings()
             return
 
+        # 解析模型（与审计发起处一致，兜底 endpoint 默认模型）
+        model = self._continuation_model or endpoint.get("default_model", "")
+        if not model:
+            QMessageBox.warning(self, "提示", "请选择模型")
+            return
+
+        # 加载审计后修改提示词模板（独立模板，不复用正文生成的提示词）
+        try:
+            template_path = get_agent_prompt_path("audit_rewrite")
+            template = load_text_resource(template_path)
+        except Exception as e:
+            logger.error("加载审计修改模板失败: %s", e, exc_info=True)
+            QMessageBox.critical(self, "修正失败", f"加载审计修改模板失败: {e}")
+            return
+
+        # 加载项目（取 world_ontology/protagonist_profile/custom_audit_rules）
+        project = None
+        if self._current_project_id:
+            project = self.storage_service.load_project(self._current_project_id)
+
+        # 组装宏（与 _on_audit_continuation 一致不用 MacroEngine）
+        world_ontology_str = self._format_world_ontology(
+            project.world_ontology if project else None
+        )
+        protagonist_profile = None
+        if self._current_chapter:
+            if self._current_chapter.protagonist_profile:
+                protagonist_profile = self._current_chapter.protagonist_profile
+            else:
+                protagonist_profile = self._protagonist_profile_by_chapter.get(
+                    self._current_chapter.id
+                )
+        protagonist_profile_str = self._format_protagonist_profile(protagonist_profile)
+        custom_rules_str = self._format_custom_audit_rules(
+            project.custom_audit_rules if project else None
+        )
+
+        # str.replace 宏替换占位符（聚焦修改意见，审计报告整体即修改意见）
+        rendered = template.replace("{{original_content}}", original_swipe.content)
+        rendered = rendered.replace("{{critique}}", audit_text)
+        rendered = rendered.replace("{{world_ontology}}", world_ontology_str)
+        rendered = rendered.replace("{{protagonist_profile}}", protagonist_profile_str)
+        rendered = rendered.replace("{{custom_audit_rules}}", custom_rules_str)
+        rendered = rendered.replace("{{previous_chapters_text}}", "")
+        rendered = rendered.replace("{{chapter_plan}}", "（无卷大纲章节规划）")
+        rendered = rendered.replace("{{outline}}", "（无细纲）")
+        rendered = rendered.replace("{{pacing_speed}}", "（单章无推进速度约束）")
+        target_words = params.get("target_words", "")
+        rendered = rendered.replace(
+            "{{target_words}}", str(target_words) if target_words else ""
+        )
+
+        # 构造全新 messages（不复用原续写提示词快照 _continuation_prompt_messages）
+        revision_messages = [
+            {"role": "system", "content": rendered},
+            {"role": "user", "content": "请基于审计结果与修改意见，重写完整正文。"},
+        ]
+
         # 判断用户是否仍停留在审计发起章节
         on_origin_chapter = bool(
             self._current_chapter and self._current_chapter.id == audit_cid
@@ -3851,7 +3889,7 @@ class MainWindow(QMainWindow):
         # 记录续写会话追踪信息
         self._continuation_started_at = self.history_service.now_iso()
         self._continuation_prompt_messages = list(revision_messages)
-        self._continuation_model = params.get("model", self._continuation_model)
+        self._continuation_model = model
         self._continuation_parameters = dict(params)
 
         # 断开旧 worker 的信号连接
@@ -3888,7 +3926,7 @@ class MainWindow(QMainWindow):
         self._continuation_worker = ContinuationWorker(
             base_url=endpoint["base_url"],
             api_key=api_key,
-            model=self._continuation_model,
+            model=model,
             messages=revision_messages,
             parameters=params,
             chapter_id=audit_cid,

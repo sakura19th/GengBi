@@ -610,7 +610,7 @@ def test_volume_e2e_with_revise_loop() -> None:
     fake.add_chat_response(_audit_report_json(3))
     # 阶段③.5：终稿大纲生成（1 次 chat）
     fake.add_chat_response(_volume_outline_json(3))
-    # 第1章：细纲 + 写作(初稿) + 验证失败 + 修订指导 + 写作(修订稿) + 验证通过
+    # 第1章：细纲 + 写作(初稿) + 验证失败 + 重写(修订稿) + 验证通过
     fake.add_chat_response(_outline_json())
     fake.add_stream_response([StreamChunk(content="初稿")])
     fake.add_chat_response(
@@ -631,40 +631,14 @@ def test_volume_e2e_with_revise_loop() -> None:
             ensure_ascii=False,
         )
     )
-    fake.add_chat_response(
-        json.dumps(
-            {
-                "revision_strategy": "修正一致性",
-                "key_changes": [
-                    {
-                        "issue_ref": "consistency",
-                        "revision_action": "修改时间线",
-                        "target_section": "第1段",
-                    }
-                ],
-                "preserve_elements": "对话",
-            },
-            ensure_ascii=False,
-        )
-    )
     fake.add_stream_response([StreamChunk(content="修订稿")])
     fake.add_chat_response(_critique_passed_json())
-    # 第2章、第3章：细纲 + 写作(初稿) + 验证通过 + 强制修改(修订指导+修订稿+验证通过)
+    # 第2章、第3章：细纲 + 写作(初稿) + 验证通过 + 强制修改(重写+验证通过)
     for i in range(2, 4):
         fake.add_chat_response(_outline_json())
         fake.add_stream_response([StreamChunk(content=f"第{i}章初稿")])
         fake.add_chat_response(_critique_passed_json())
-        # 强制修改：审计①通过后仍触发 1 轮修改
-        fake.add_chat_response(
-            json.dumps(
-                {
-                    "revision_strategy": "润色提升",
-                    "key_changes": [],
-                    "preserve_elements": "",
-                },
-                ensure_ascii=False,
-            )
-        )
+        # 强制修改：审计①通过后仍触发 1 轮重写
         fake.add_stream_response([StreamChunk(content=f"第{i}章正文")])
         fake.add_chat_response(_critique_passed_json())
     orchestrator._client = fake

@@ -507,6 +507,7 @@ class VolumeOrchestrator(QThread):
                     ))
 
                     # 强制第1轮修改（无论审计①是否通过）+ 自动修订循环
+                    # 新流程：跳过 _run_chapter_revise，直接用审计报告作为修改意见调 _run_chapter_rewrite
                     # critical 问题忽略 max_revise_rounds_per_chapter 上限，一直修正到通过为止
                     if self.config.enable_chapter_revise:
                         while not self._stop_event.is_set() and (
@@ -525,16 +526,11 @@ class VolumeOrchestrator(QThread):
                                     break  # 无 critical 且达到上限，退出
 
                             rounds += 1
-                            guidance = await self._run_chapter_revise(
-                                content, critique, outline,
-                                lookback_chapters_text=dynamic_lookback,
-                            )
                             content, reasoning, messages = (
                                 await self._run_chapter_rewrite(
                                     outline,
                                     chapter_plan,
                                     content,
-                                    guidance,
                                     critique,
                                     lookback_chapters_text=dynamic_lookback,
                                 )
@@ -542,7 +538,7 @@ class VolumeOrchestrator(QThread):
                             self._writing_messages = messages
                             stages.append(ChapterStageArtifact(
                                 stage_type="revise", round_index=rounds,
-                                guidance=guidance, content=content,
+                                guidance=None, content=content,
                             ))
                             critique = await self._run_chapter_verify(
                                 deep_analysis, outline, content,
@@ -569,33 +565,21 @@ class VolumeOrchestrator(QThread):
                             raise asyncio.CancelledError("用户在每章确认点取消")
                         else:  # reject
                             feedback = payload.get("feedback", "")
-                            # 将用户反馈转化为修订指导
-                            user_guidance = {
-                                "revision_strategy": "用户确认不通过，按反馈重写",
-                                "key_changes": [{
-                                    "issue_ref": "用户反馈",
-                                    "revision_action": feedback,
-                                    "target_section": "全文",
-                                }],
-                                "preserve_elements": "",
-                            }
+                            # 新流程：用户反馈作为额外修改意见拼入 critique，跳过 _run_chapter_revise
                             rounds += 1
-                            guidance = await self._run_chapter_revise(
-                                content, None, outline,
-                                lookback_chapters_text=dynamic_lookback,
-                                user_guidance=user_guidance,
-                            )
                             content, reasoning, messages = await self._run_chapter_rewrite(
                                 outline, chapter_plan,
-                                content, guidance, None,
+                                content, None,
                                 lookback_chapters_text=dynamic_lookback,
+                                extra_feedback=feedback,
                             )
                             self._writing_messages = messages
                             stages.append(ChapterStageArtifact(
                                 stage_type="revise", round_index=rounds,
-                                guidance=guidance, content=content,
+                                guidance=None, content=content,
                             ))
                             # 重新验证 + 自动修订循环
+                            # 新流程：跳过 _run_chapter_revise，直接用审计报告作为修改意见
                             # critical 问题忽略 max_revise_rounds_per_chapter 上限，一直修正到通过为止
                             if self.config.enable_chapter_verify:
                                 critique = await self._run_chapter_verify(
@@ -627,21 +611,17 @@ class VolumeOrchestrator(QThread):
                                         break  # 无 critical 且达到上限，退出
 
                                     rounds += 1
-                                    guidance = await self._run_chapter_revise(
-                                        content, critique, outline,
-                                        lookback_chapters_text=dynamic_lookback,
-                                    )
                                     content, reasoning, messages = (
                                         await self._run_chapter_rewrite(
                                             outline, chapter_plan,
-                                            content, guidance, critique,
+                                            content, critique,
                                             lookback_chapters_text=dynamic_lookback,
                                         )
                                     )
                                     self._writing_messages = messages
                                     stages.append(ChapterStageArtifact(
                                         stage_type="revise", round_index=rounds,
-                                        guidance=guidance, content=content,
+                                        guidance=None, content=content,
                                     ))
                                     critique = await self._run_chapter_verify(
                                         deep_analysis, outline, content,
@@ -1595,30 +1575,33 @@ class VolumeOrchestrator(QThread):
         outline: Outline | None,
         chapter_plan: Any | None,
         original_content: str,
-        revision_guidance: dict | None,
         critique: CritiqueReport | None,
         lookback_chapters_text: str = "",
+        extra_feedback: str = "",
     ) -> tuple[str, str, list[dict[str, Any]]]:
-        """阶段④-重写：审计后基于修订指导重写完整章节正文（流式）。
+        """阶段④-重写：审计后基于审计结果与修改意见重写完整章节正文（流式）。
+
+        新流程：使用 phase_audit_rewrite.txt 独立模板，聚焦修改意见（审计报告整体即修改意见），
+        不再单独生成修订指导（跳过 _run_chapter_revise）。
 
         与 _run_chapter_writing 的区别：
-        - 不复用 prompt_assembler 组装，而是直接加载 phase_chapter_rewrite.txt 模板
-        - 模板结尾强调"重写完整章节，不得续写或追加"，避免 LLM 在原章节后追加内容
-        - 注入审计报告与修订指导，针对审计问题定向修订
+        - 不复用 prompt_assembler 组装，而是直接加载 phase_audit_rewrite.txt 模板
+        - 模板结尾强调"重写完整正文，不得续写或追加"，避免 LLM 在原正文后追加内容
+        - 注入审计报告（审计结果与修改意见），针对审计问题定向修订
         - 动态前文窗口注入到最后一条消息之前（与 _run_chapter_writing 一致）
 
         Args:
             outline: 单章细纲（可能为 None）
             chapter_plan: 当前章 ChapterPlan（用于 target_words 与章节规划参考）
             original_content: 当前已生成内容（重写参考）
-            revision_guidance: 修订指导 dict（来自 _run_chapter_revise）
             critique: 审计报告（可能为 None，如 after_chapter reject 场景）
             lookback_chapters_text: 动态前文窗口（含本卷已生成章节）
+            extra_feedback: 用户额外修改意见（after_chapter reject 场景，拼入 critique 文本末尾）
 
         Returns:
             (content, reasoning_content, messages) 三元组
         """
-        template = self._load_agent_template("chapter_rewrite")
+        template = self._load_agent_template("audit_rewrite")
 
         # 序列化各 JSON 字段
         if outline is not None:
@@ -1639,12 +1622,11 @@ class VolumeOrchestrator(QThread):
             )
         else:
             critique_text = "（无审计报告）"
-        if revision_guidance is not None:
-            guidance_text = json.dumps(
-                revision_guidance, ensure_ascii=False, indent=2
+        # 用户额外修改意见拼入 critique 文本末尾作为额外修改意见
+        if extra_feedback:
+            critique_text = (
+                critique_text + "\n\n# 用户额外修改意见\n" + extra_feedback
             )
-        else:
-            guidance_text = "（无修订指导）"
 
         # 每章目标字数
         target_words = self.config.target_words_per_chapter
@@ -1656,7 +1638,6 @@ class VolumeOrchestrator(QThread):
             "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{original_content}}": original_content,
-            "{{revision_guidance}}": guidance_text,
             "{{critique}}": critique_text,
             "{{chapter_plan}}": chapter_plan_text,
             "{{outline}}": outline_text,
@@ -1667,7 +1648,7 @@ class VolumeOrchestrator(QThread):
         system_prompt = self._apply_macros(template, macros)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": "请基于审计报告与修订指导，重写完整章节正文。"},
+            {"role": "user", "content": "请基于审计结果与修改意见，重写完整正文。"},
         ]
 
         # 动态前文窗口注入（含本卷已生成章节，插入到最后一条消息之前）

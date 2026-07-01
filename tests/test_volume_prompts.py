@@ -374,8 +374,8 @@ def test_get_volume_prompt_path_filename_pattern() -> None:
 
 
 def test_get_agent_prompt_path_verify_revise() -> None:
-    """get_agent_prompt_path 对 verify/revise/chapter_rewrite 返回存在的路径（volume 复用）。"""
-    for phase in ("verify", "revise", "chapter_rewrite"):
+    """get_agent_prompt_path 对 verify/revise/chapter_rewrite/audit_rewrite 返回存在的路径（volume 复用）。"""
+    for phase in ("verify", "revise", "chapter_rewrite", "audit_rewrite"):
         path = get_agent_prompt_path(phase)
         assert path.name == f"phase_{phase}.txt"
         assert path.parent.name == "agent"
@@ -576,6 +576,47 @@ def test_phase_chapter_rewrite_placeholders() -> None:
     # 宏替换无残留（含 custom_audit_rules 占位符）
     macros = {ph: "测试值" for ph in expected_placeholders}
     macros["{{custom_audit_rules}}"] = "（无自定义设定）"
+    result = _apply_macros(template, macros)
+    _assert_no_placeholders(result)
+
+
+# ===== 9b. phase_audit_rewrite.txt 模板测试（新统一审计后修改流程）=====
+
+
+def test_phase_audit_rewrite_template_exists() -> None:
+    """phase_audit_rewrite.txt 模板存在且可加载。"""
+    path = get_agent_prompt_path("audit_rewrite")
+    assert path.name == "phase_audit_rewrite.txt"
+    assert path.exists(), f"路径不存在: {path}"
+    content = load_text_resource(path)
+    assert len(content) > 0
+
+
+def test_phase_audit_rewrite_placeholders() -> None:
+    """phase_audit_rewrite.txt 含 9 个占位符（无 revision_guidance）且无残留。"""
+    template = load_text_resource(get_agent_prompt_path("audit_rewrite"))
+    expected_placeholders = [
+        "{{original_content}}",
+        "{{critique}}",
+        "{{world_ontology}}",
+        "{{protagonist_profile}}",
+        "{{custom_audit_rules}}",
+        "{{previous_chapters_text}}",
+        "{{chapter_plan}}",
+        "{{outline}}",
+        "{{pacing_speed}}",
+        "{{target_words}}",
+    ]
+    for ph in expected_placeholders:
+        assert ph in template, f"phase_audit_rewrite.txt 缺少占位符: {ph}"
+    # 不应含 revision_guidance（新流程审计报告即修改意见，不再单独生成修订指导）
+    assert "{{revision_guidance}}" not in template
+    # 含"聚焦修改意见"强调语
+    assert "修改意见" in template
+    assert "重写完整正文" in template
+    assert "严禁续写或追加" in template
+    # 宏替换无残留
+    macros = {ph: "测试值" for ph in expected_placeholders}
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
 
