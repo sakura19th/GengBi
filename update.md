@@ -4,6 +4,64 @@
 
 ---
 
+## 2026-07-02：发布 v0.2.5（rigid_ai_text 审计维度 + 默认预设抗八股增强 + 单章审计用户指令遵从性）
+
+### 版本号同步
+
+- `novelforge/__init__.py`：`__version__` 由 `0.2.4` → `0.2.5`
+- `README.md`：顶部「当前版本」由 `v0.2.4` → `v0.2.5`；「更新记录」章节新增 `v0.2.5` 小节；删除「测试」章节；精简各历史版本更新记录（只保留重要内容，简洁明了）；「配置说明」后新增「快速上手」使用教程（导入→提取上下文等可选项→续写→审计→输出）
+- `agent.md`：「当前版本」由 `v0.2.4` → `v0.2.5`
+
+### 主要内容（详见下文各日期条目）
+
+本次发版整合自 v0.2.4 以来的两项审计体系增强：
+
+- 新增 `rigid_ai_text` 审计维度（刻板AI文本禁令，严格给分）：3 处以上 AI 痕迹判 major，5 处以上或整段套路判 critical；覆盖单章审计/卷级验证/大纲审计全链路
+- 默认预设抗八股模块扩展为 8 大类、抗重复扩展为 7 大类，文风互斥层增强；GB-八股抹除正则从 5 词扩展为 26 词
+- 单章审计新增 `user_directive_compliance` 维度（用户指令遵从性），`{{user_input}}` 用 `<user_directive>` XML 标签包裹明确用户指令边界
+
+### 文档同步
+
+README.md 新增 v0.2.5 更新记录小节并精简历史记录、删除测试章节、新增快速上手教程；agent.md 同步版本号；update.md 追加本发布条目。
+
+### 回归
+
+无需重跑测试——本次为版本号同步与发布记录，未改动生产代码逻辑（全量回归见下文各日期条目末尾的 pytest 结果）。
+
+---
+
+## 2026-07-02：单章审计【用户续写指令】识别修复——XML 定界符 + user_directive_compliance 维度
+
+### 背景
+
+单章续写审计模板 `phase_single_audit.txt` 中【用户续写指令】通过 `str.replace` 将原始 `{{user_input}}` 文本直接注入，无任何定界符包裹，且缺少 `user_directive_compliance` 专用审计维度与对应的 summary 标记段落。导致"小说质量评审员"角色无法正确识别用户续写指令的边界（尤其用户输入多行/含 Markdown 特殊字符时），也无结构化框架审计指令遵从性。
+
+### 核心改动
+
+#### 1. `phase_single_audit.txt` 模板三重改造
+- **XML 定界符**：`{{user_input}}` 用 `<user_directive>...</user_directive>` 标签包裹，明确标记用户指令边界，无论输入多行/含特殊字符 AI 均能精准识别起止
+- **新增维度 4 `user_directive_compliance`（用户指令遵从性）**：条件性必审项，存在用户指令时逐项检查必备剧情要素/强调部分/冲突处理/核心意图，未满足判 major，核心意图严重偏离判 critical；原维度 4-7 顺延为 5-8
+- **summary 新增 `【用户指令遵从性审计】` 标记段落**：5 个标记段落（原 4 + 新增 1）
+- **issues category 追加 `user_directive_compliance`**
+- 开篇"七个维度"→"八个维度"，验证任务/验证原则/注意段维度编号同步更新
+
+#### 2. 测试更新（`tests/test_single_audit.py`）
+- `test_single_audit_template_dimensions`：新增 `user_directive_compliance` 断言（8 维度）
+- `test_single_audit_template_output_format`：新增 `【用户指令遵从性审计】` 断言
+- 新增 `test_single_audit_template_user_directive_delimiter`：断言含 `<user_directive>`/`</user_directive>` 且占位符位于标签内部
+
+### 测试
+
+- `tests/test_single_audit.py`：21 passed（含新增定界符测试）
+- `tests/test_volume_prompts.py`：34 passed（无回归，卷级模板不受影响）
+
+### 文档同步
+
+- `agent.md` §11 + main_window.py 条目：7→8 维度、4→5 summary 标记、补 `<user_directive>` XML 定界符说明
+- `novelforge/models/agent.py` `VALID_CRITIQUE_CATEGORIES` 已含 `user_directive_compliance`（16 值之一），无需改动
+
+---
+
 ## 2026-07-01：新增 rigid_ai_text 审计维度 + 默认预设抗八股/抗重复增强 + 正则黑名单扩展
 
 ### 背景

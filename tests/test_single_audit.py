@@ -39,7 +39,7 @@ class TestSingleAuditTemplate:
         assert path.exists(), f"模板文件不存在: {path}"
 
     def test_single_audit_template_placeholders(self) -> None:
-        """模板应含 4 个占位符，不含卷级专用占位符。"""
+        """模板应含 5 个占位符，不含卷级专用占位符。"""
         path = get_agent_prompt_path("single_audit")
         content = load_text_resource(path)
 
@@ -55,12 +55,13 @@ class TestSingleAuditTemplate:
         assert "{{previous_chapters_text}}" not in content
 
     def test_single_audit_template_dimensions(self) -> None:
-        """模板应聚焦 7 个维度，不含 pacing/engagement 等。"""
+        """模板应聚焦 8 个维度，不含 pacing/engagement 等。"""
         path = get_agent_prompt_path("single_audit")
         content = load_text_resource(path)
 
-        # 必须含的 7 维度
+        # 必须含的 8 维度
         assert "consistency" in content
+        assert "user_directive_compliance" in content
         assert "protagonist_consistency" in content
         assert "worldview_consistency" in content
         assert "style" in content
@@ -75,6 +76,19 @@ class TestSingleAuditTemplate:
         assert "## 6. foreshadowing" not in content
         assert "## 7. characters" not in content
 
+    def test_single_audit_template_user_directive_delimiter(self) -> None:
+        """模板应用 <user_directive> XML 标签包裹用户续写指令。"""
+        path = get_agent_prompt_path("single_audit")
+        content = load_text_resource(path)
+
+        assert "<user_directive>" in content
+        assert "</user_directive>" in content
+        # 占位符应位于标签内部
+        idx_open = content.index("<user_directive>")
+        idx_close = content.index("</user_directive>")
+        idx_placeholder = content.index("{{user_input}}")
+        assert idx_open < idx_placeholder < idx_close
+
     def test_single_audit_template_output_format(self) -> None:
         """模板应含 summary/issues/passed 输出格式说明。"""
         path = get_agent_prompt_path("single_audit")
@@ -83,6 +97,7 @@ class TestSingleAuditTemplate:
         assert "summary" in content
         assert "issues" in content
         assert "passed" in content
+        assert "【用户指令遵从性审计】" in content
         assert "【主角一致性审计】" in content
         assert "【世界观一致性审计】" in content
         assert "【自定义设定审计】" in content
