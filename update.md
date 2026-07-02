@@ -4,6 +4,59 @@
 
 ---
 
+## 2026-07-02：安全审计与修复（4 HIGH + 7 MEDIUM）
+
+### 背景
+
+完整审计项目代码，发现 4 个 HIGH（ZIP slip + 三处 ID 路径穿越）+ 7 个 MEDIUM（SSTI 数据外泄、ReDoS 无超时、日志脱敏不全、无文件权限、passphrase 非密钥、明文 HTTP、依赖未锁定）+ 6 个 LOW。修复范围 HIGH + MEDIUM 共 11 项，LOW 仅记录。所有 HIGH 均可通过 `import_project_backup` 导入恶意备份 zip 触发，导致任意文件读/写/删除。完整审计报告见 `docs/SECURITY_AUDIT.md`。
+
+### 核心改动
+
+**阶段 A：HIGH 修复（路径穿越类）**
+- 新增 `novelforge/utils/ids.py` `validate_id` 工具，仅允许 `^[A-Za-z0-9_\-]+$`，拒绝路径字符（H-2）
+- `exporter.py` `import_project_backup` 逐成员 `resolve()` 校验防 ZIP slip（H-1）
+- `storage.py` `get_chapter_file_path`/`get_preset_file_path` 入口 `validate_id` 校验（H-2a）
+- `worldbook_service.py` load/save/delete 三处 `validate_id` 校验（H-2b）
+- `regex_service.py` scoped/preset 分支 `validate_id` 校验（H-2c）
+- 5 个 pydantic 模型（Project/Chapter/RegexScript/WritingPreset/WorldBook）`field_validator` `_validate_path_id` 纵深防御
+
+**阶段 B：MEDIUM 修复**
+- `template_engine.py` 新增 `POST_RECEIVE_WHITELIST`（9 函数纯操作），`render_post_receive` 移除数据读取函数防 SSTI 数据外泄；`_render` 方法 `post_receive: bool=False` 参数按 flag 分流上下文构建（M-1）
+- `regex_engine.py` `_finditer_with_timeout` + `importer.py` `_finditer_chapters_with_timeout` 加 5s 超时防 ReDoS，模块级共享 `ThreadPoolExecutor`，超时返回部分结果或降级用默认正则（M-2）
+- `logger.py` 三模式脱敏（AUTH_HEADER → API_KEY → BEARER 顺序），覆盖 `sk-`/`sk-ant-`/`sk-or-` 前缀 + `Authorization: Bearer xxx` 三种分隔形式（保护自定义网关 token）（M-3）
+- 新增 `utils/paths.py` `secure_file` 工具（`os.chmod(0o600)`，Windows 为 no-op），5 处接入敏感文件（config/crypto/storage/logger）（M-4 + M-5 纵深防御）
+- `llm_client.py` `http://` + 非空 key 时 `logger.warning` 提示 MITM 风险，不阻断兼容本地 LLM（M-6）
+- `requirements.txt` floor 提升至已修复 CVE 版本：aiohttp>=3.9.5、jinja2>=3.1.4、cryptography>=42.0.4、pydantic>=2.5.3 等（M-7）
+
+### 测试
+
+新增 6 个安全测试文件（`tests/test_security_*.py`，68 用例含 2 平台跳过）：
+- `test_security_path_traversal.py`：validate_id 12 种非法 ID + 9 种合法前缀 + 5 模型 field_validator + 服务层入口
+- `test_security_zip_slip.py`：恶意 zip 拦截 + 正常 zip 不误伤
+- `test_security_ssti.py`：POST_RECEIVE_WHITELIST 子集关系 + 数据读取函数不泄露 + 纯操作函数可用
+- `test_security_redos.py`：ReDoS 5s 超时 + 正常正则不误伤 + importer 降级契约
+- `test_security_log_mask.py`：sk-ant-/sk-or-/sk- 前缀 + Authorization 三种分隔形式 + 多 key 同脱
+- `test_security_file_perms.py`：secure_file 不抛异常 + Linux 0o600 + Windows no-op + 幂等
+
+回归测试：`python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"` 全绿（**566 passed, 15 skipped, 12 deselected**），B-1 双白名单改造未破坏任何现有测试。
+
+### 文档同步
+
+- 新增 `docs/SECURITY_AUDIT.md` 独立审计报告（执行摘要/正向发现/漏洞清单/修复详情/测试覆盖/假设决策/文件清单）
+- `agent.md` 新增「### 13. 安全加固」设计决策（8 个修复项）+ 代码风格规范新增 ID 校验规则 + §10 Jinja2 沙箱描述更新为双白名单
+- `update.md` 追加本安全审计条目
+
+### 假设与决策
+
+1. 修复范围 HIGH（4）+ MEDIUM（7）= 11 项；LOW（6）仅记录不修
+2. M-1 SSTI：保留 `render_post_receive` 功能（用户依赖变量回写），仅收紧 post-receive 白名单
+3. M-5 passphrase：不引入主密码（不改 UX），仅以文件权限做纵深防御
+4. M-6 HTTP：不阻断 `http://`（兼容本地 LLM），仅警告
+5. M-7 依赖：提升 floor 至已修复版本，不引入 lockfile 保持简单
+6. ID 校验策略：`validate_id` 仅允许 `[\w\-]+`，现有内置 ID（`proj_`/`ep_`/`ch_`/`wb_`/`nf_regex_` 前缀 + uuid hex）均符合，不破坏向后兼容
+
+---
+
 ## 2026-07-02：发布 v0.2.5（rigid_ai_text 审计维度 + 默认预设抗八股增强 + 单章审计用户指令遵从性）
 
 ### 版本号同步

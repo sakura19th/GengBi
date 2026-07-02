@@ -1,11 +1,15 @@
 """路径与资源工具函数。
 
-提供资源文件路径解析等通用工具。
+提供资源文件路径解析等通用工具，以及敏感文件权限收紧。
 """
 from __future__ import annotations
 
+import logging
+import os
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # PyInstaller 打包后，资源被解压到 sys._MEIPASS 临时目录；
 # 源码运行时则定位到包目录。两种模式都指向 novelforge/resources/。
@@ -149,3 +153,24 @@ def load_text_resource(path: Path) -> str:
         文件文本内容
     """
     return path.read_text(encoding="utf-8")
+
+
+def secure_file(path: Path) -> None:
+    """收紧文件权限为所有者可读写（0o600）。
+
+    用于敏感文件（config.json、.machine_id、novelforge.db、日志、导出密钥）
+    写入后的纵深防御：阻止同机其他用户读取加密 salt 与 API Key 密文，
+    降低 passphrase 非密钥场景下的离线解密风险。
+
+    - Linux/macOS：``os.chmod(path, 0o600)`` 实际生效。
+    - Windows：``os.chmod`` 基本为 no-op（不影响 ACL），不会破坏现有行为。
+    - 任何 ``OSError`` 静默忽略（权限收紧是最佳努力，不阻断主流程）。
+
+    Args:
+        path: 待收紧权限的文件路径
+    """
+    try:
+        os.chmod(path, 0o600)
+    except OSError as e:
+        # 收紧失败不影响主流程（如只读文件系统、Windows ACL 限制）
+        logger.debug("收紧文件权限失败 %s: %s", path, e)

@@ -6,10 +6,14 @@
 - ``ImmutableSandboxedEnvironment``（非 ``SandboxedEnvironment``）
 - 自定义 ``is_safe_attribute``：拒绝所有以 ``_`` 开头的属性
 - 禁用 ``attr`` 过滤器
-- 白名单函数：getvar/setvar/hasvar/delvar/get_chapter/get_chapters/
-  get_current_chapter/get_chapter_count/get_book/get_protagonist/
-  get_novel_profile/get_writing_style/get_context_entries/regex_apply/
-  substitute_macros/now/word_count/truncate
+- 双白名单函数集合：
+  - ``WHITELIST_FUNCTION_NAMES``（16 个，pre_send 用）：getvar/setvar/hasvar/delvar/
+    get_chapter/get_chapters/get_current_chapter/get_chapter_count/
+    get_book/get_protagonist/get_novel_profile/get_writing_style/
+    get_context_entries/regex_apply/substitute_macros/now/word_count/truncate
+  - ``POST_RECEIVE_WHITELIST``（9 个，post_receive 用，移除数据读取函数防 SSTI
+    数据外泄）：getvar/setvar/hasvar/delvar/regex_apply/substitute_macros/
+    now/word_count/truncate
 - ``recursion_limit=50``，递归超限跳过模板用原始文本
 - 子进程/线程执行模板，5 秒超时
 - 超时后跳过模板使用原始文本，记录 ERROR 日志
@@ -47,12 +51,23 @@ TEMPLATE_TIMEOUT_SECONDS: int = 5
 # 递归深度限制
 RECURSION_LIMIT: int = 50
 
-# 白名单函数名称集合
+# 白名单函数名称集合（发送前渲染 render_pre_send 使用，用户预设受信任场景）
 WHITELIST_FUNCTION_NAMES: frozenset[str] = frozenset({
     "getvar", "setvar", "hasvar", "delvar",
     "get_chapter", "get_chapters", "get_current_chapter", "get_chapter_count",
     "get_book", "get_protagonist", "get_novel_profile", "get_writing_style",
     "get_context_entries", "regex_apply", "substitute_macros",
+    "now", "word_count", "truncate",
+})
+
+# 接收后渲染（render_post_receive）精简白名单：仅纯操作函数
+# 防 SSTI 数据外泄：AI 输出不可信，不应让其读取其他章节/档案数据外泄到输出
+# 移除数据读取函数（get_chapter/get_chapters/get_current_chapter/get_chapter_count/
+# get_book/get_protagonist/get_novel_profile/get_writing_style/get_context_entries），
+# 保留 setvar/getvar 满足变量回写需求，regex_apply/substitute_macros 供后处理
+POST_RECEIVE_WHITELIST: frozenset[str] = frozenset({
+    "getvar", "setvar", "hasvar", "delvar",
+    "regex_apply", "substitute_macros",
     "now", "word_count", "truncate",
 })
 
@@ -353,6 +368,48 @@ class TemplateEngine:
 
         return context
 
+    def _build_post_receive_context(
+        self,
+        project_id: str = "",
+        chapter_metadata: dict[str, Any] | None = None,
+        chapters: list[Any] | None = None,
+        current_chapter: Any = None,
+        novel_profile: Any = None,
+        context_entries: list[Any] | None = None,
+        macro_substitute_fn: Callable[[str], str] | None = None,
+        regex_apply_fn: Callable[[str, int], str] | None = None,
+    ) -> dict[str, Any]:
+        """构建接收后渲染的精简上下文（仅纯操作函数）。
+
+        在 ``_build_default_context`` 基础上用 ``POST_RECEIVE_WHITELIST`` 过滤，
+        移除数据读取函数（get_chapter/get_chapters/get_current_chapter/
+        get_chapter_count/get_book/get_protagonist/get_novel_profile/
+        get_writing_style/get_context_entries），仅保留纯操作函数。
+
+        防御 SSTI 数据外泄：AI 输出不可信，post-receive 渲染不应让其读取
+        其他章节/档案数据外泄到输出文本；保留 setvar/getvar 满足变量回写需求。
+
+        Args:
+            参数同 ``_build_default_context``
+
+        Returns:
+            精简白名单函数的上下文字典
+        """
+        context = self._build_default_context(
+            project_id=project_id,
+            chapter_metadata=chapter_metadata,
+            chapters=chapters,
+            current_chapter=current_chapter,
+            novel_profile=novel_profile,
+            context_entries=context_entries,
+            macro_substitute_fn=macro_substitute_fn,
+            regex_apply_fn=regex_apply_fn,
+        )
+        return {
+            name: fn for name, fn in context.items()
+            if name in POST_RECEIVE_WHITELIST
+        }
+
     def _render_with_timeout(
         self,
         template_str: str,
@@ -431,13 +488,20 @@ class TemplateEngine:
         context_entries: list[Any] | None = None,
         macro_substitute_fn: Callable[[str], str] | None = None,
         regex_apply_fn: Callable[[str, int], str] | None = None,
+        post_receive: bool = False,
     ) -> tuple[str, str | None]:
         """双阶段共享的模板渲染实现。
 
         扫描 ``{% %}`` 和 ``{{ }}`` 块，在沙箱中执行，用执行结果替换原块。
         无 Jinja2 语法时直接返回原文本。
-        ``render_pre_send`` 与 ``render_post_receive`` 的实现完全一致，
-        仅语义不同（发送前/接收后），故抽取此私有方法消除重复。
+        ``render_pre_send`` 与 ``render_post_receive`` 共用此方法，
+        通过 ``post_receive`` flag 切换上下文白名单：
+
+        - ``post_receive=False``（默认，pre_send）：用 ``_build_default_context``
+          + 完整 ``WHITELIST_FUNCTION_NAMES``（16 函数，用户预设受信任场景）。
+        - ``post_receive=True``（post_receive）：用 ``_build_post_receive_context``
+          + 精简 ``POST_RECEIVE_WHITELIST``（9 函数，移除数据读取函数防 SSTI
+          数据外泄，AI 输出不可信）。
 
         Args:
             text: 待渲染文本
@@ -449,6 +513,7 @@ class TemplateEngine:
             context_entries: 上下文条目列表
             macro_substitute_fn: 宏替换函数
             regex_apply_fn: 正则应用函数
+            post_receive: 是否为接收后渲染（True 用精简白名单防 SSTI 数据外泄）
 
         Returns:
             (渲染后文本, 错误信息) 元组。成功时错误信息为 None。
@@ -457,16 +522,28 @@ class TemplateEngine:
         if not text or not _has_jinja2_syntax(text):
             return text, None
 
-        context = self._build_default_context(
-            project_id=project_id,
-            chapter_metadata=chapter_metadata,
-            chapters=chapters,
-            current_chapter=current_chapter,
-            novel_profile=novel_profile,
-            context_entries=context_entries,
-            macro_substitute_fn=macro_substitute_fn,
-            regex_apply_fn=regex_apply_fn,
-        )
+        if post_receive:
+            context = self._build_post_receive_context(
+                project_id=project_id,
+                chapter_metadata=chapter_metadata,
+                chapters=chapters,
+                current_chapter=current_chapter,
+                novel_profile=novel_profile,
+                context_entries=context_entries,
+                macro_substitute_fn=macro_substitute_fn,
+                regex_apply_fn=regex_apply_fn,
+            )
+        else:
+            context = self._build_default_context(
+                project_id=project_id,
+                chapter_metadata=chapter_metadata,
+                chapters=chapters,
+                current_chapter=current_chapter,
+                novel_profile=novel_profile,
+                context_entries=context_entries,
+                macro_substitute_fn=macro_substitute_fn,
+                regex_apply_fn=regex_apply_fn,
+            )
 
         return self._render_with_timeout(text, context)
 
@@ -533,6 +610,11 @@ class TemplateEngine:
         （可调用 setvar 更新变量），用执行结果替换原块。
         最终显示给用户的文本不含 Jinja2 语法。
 
+        使用精简白名单 ``POST_RECEIVE_WHITELIST``（9 个纯操作函数），
+        移除数据读取函数（get_chapter/get_chapters/get_novel_profile 等）
+        防 SSTI 数据外泄：AI 输出不可信，不应让其读取其他章节/档案数据
+        外泄到输出文本；保留 setvar/getvar 满足变量回写需求。
+
         Args:
             text: AI 输出文本
             project_id: 项目 ID
@@ -558,6 +640,7 @@ class TemplateEngine:
             context_entries=context_entries,
             macro_substitute_fn=macro_substitute_fn,
             regex_apply_fn=regex_apply_fn,
+            post_receive=True,
         )
 
     def render_template(

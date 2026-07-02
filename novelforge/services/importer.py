@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import re
 import time
@@ -27,6 +28,43 @@ logger = logging.getLogger(__name__)
 
 # 默认章节标题正则
 DEFAULT_CHAPTER_PATTERN = r"^第[一二三四五六七八九十百千零\d]+[章节回卷]"
+
+# 章节标题匹配超时秒数（防止用户输入的灾难性回溯正则卡死导入流程）
+_CHAPTER_MATCH_TIMEOUT: float = 5.0
+
+# 模块级共享线程池：用于施加超时保护的正则匹配
+_CHAPTER_MATCH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+
+def _finditer_chapters_with_timeout(
+    compiled_regex: "re.Pattern[str]", text: str, timeout: float = _CHAPTER_MATCH_TIMEOUT
+) -> list["re.Match[str]"] | None:
+    """带超时保护的章节标题 ``finditer``。
+
+    用户可自定义章节标题正则，存在灾难性回溯风险（如 ``(a+)+$``），
+    在百万字文本上可能卡死导入流程。使用线程池施加超时保护。
+
+    Args:
+        compiled_regex: 已编译的章节标题正则
+        text: 全文文本
+        timeout: 超时秒数
+
+    Returns:
+        匹配列表；超时返回 None（调用方降级用默认正则重试）
+    """
+
+    def _collect() -> list["re.Match[str]"]:
+        return list(compiled_regex.finditer(text))
+
+    try:
+        future = _CHAPTER_MATCH_EXECUTOR.submit(_collect)
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        logger.warning(
+            "章节标题正则匹配超时（可能存在灾难性回溯），降级使用默认正则: %s",
+            compiled_regex.pattern[:100],
+        )
+        return None
 
 
 class ImportResult:
@@ -203,8 +241,12 @@ class TxtImporter:
             logger.error("章节标题正则编译失败: %s, 使用默认正则", e)
             regex = re.compile(DEFAULT_CHAPTER_PATTERN, re.MULTILINE)
 
-        # 批量匹配所有标题位置
-        matches = list(regex.finditer(text))
+        # 批量匹配所有标题位置（带超时保护，防止灾难性回溯卡死导入）
+        matches = _finditer_chapters_with_timeout(regex, text)
+        if matches is None:
+            # 超时：降级用默认正则重新匹配
+            regex = re.compile(DEFAULT_CHAPTER_PATTERN, re.MULTILINE)
+            matches = _finditer_chapters_with_timeout(regex, text) or []
 
         if not matches:
             # 无匹配，整文作为单章

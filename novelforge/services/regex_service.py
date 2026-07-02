@@ -40,7 +40,7 @@ from novelforge.models import (
     VALID_PLACEMENTS,
     RegexScript,
 )
-from novelforge.utils.ids import generate_id
+from novelforge.utils.ids import generate_id, validate_id
 
 logger = logging.getLogger(__name__)
 
@@ -210,10 +210,12 @@ class RegexService:
         if scope == SCOPE_SCOPED:
             if not project_id:
                 raise ValueError("scoped 作用域必须提供 project_id")
+            validate_id(project_id, "project_id")
             return self.storage_path / "projects" / project_id / "regex.json"
         if scope == SCOPE_PRESET:
             if not preset_id:
                 raise ValueError("preset 作用域必须提供 preset_id")
+            validate_id(preset_id, "preset_id")
             return self.regex_dir / f"preset_{preset_id}.json"
         raise ValueError(f"未知的作用域: {scope}")
 

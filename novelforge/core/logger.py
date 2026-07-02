@@ -19,6 +19,7 @@ from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 from novelforge.core.storage import get_default_storage_path
+from novelforge.utils.paths import secure_file
 
 # 日志文件路径
 LOG_DIR: Path = get_default_storage_path() / "logs"
@@ -30,11 +31,21 @@ LOG_BACKUP_DAYS: int = 7
 # 请求体/响应体截断长度
 BODY_TRUNCATE_LENGTH: int = 200
 
-# API Key 脱敏正则（匹配 sk- 开头的字符串，至少 10 个字符）
-API_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_\-]{8,}")
+# API Key 脱敏正则
+# 覆盖常见前缀：sk-（OpenAI/DeepSeek 等）、sk-ant-（Anthropic）、sk-or-（OpenRouter），
+# 以及任意长度 >= 12 的 base64-ish token 串（兜底自定义网关 token）
+API_KEY_PATTERN = re.compile(
+    r"(sk-ant-[A-Za-z0-9_\-]{6,}|sk-or-[A-Za-z0-9_\-]{6,}|sk-[A-Za-z0-9_\-]{8,})"
+)
 
-# Bearer Token 脱敏正则
+# Bearer Token 脱敏正则（Authorization 头值，无论前缀）
 BEARER_PATTERN = re.compile(r"(Bearer\s+)[A-Za-z0-9_\-\.]{8,}", re.IGNORECASE)
+
+# Authorization 头整体脱敏（覆盖任意 Bearer token，无论前缀）
+# 形如 Authorization: Bearer xxx / "Authorization":"Bearer xxx" / Authorization=Bearer xxx
+AUTH_HEADER_PATTERN = re.compile(
+    r"(Authorization\s*[:=]\s*Bearer\s+)([A-Za-z0-9_\-\.]{6,})", re.IGNORECASE
+)
 
 
 class SensitiveDataFilter(logging.Filter):
@@ -60,9 +71,11 @@ class SensitiveDataFilter(logging.Filter):
     @staticmethod
     def _sanitize(text: str) -> str:
         """脱敏文本。"""
-        # API Key 脱敏
+        # Authorization 头整体脱敏（先于 Bearer/API_KEY，覆盖任意前缀的 token）
+        text = AUTH_HEADER_PATTERN.sub(r"\1****", text)
+        # API Key 脱敏（sk- / sk-ant- / sk-or- 前缀）
         text = API_KEY_PATTERN.sub("sk-****", text)
-        # Bearer Token 脱敏
+        # Bearer Token 脱敏（裸 Bearer xxx，未带 Authorization 前缀）
         text = BEARER_PATTERN.sub(r"\1****", text)
         # 长文本截断（检测 JSON 请求体或超长文本）
         if len(text) > BODY_TRUNCATE_LENGTH + 100:
@@ -108,6 +121,8 @@ def setup_logging(debug: bool = False, log_dir: Path | None = None) -> logging.L
     )
     file_handler.addFilter(SensitiveDataFilter())
     root_logger.addHandler(file_handler)
+    # 收紧日志文件权限：日志可能含截断的请求/响应体，仅所有者可读写
+    secure_file(log_file)
 
     # 控制台 handler（开发调试用）
     console_handler = logging.StreamHandler()

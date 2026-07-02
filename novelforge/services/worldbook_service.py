@@ -26,6 +26,7 @@ from novelforge.models.worldbook import WorldBook
 from novelforge.services._base_json_service import BaseJsonService
 from novelforge.services.storage_service import _generate_id
 from novelforge.services.worldbook_importer import import_worldbook
+from novelforge.utils.ids import validate_id
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ class WorldBookService(BaseJsonService[WorldBook]):
         Returns:
             WorldBook 对象，不存在时返回 None
         """
+        validate_id(wb_id, "worldbook_id")
         wb_path = self.worldbooks_dir / f"{wb_id}.json"
         return self.load(wb_path)
 
@@ -106,6 +108,7 @@ class WorldBookService(BaseJsonService[WorldBook]):
         Args:
             wb: 待保存的世界书
         """
+        validate_id(wb.id, "worldbook_id")
         wb.updated_at = datetime.now()
         wb_path = self.worldbooks_dir / f"{wb.id}.json"
         self.save(wb_path, wb)
@@ -120,6 +123,7 @@ class WorldBookService(BaseJsonService[WorldBook]):
         Returns:
             是否删除成功
         """
+        validate_id(wb_id, "worldbook_id")
         wb_path = self.worldbooks_dir / f"{wb_id}.json"
         if not self.delete(wb_path):
             return False

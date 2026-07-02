@@ -84,6 +84,10 @@ def get_machine_id() -> str:
         try:
             machine_id_file.parent.mkdir(parents=True, exist_ok=True)
             machine_id_file.write_text(machine_id, encoding="utf-8")
+            # 收紧权限：.machine_id 是 passphrase 来源之一，仅所有者可读写
+            from novelforge.utils.paths import secure_file
+
+            secure_file(machine_id_file)
         except Exception:
             # 持久化失败不影响本次返回值，但下次调用仍可能走 fallback
             pass
@@ -241,6 +245,10 @@ class CryptoManager:
         with open(file_path, "wb") as f:
             f.write(export_salt)
             f.write(encrypted_payload)
+        # 收紧权限：导出密钥文件含原始 Fernet 密钥，仅所有者可读写
+        from novelforge.utils.paths import secure_file
+
+        secure_file(file_path)
 
         logger.info("加密密钥已导出到 %s", file_path)
 

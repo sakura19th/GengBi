@@ -55,6 +55,42 @@ _FLAG_MAP: dict[str, int] = {
 _IGNORED_FLAGS: frozenset[str] = frozenset({"y"})
 
 
+def _finditer_with_timeout(
+    pattern: "regex.Pattern[str]",
+    text: str,
+    timeout: float = 5.0,
+) -> list[tuple[int, int]]:
+    """带超时保护的 ``finditer``，防止用户输入的灾难性回溯正则卡死 UI。
+
+    与 ``CompiledRegexScript._sub_with_timeout`` 一致，使用模块级共享线程池
+    执行匹配并施加超时。超时则放弃等待、返回已收集的匹配位置并记录警告。
+
+    注意：Python 线程无法被强制终止，超时后的工作线程仍会在后台继续运行。
+    模块级 executor 的 max_workers 取较大值以容纳此类残留线程。
+
+    Args:
+        pattern: 已编译的正则模式
+        text: 待匹配文本
+        timeout: 超时秒数（默认 5 秒）
+
+    Returns:
+        匹配位置 (start, end) 列表；超时则返回部分结果
+    """
+
+    def _collect() -> list[tuple[int, int]]:
+        return [(m.start(), m.end()) for m in pattern.finditer(text)]
+
+    try:
+        future = _REGEX_EXECUTOR.submit(_collect)
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        logger.warning(
+            "正则匹配超时（可能存在灾难性回溯），返回部分结果: %s",
+            pattern.pattern[:100],
+        )
+        return []
+
+
 def parse_find_regex(find_regex: str) -> tuple[str, str]:
     """解析 ST 格式的 findRegex 字符串。
 
@@ -488,14 +524,13 @@ class RegexEngine:
         if not compiled.is_valid:
             return text, []
 
-        # 收集匹配位置（在替换前）
+        # 收集匹配位置（在替换前）—— 带超时保护，防止灾难性回溯卡死 UI
         pattern_str, flags_str = parse_find_regex(script.findRegex)
         matches: list[tuple[int, int]] = []
         try:
             flags = compile_flags(flags_str)
             pattern = regex.compile(pattern_str, flags)
-            for m in pattern.finditer(text):
-                matches.append((m.start(), m.end()))
+            matches = _finditer_with_timeout(pattern, text)
         except regex.error:
             pass
 

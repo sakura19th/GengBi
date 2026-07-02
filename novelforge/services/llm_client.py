@@ -122,6 +122,11 @@ class LLMClient:
         # api_key 为空时仅警告（本地 LLM 如 Ollama 无需 API Key，不阻断初始化）
         if not api_key or not api_key.strip():
             logger.warning("api_key 为空，本地 LLM 服务器可忽略此警告")
+        elif base_url.startswith("http://"):
+            # 明文 HTTP + 非空 API Key：key 将以明文传输，易被 MITM 截获
+            logger.warning(
+                "base_url 为 http://，API Key 将以明文传输（易被 MITM 截获），建议改用 https://"
+            )
 
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key

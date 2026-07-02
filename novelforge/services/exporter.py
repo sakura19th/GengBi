@@ -333,11 +333,20 @@ def import_project_backup(
     if not zip_path.exists():
         raise FileNotFoundError(f"备份文件不存在: {zip_path}")
 
-    # 解压到临时目录
+    # 解压到临时目录（校验成员名，防止 ZIP slip 路径穿越）
     with tempfile.TemporaryDirectory(prefix="novelforge_import_") as tmp_dir:
         tmp_path = Path(tmp_dir)
+        # resolve 一次基目录，避免每个成员重复 resolve
+        base_dir = tmp_path.resolve()
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
+                # 逐成员校验：解析后路径必须位于 tmp_path 之下
+                for member in zf.infolist():
+                    target = (tmp_path / member.filename).resolve()
+                    if target != base_dir and base_dir not in target.parents:
+                        raise ValueError(
+                            f"备份文件含非法路径（疑似 ZIP slip）: {member.filename}"
+                        )
                 zf.extractall(tmp_path)
         except (OSError, zipfile.BadZipFile) as e:
             logger.error("解压备份 zip 失败 %s: %s", zip_path, e)

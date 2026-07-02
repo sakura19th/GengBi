@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from novelforge.models.context import ContextEntry
 from novelforge.models.protagonist import ProtagonistProfile
@@ -85,3 +85,11 @@ class Chapter(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     protagonist_profile: ProtagonistProfile | None = None
+
+    @field_validator("id", "project_id")
+    @classmethod
+    def _validate_path_id(cls, v: str) -> str:
+        """防御性校验：拒绝含路径字符的 ID，防止导入恶意数据时路径穿越。"""
+        if v and ("/" in v or "\\" in v or ".." in v or "\x00" in v):
+            raise ValueError(f"非法 ID（含路径字符）: {v!r}")
+        return v

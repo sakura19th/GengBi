@@ -30,6 +30,7 @@ from typing import Any
 import aiosqlite
 
 from novelforge.models import Chapter
+from novelforge.utils.ids import validate_id
 
 logger = logging.getLogger(__name__)
 
@@ -132,12 +133,21 @@ def get_default_storage_path() -> Path:
 
 
 def get_chapter_file_path(storage_path: Path, project_id: str, chapter_id: str) -> Path:
-    """返回章节正文文件路径。"""
+    """返回章节正文文件路径。
+
+    校验 ``project_id`` / ``chapter_id`` 防止路径穿越（外部数据流入文件路径）。
+    """
+    validate_id(project_id, "project_id")
+    validate_id(chapter_id, "chapter_id")
     return storage_path / "projects" / project_id / "chapters" / f"{chapter_id}.txt"
 
 
 def get_preset_file_path(storage_path: Path, preset_id: str) -> Path:
-    """返回预设文件路径。"""
+    """返回预设文件路径。
+
+    校验 ``preset_id`` 防止路径穿越（外部数据流入文件路径）。
+    """
+    validate_id(preset_id, "preset_id")
     return storage_path / "presets" / f"{preset_id}.json"
 
 
@@ -324,6 +334,11 @@ class Storage:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._conn = await aiosqlite.connect(str(self._db_path))
+
+        # 收紧 DB 文件权限：含完整提示词与续写历史（敏感小说内容），仅所有者可读写
+        from novelforge.utils.paths import secure_file
+
+        secure_file(self._db_path)
 
         # 检测网络文件系统，决定日志模式
         if is_network_filesystem(self._db_path):

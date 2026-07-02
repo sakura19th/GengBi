@@ -59,6 +59,7 @@ from novelforge.core.storage import (
     get_default_storage_path,
     load_json_with_recovery,
 )
+from novelforge.utils.paths import secure_file
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +177,8 @@ class ConfigManager:
             backup_file(self.config_path)
             content = json.dumps(self.config, ensure_ascii=False, indent=2)
             atomic_write_file(self.config_path, content)
+            # 收紧权限：config.json 含加密 salt 与 API Key 密文，仅所有者可读写
+            secure_file(self.config_path)
             logger.debug("配置已保存到 %s", self.config_path)
 
     def get_load_error(self) -> str | None:

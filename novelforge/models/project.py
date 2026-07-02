@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 if TYPE_CHECKING:
     from novelforge.models.ontology import WorldOntology
@@ -91,3 +91,11 @@ class Project(BaseModel):
     worldbook_id: str = ""  # 项目专属世界书 ID（存储世界观底层条目）
     world_ontology: Any | None = None  # WorldOntology 模型实例（全文提取一次固化）
     custom_audit_rules: list[Any] = Field(default_factory=list)  # list[CustomAuditRule]，Any 避免循环导入
+
+    @field_validator("id", "preset_id", "worldbook_id")
+    @classmethod
+    def _validate_path_id(cls, v: str) -> str:
+        """防御性校验：拒绝含路径字符的 ID，防止导入恶意数据时路径穿越。"""
+        if v and ("/" in v or "\\" in v or ".." in v or "\x00" in v):
+            raise ValueError(f"非法 ID（含路径字符）: {v!r}")
+        return v

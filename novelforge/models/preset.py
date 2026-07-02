@@ -86,3 +86,11 @@ class WritingPreset(BaseModel):
     generation_params: dict = Field(default_factory=dict)
     enabled: bool = True
     raw_st_fields: dict = Field(default_factory=dict, alias="_raw_st_fields")
+
+    @field_validator("id")
+    @classmethod
+    def _validate_path_id(cls, v: str) -> str:
+        """防御性校验：拒绝含路径字符的 ID，防止导入恶意数据时路径穿越。"""
+        if v and ("/" in v or "\\" in v or ".." in v or "\x00" in v):
+            raise ValueError(f"非法 ID（含路径字符）: {v!r}")
+        return v
