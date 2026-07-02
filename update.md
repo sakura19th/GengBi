@@ -4,6 +4,44 @@
 
 ---
 
+## 2026-07-01：新增 rigid_ai_text 审计维度 + 默认预设抗八股/抗重复增强 + 正则黑名单扩展
+
+### 背景
+
+用户提供 5 个 SillyTavern 预设文件（TGbreak V3.1.1、梦鲸思客 V4-0626-exp、夏瑾双鱼座 Beta 0.40、Femiris DS特化、百家饭 lunareclipse 2.0.1），要求提取其中关于文风、抗八股、抗重复等 AI 生成限制的限定条件，为默认预设重新设置相关条目，并新增一条审计维度严格禁止刻板 AI 生成文本。
+
+### 核心改动
+
+#### 1. 默认预设抗八股/抗重复/文风增强（`novelforge/resources/defaults/default_preset.json`）
+- **抗八股模块（nf_anti_bagua）扩展为 8 大类**：句式禁忌（对比句/定义句/递进排比/时间状语/论文式句式）、词汇黑名单（不可名状/难以言喻/不容置疑/毋庸置疑/显而易见等）、描写方法禁忌（外貌微表情套路/瞳孔变化/喉结滚动/指关节白）、对白设计禁忌（他说她说堆砌/无信息对白/提示语冗余）、情节推进禁忌（机械转场/情绪外化总结/内心独白过载）、认知边界要求（角色全知/信息认识论违规）、AI痕迹禁忌（排比套话/列举式描写/哲理总结收尾/过度修饰）、正面要求（具象化/白描/细节真实/对话推动情节）
+- **抗重复模块（nf_anti_repetition）扩展为 7 大类**：前文重复检测、句式重复禁忌、词汇重复禁忌、对话套路禁忌、情节套路禁忌、描写套路禁忌、节奏控制
+- **文风互斥层增强**：通用网文（5 维度）/古风（4 维度）/轻小说（5 维度）各扩展风格规范条目
+
+#### 2. 新增 rigid_ai_text 审计维度（刻板AI文本禁令）
+- **`novelforge/models/agent.py`**：`VALID_CRITIQUE_CATEGORIES` 15→16 值（追加 `rigid_ai_text`）
+- **`novelforge/models/volume.py`**：`DEFAULT_AUDIT_DIMENSIONS` 12→13 维度（追加 `rigid_ai_text`，严格给分）
+- **`novelforge/ui/volume_panel.py`**：`_AUDIT_DIMENSION_LABELS` 12→13 维度（追加 `rigid_ai_text` 刻板AI文本禁令）
+- **`phase_single_audit.txt`**：6→7 维度，3→4 summary 标记（+【刻板AI文本审计】），含句式套路/词汇黑名单/描写方法/对白设计/AI痕迹/认知越界 6 项检查
+- **`phase_verify.txt`**：15→16 维度，7→8 summary 标记（+【刻板AI文本审计】），含句式套路/词汇黑名单/描写方法/对白设计/AI痕迹/认知越界 6 项检查
+- **`phase_outline_audit.txt`**：12→13 维度（+rigid_ai_text），严格给分：3 处以上 AI 痕迹 score≤5，5 处以上或整段 AI 套路 score≤3 passed=false
+
+#### 3. 正则黑名单扩展（`novelforge/resources/defaults/default_regex_scripts.json`）
+- GB-八股抹除正则从 5 词扩展为 26 词：新增不可名状/难以言喻/眸光闪动/眉梢微挑/瞳孔微缩/不言而喻/毋庸置疑/显而易见/众所周知/理所当然/毫无疑问/一丝/一缕/一抹/一股/一寸/霎时/陡然/蓦地/猛然等（"突然/忽然"未纳入避免误伤常用副词）
+
+### 测试
+
+修复 4 个测试文件断言以匹配新维度计数：
+- `tests/test_volume_models.py`：`len(audit_dimensions) == 12` → `== 13`，维度列表追加 `rigid_ai_text`
+- `tests/test_volume_orchestrator.py`：`len(DEFAULT_AUDIT_DIMENSIONS) == 12` → `== 13`
+- `tests/test_volume_prompts.py`：`test_phase_verify_template_14_dimensions` → `_16_`，`test_phase_verify_six_summary_markers` → `_eight_`，`十五个维度` → `十六个维度`，markers 列表追加【自定义设定审计】与【刻板AI文本审计】
+- `tests/test_single_audit.py`：维度断言 5→7（+custom_rules_compliance +rigid_ai_text），标记断言追加【自定义设定审计】与【刻板AI文本审计】
+
+### 文档同步
+
+agent.md 同步 rigid_ai_text 维度计数（16 值/13 维度/16 维度/13 维度/7 维度）与标记名修正（【自定义设定遵从性审计】→【自定义设定审计】与模板一致）；update.md 追加本条目。同日修正 `phase_single_audit.txt` 第 1 行维度枚举文案滞后（"六个维度"→"七个维度"，补"自定义设定遵从性"，与第 25/27 行及维度定义小节一致）。
+
+---
+
 ## 2026-07-01：发布 v0.2.4（自定义设定/审计必查项 + 高亮 + 流程端点 + 多项修复）
 
 ### 版本号同步

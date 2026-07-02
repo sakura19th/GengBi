@@ -5,7 +5,7 @@
 
 # 启用的审计维度
 {{audit_dimensions}}
-（逗号分隔的维度名列表，取值 consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance/custom_rules_compliance）
+（逗号分隔的维度名列表，取值 consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance/custom_rules_compliance/rigid_ai_text）
 
 # 前文参考（最近 10 章正文）
 {{previous_chapters_text}}
@@ -56,13 +56,14 @@
 - worldview_consistency（世界观一致性）：大纲中的事件/设定是否符合 world_ontology 中的因果架构、时空规则、守恒律？**严格给分**：违反底层世界观元规则时该维度 score ≤ 3
 - user_directive_compliance（用户指令遵从性）：修订后的大纲是否满足 user_directive_analysis.required_elements 中的所有必备要素？是否着重体现了 emphasized_elements 中的强调部分？**严格给分**：未满足 required_elements 任一项时该维度 score ≤ 3；conflicts 中的冲突未在修订大纲中明确处理的也应低分
 - custom_rules_compliance（自定义设定遵从性）：修订后的大纲是否满足每条自定义规则的 requirement 与 audit_criteria？**严格给分**：违反 severity=critical 的规则时该维度 score ≤ 3，整体 passed=false；违反 severity=major 的规则时该维度 score ≤ 5
+- rigid_ai_text（刻板AI文本禁令）：大纲中是否存在典型 AI 生成套路文本？**严格给分**：出现 3 处以上典型 AI 痕迹（句式套路/词汇黑名单/描写方法/对白设计/AI痕迹/认知越界）时该维度 score ≤ 5；出现 5 处以上或整段为 AI 套路文本（如整段排比/列举/哲理总结）时 score ≤ 3，整体 passed=false
 
 仅审计上述启用的维度，未启用的维度可跳过。
 
 # 输出格式
 请输出严格的 JSON 对象（OutlineAuditReport），包含以下字段：
 - dimensions：数组，各启用维度的审计结果，每项含：
-  - dimension：字符串，维度名（consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance/custom_rules_compliance）
+  - dimension：字符串，维度名（consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance/custom_rules_compliance/rigid_ai_text）
   - score：整数，该维度评分（1-10，10 为最佳）
   - issues：数组，该维度发现的具体问题列表（每项为字符串）
   - suggestions：数组，针对该问题的具体修订建议列表（每项为字符串）

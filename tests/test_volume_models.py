@@ -99,11 +99,11 @@ def test_volume_run_config_analysis_depth_default() -> None:
 
 
 def test_volume_run_config_default_audit_dimensions() -> None:
-    """默认 audit_dimensions 含 12 维度且与 DEFAULT_AUDIT_DIMENSIONS 一致。"""
+    """默认 audit_dimensions 含 13 维度且与 DEFAULT_AUDIT_DIMENSIONS 一致。"""
     config = VolumeRunConfig()
-    assert len(config.audit_dimensions) == 12
+    assert len(config.audit_dimensions) == 13
     assert config.audit_dimensions == DEFAULT_AUDIT_DIMENSIONS
-    # 确认 12 个维度内容（含 custom_rules_compliance）
+    # 确认 13 个维度内容（含 custom_rules_compliance + rigid_ai_text）
     assert config.audit_dimensions == [
         "consistency",
         "pacing",
@@ -117,6 +117,7 @@ def test_volume_run_config_default_audit_dimensions() -> None:
         "worldview_consistency",
         "user_directive_compliance",
         "custom_rules_compliance",
+        "rigid_ai_text",
     ]
 
 
@@ -126,7 +127,7 @@ def test_volume_run_config_audit_dimensions_independent() -> None:
     c2 = VolumeRunConfig()
     c1.audit_dimensions.append("extra")
     # c2 不受影响
-    assert len(c2.audit_dimensions) == 12
+    assert len(c2.audit_dimensions) == 13
     assert "extra" not in c2.audit_dimensions
 
 

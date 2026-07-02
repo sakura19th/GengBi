@@ -621,11 +621,11 @@ def test_phase_audit_rewrite_placeholders() -> None:
     _assert_no_placeholders(result)
 
 
-# ===== 10. phase_verify.txt 14 维度与新占位符测试 =====
+# ===== 10. phase_verify.txt 16 维度与新占位符测试 =====
 
 
-def test_phase_verify_template_14_dimensions() -> None:
-    """phase_verify.txt 含 15 个审计维度定义（含 custom_rules_compliance）。"""
+def test_phase_verify_template_16_dimensions() -> None:
+    """phase_verify.txt 含 16 个审计维度定义（含 custom_rules_compliance + rigid_ai_text）。"""
     template = load_text_resource(get_agent_prompt_path("verify"))
     # 11 个原有维度
     original_dims = [
@@ -635,12 +635,12 @@ def test_phase_verify_template_14_dimensions() -> None:
     ]
     # 3 个新维度
     new_dims = ["outline_alignment", "detail_outline_alignment", "chapter_transition"]
-    # 第 15 维度：自定义设定遵从性
-    custom_dim = ["custom_rules_compliance"]
-    for dim in original_dims + new_dims + custom_dim:
+    # 第 15-16 维度：自定义设定遵从性 + 刻板AI文本禁令
+    custom_dims = ["custom_rules_compliance", "rigid_ai_text"]
+    for dim in original_dims + new_dims + custom_dims:
         assert dim in template, f"phase_verify.txt 缺少维度: {dim}"
-    # 含"十五个维度"
-    assert "十五个维度" in template
+    # 含"十六个维度"
+    assert "十六个维度" in template
 
 
 def test_phase_verify_previous_chapter_text_placeholder() -> None:
@@ -652,8 +652,8 @@ def test_phase_verify_previous_chapter_text_placeholder() -> None:
     assert "章节衔接审计" in template
 
 
-def test_phase_verify_six_summary_markers() -> None:
-    """phase_verify.txt summary 含 6 个固定标记段落。"""
+def test_phase_verify_eight_summary_markers() -> None:
+    """phase_verify.txt summary 含 8 个固定标记段落。"""
     template = load_text_resource(get_agent_prompt_path("verify"))
     markers = [
         "【主角一致性审计】",
@@ -662,6 +662,8 @@ def test_phase_verify_six_summary_markers() -> None:
         "【大纲一致性审计】",
         "【细纲一致性审计】",
         "【章节衔接审计】",
+        "【自定义设定审计】",
+        "【刻板AI文本审计】",
     ]
     for marker in markers:
         assert marker in template, f"phase_verify.txt 缺少 summary 标记段落: {marker}"

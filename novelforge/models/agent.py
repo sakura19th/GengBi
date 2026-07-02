@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-# CritiqueIssue category 合法值（对齐 phase_outline_audit.txt 的 12 维度 + phase_verify.txt 的 15 维度）
+# CritiqueIssue category 合法值（对齐 phase_outline_audit.txt 的 13 维度 + phase_verify.txt 的 16 维度）
 VALID_CRITIQUE_CATEGORIES: frozenset[str] = frozenset(
     {"consistency", "pacing", "engagement", "structure", "coherence",
      "foreshadowing", "characters", "style",
@@ -18,7 +18,8 @@ VALID_CRITIQUE_CATEGORIES: frozenset[str] = frozenset(
      "custom_rules_compliance",  # 自定义设定遵从性（一票否决：违反 severity=critical 的规则时 passed=false）
      "outline_alignment",  # 大纲一致性（一票否决：未覆盖 ChapterPlan 关键事件时 critical）
      "detail_outline_alignment",  # 细纲一致性（一票否决：偏离细纲场景规划时 critical）
-     "chapter_transition"}  # 章节衔接（一票否决：与前一章结尾断裂时 critical）
+     "chapter_transition",  # 章节衔接（一票否决：与前一章结尾断裂时 critical）
+     "rigid_ai_text"}  # 刻板AI文本禁令（严格禁止AI套路文本：出现3处以上典型AI痕迹判major，5处以上或整段为AI套路文本判critical，passed=false）
 )
 
 # CritiqueIssue severity 合法值

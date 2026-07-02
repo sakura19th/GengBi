@@ -55,16 +55,18 @@ class TestSingleAuditTemplate:
         assert "{{previous_chapters_text}}" not in content
 
     def test_single_audit_template_dimensions(self) -> None:
-        """模板应聚焦 5 个维度，不含 pacing/engagement 等。"""
+        """模板应聚焦 7 个维度，不含 pacing/engagement 等。"""
         path = get_agent_prompt_path("single_audit")
         content = load_text_resource(path)
 
-        # 必须含的 5 维度
+        # 必须含的 7 维度
         assert "consistency" in content
         assert "protagonist_consistency" in content
         assert "worldview_consistency" in content
         assert "style" in content
         assert "coherence" in content
+        assert "custom_rules_compliance" in content
+        assert "rigid_ai_text" in content
 
         # 不应含卷级专用维度
         assert "## 2. pacing" not in content
@@ -83,6 +85,8 @@ class TestSingleAuditTemplate:
         assert "passed" in content
         assert "【主角一致性审计】" in content
         assert "【世界观一致性审计】" in content
+        assert "【自定义设定审计】" in content
+        assert "【刻板AI文本审计】" in content
 
 
 class TestAuditRewriteTemplate:

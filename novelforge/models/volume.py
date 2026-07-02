@@ -17,7 +17,7 @@ VALID_ANALYSIS_DEPTHS: frozenset[str] = frozenset(
     {"light", "standard", "thorough", "exhaustive"}
 )
 
-# 默认大纲审计维度（12 维度：原 8 维度 + 主角一致性 + 世界观一致性 + 用户指令遵从性 + 自定义设定遵从性）
+# 默认大纲审计维度（13 维度：原 12 维度 + 刻板AI文本禁令）
 DEFAULT_AUDIT_DIMENSIONS: list[str] = [
     "consistency",
     "pacing",
@@ -31,6 +31,7 @@ DEFAULT_AUDIT_DIMENSIONS: list[str] = [
     "worldview_consistency",  # 世界观一致性（严格给分：违反底层世界观元规则时 score ≤ 3）
     "user_directive_compliance",  # 用户指令遵从性（严格给分：未满足 required_elements 任一项时 score ≤ 3）
     "custom_rules_compliance",  # 自定义设定遵从性（一票否决：违反 severity=critical 的规则时 passed=false）
+    "rigid_ai_text",  # 刻板AI文本禁令（严格给分：出现3处以上典型AI痕迹 score ≤ 5，5处以上或整段为AI套路文本 score ≤ 3，passed=false）
 ]
 
 # ChapterPlan.plot_role 合法值（起承转合 + 高潮 + 过渡）
