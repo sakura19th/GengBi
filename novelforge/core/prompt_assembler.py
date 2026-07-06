@@ -360,6 +360,7 @@ class PromptAssembler:
         world_ontology: Any = None,
         protagonist_profile: Any = None,
         custom_audit_rules: Any = None,
+        exclude_current: bool = False,
     ) -> AssembleResult:
         """组装提示词 messages。
 
@@ -378,6 +379,7 @@ class PromptAssembler:
             user_input: 用户续写指令
             lookback_chapters: 回溯章节数（0=全部前文，>0=仅取最近 N 章）
             skip_history: 跳过聊天历史构建（卷模式专用，True 时不注入任何章节正文到 chat history）
+            exclude_current: 排除当前章节（重写模式专用，True 时聊天历史不含当前章节正文）
 
         Returns:
             AssembleResult 对象
@@ -421,7 +423,11 @@ class PromptAssembler:
 
         # ===== 阶段 2：构建历史 + 深度注入 =====
         history_messages = self._build_history(
-            chapters, current_chapter, lookback_chapters, skip_history
+            chapters,
+            current_chapter,
+            lookback_chapters,
+            skip_history,
+            exclude_current=exclude_current,
         )
         at_depth_entries = [e for e in context_entries if e.position == "at_depth"]
         # 排序后 splice 插入
@@ -742,6 +748,7 @@ class PromptAssembler:
         current_chapter: Any,
         lookback_chapters: int = 0,
         skip_history: bool = False,
+        exclude_current: bool = False,
     ) -> list[dict[str, Any]]:
         """构建章节历史消息。
 
@@ -755,11 +762,17 @@ class PromptAssembler:
         ``skip_history`` 为 True 时直接返回空列表（卷模式专用，
         前文由"最近 10 章正文参考"系统消息提供，避免章节正文重复）。
 
+        ``exclude_current`` 为 True 时（重写模式专用），聊天历史**不含**当前章节
+        正文（当前章节是待重写对象，不是前文）。若当前章节在列表中，遍历到
+        ``ch_id == current_id`` 时即 ``break`` 且**不 append** 当前章节消息，
+        历史止于当前章节之前一章；若当前章节不在列表中，也不单独追加。
+
         Args:
             chapters: 所有章节列表
             current_chapter: 当前续写章节
             lookback_chapters: 回溯章节数（0=全部前文，>0=仅取最近 N 章）
             skip_history: 跳过历史构建（卷模式专用）
+            exclude_current: 排除当前章节（重写模式专用，True 时历史不含当前章节消息）
 
         Returns:
             历史消息列表
@@ -781,19 +794,28 @@ class PromptAssembler:
 
         sorted_chapters = sorted(chapters, key=get_index)
 
-        # 找到当前章节位置，取到当前章节为止（含）
+        # 构建历史消息列表
+        # - exclude_current=False（默认）：取到当前章节为止（含），当前章节在最后
+        # - exclude_current=True（重写模式）：到当前章节即停止且不 append（历史止于前一章）
         history: list[dict[str, Any]] = []
         for ch in sorted_chapters:
             ch_id = ch.get("id", "") if isinstance(ch, dict) else getattr(ch, "id", "")
+            if exclude_current and ch_id == current_id:
+                # 重写模式：当前章节是待重写对象，不纳入前文历史
+                break
             history.append(_build_history_message(ch))
             if ch_id == current_id:
                 break
 
-        # 如果当前章节不在列表中，单独追加
-        if current_id and not any(
-            (ch.get("id", "") if isinstance(ch, dict) else getattr(ch, "id", ""))
-            == current_id
-            for ch in sorted_chapters
+        # 如果当前章节不在列表中，单独追加（重写模式跳过此分支）
+        if (
+            not exclude_current
+            and current_id
+            and not any(
+                (ch.get("id", "") if isinstance(ch, dict) else getattr(ch, "id", ""))
+                == current_id
+                for ch in sorted_chapters
+            )
         ):
             history.append(_build_history_message(current_chapter))
 

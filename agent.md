@@ -320,6 +320,27 @@ novelforge/
 - **HTTP 明文警告**（M-6，[llm_client.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/services/llm_client.py)）：保留 `http://` 支持兼容本地 LLM，但 `base_url` 为 `http://` 且 `api_key` 非空时 `logger.warning` 提示 MITM 风险（不阻断仅警告）
 - **依赖版本锁定**（M-7，[requirements.txt](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/requirements.txt)）：floor 提升至已修复 CVE 版本——aiohttp>=3.9.5（CVE-2024-23334/30251）、jinja2>=3.1.4（CVE-2024-22195/34064）、cryptography>=42.0.4（CVE-2024-26130）、pydantic>=2.5.3（CVE-2024-3772）等；不引入 lockfile 保持简单
 
+### 14. 当前章节重写模式（Rewrite Current Chapter）
+
+在「单章续写」与「卷续写」之外，新增第三种续写模式「重写当前章节」。该模式用两步流程重写当前章节正文：① 分析当前章节正文 + 用户输入需求，输出结构化的「新章节生成详细需求」；② 检查点暂停（AuditDialog）供用户审阅/编辑分析结果；③ 复用单章续写的 `prompt_assembler.assemble` + `ContinuationWorker` 生成新正文，存为 swipe（`created_by="rewrite_current"`），接受时用新内容**替换**当前章节正文（`replace_chapter_content`，不新建章节、不后移 index）。
+
+关键约束：重写模式下「前文提取」与「聊天历史构建」**不得包含当前章节**，因为当前章节正是待重写对象，不是「前文」。
+
+- **模式枚举**：`ContinuationPanel._mode_combo` 第三项 `"rewrite_current"`，触发独立信号 `rewrite_current_analysis_requested`（与 `start_continuation` 并列，不走 `_on_start_continuation_routed` 路由避免双重发射）。
+- **exclude_current 参数**：贯穿 `ContextExtractor.extract/extract_streaming/_get_lookback_chapters/_build_cache_key/_extract_common` 与 `PromptAssembler.assemble/_build_history`。`True` 时：
+  - `_get_lookback_chapters` 返回 `sorted_chapters[:current_idx]`（不含当前章节），lookback 截断作用于排除后的列表。
+  - `_build_history` 遍历到 `ch_id == current_id` 即 `break` 且**不 append** 当前章节消息（历史止于前一章）。
+  - 缓存 key 带 `:rewrite` 后缀（`_build_cache_key` suffix），避免与续写模式（含当前章节）互相覆盖。
+- **分析模板**：`resources/defaults/agent/phase_rewrite_analysis.txt`，6 占位符（`{{current_chapter_text}}` / `{{user_input}}` / `{{world_ontology}}` / `{{protagonist_profile}}` / `{{custom_audit_rules}}` / `{{context_entries}}`），输出 5 个分节（当前章节分析 / 用户需求解读 / 重写要点 / 风格与基调 / 具体要求清单）。
+- **流程端点**：`rewrite_analysis`（独立流程，低温稳定输出，`AuditWorker` temperature=0.3 max_tokens=4000）；重写生成复用 `single_continuation` 端点（参数与单章续写一致，仅 `created_by="rewrite_current"` 区分）。
+- **两步流程**（`_on_start_rewrite_current` → `_on_rewrite_analysis_accepted`）：
+  1. **Step 1 分析**：加载 `phase_rewrite_analysis.txt` 模板 str.replace 注入 6 占位符 → `AuditWorker` 流式输出 → `AuditDialog`（标题「重写需求分析」）供用户审阅/编辑 → 用户「采纳」进入 Step 2。
+  2. **Step 2 生成**：`analysis_text` 作为 `user_input` 传入 `prompt_assembler.assemble`（`exclude_current=True`）→ `ContinuationWorker` 流式输出新正文 → 存为 swipe 到当前章节。
+- **接受逻辑**：`_on_accept_continuation` 检查 `swipe.created_by`，若为 `"rewrite_current"` 则弹确认对话框 → `ChapterService.replace_chapter_content`（覆盖当前章节正文 + 删除 swipe + 不后移后续章节 index），否则走原 `promote_continuation_to_chapter`（插入新章节到当前章节之后）。
+- **提取入口分发**：`_on_extract_requested` 按 `continuation_panel.get_mode()` 判断，`rewrite_current` 模式下调 `extract_streaming(..., exclude_current=True)`，其余模式不变。
+- **主角形象档案**：重写模式下 `protagonist_profile` 仍取当前章节的档案（作为目标参考，不排除当前章节提取——重写目标是让新章节符合主角形象档案）。
+- **用户切换模式时**：`_current_context_entries` 字段共享，切换模式后需重新点击「提取上下文」（提取范围按当前模式自动适配 `exclude_current`）。不做自动重提取以避免不必要的 LLM 调用。
+
 ## 代码风格规范
 
 - 使用 `from __future__ import annotations` 启用延迟类型注解

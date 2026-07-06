@@ -1376,8 +1376,9 @@ class ContextExtractor:
         chapters: list[Chapter],
         current_chapter: Chapter,
         lookback: int,
+        exclude_current: bool = False,
     ) -> list[Chapter]:
-        """获取前 N 章正文（含当前章节）。
+        """获取前 N 章正文（默认含当前章节）。
 
         章节数不足 N 时取所有可用章节。
         lookback <= 0 表示全部前文（从第 0 章到当前章节含）。
@@ -1386,9 +1387,12 @@ class ContextExtractor:
             chapters: 项目所有章节（按 index 排序）
             current_chapter: 当前续写章节
             lookback: 回溯章节数（0 或负数=全部前文）
+            exclude_current: 排除当前章节（重写模式专用，True 时返回
+                当前章节之前的章节列表，不含当前章节本身）
 
         Returns:
-            待提取的章节列表（旧→新，最后一条为当前章节）
+            待提取的章节列表（旧→新，默认最后一条为当前章节；
+            exclude_current=True 时最后一条为当前章节的前一章）
         """
         sorted_chapters = sorted(chapters, key=lambda c: c.index)
         # 找到当前章节位置
@@ -1403,6 +1407,14 @@ class ContextExtractor:
             if lookback <= 0:
                 return sorted_chapters  # 全部前文
             return sorted_chapters[-lookback:] if lookback > 0 else []
+
+        # exclude_current=True：返回当前章节之前的章节（不含当前章节）
+        # 用于重写当前章节模式，当前章节是待重写对象，不是前文
+        if exclude_current:
+            pre_chapters = sorted_chapters[:current_idx]
+            if lookback <= 0:
+                return pre_chapters
+            return pre_chapters[-lookback:] if lookback > 0 and pre_chapters else pre_chapters
 
         # lookback <= 0 表示全部前文：返回从第 0 章到当前章节
         if lookback <= 0:
@@ -1459,20 +1471,24 @@ class ContextExtractor:
         return batches
 
     def _build_cache_key(
-        self, project_id: str, chapter_id: str
+        self, project_id: str, chapter_id: str, exclude_current: bool = False
     ) -> str:
         """构建按章节绑定的缓存 key。
 
-        格式：``ctx_extract:{project_id}:{chapter_id}``
+        格式：``ctx_extract:{project_id}:{chapter_id}``，
+        exclude_current=True 时追加 ``:rewrite`` 后缀，
+        避免重写模式（排除当前章节）与续写模式（含当前章节）缓存互相覆盖。
 
         Args:
             project_id: 项目 ID
             chapter_id: 当前章节 ID
+            exclude_current: 是否排除当前章节（重写模式专用）
 
         Returns:
             缓存 key
         """
-        return f"{CACHE_KEY_PREFIX}:{project_id}:{chapter_id}"
+        suffix = ":rewrite" if exclude_current else ""
+        return f"{CACHE_KEY_PREFIX}:{project_id}:{chapter_id}{suffix}"
 
     async def _get_cached_data(
         self, cache_key: str
@@ -1737,6 +1753,7 @@ class ContextExtractor:
         stream: bool = False,
         on_chunk: Callable[[str], None] | None = None,
         on_batch_complete: Callable[[list, int, int], None] | None = None,
+        exclude_current: bool = False,
     ) -> ExtractResult:
         """统一的上下文提取实现（流式与非流式共享）。
 
@@ -1755,6 +1772,8 @@ class ContextExtractor:
             stream: 是否使用流式调用
             on_chunk: 流式模式下每个 chunk 的回调函数（接收增量文本）
             on_batch_complete: 流式模式下每批完成回调（累计 entries, 批次序号, 总批数）
+            exclude_current: 排除当前章节（重写模式专用，True 时前文不含当前章节，
+                缓存 key 追加 :rewrite 后缀避免与续写模式互相覆盖）
 
         Returns:
             ExtractResult 对象
@@ -1816,7 +1835,7 @@ class ContextExtractor:
         # 获取前 N 章
         if current_chapter is not None:
             target_chapters = self._get_lookback_chapters(
-                chapters, current_chapter, lookback
+                chapters, current_chapter, lookback, exclude_current=exclude_current
             )
         else:
             # 无当前章节时取最后 N 章
@@ -1839,7 +1858,9 @@ class ContextExtractor:
         # 按章节绑定缓存 key
         project_id = project.id if project else "unknown"
         chapter_id = current_chapter.id if current_chapter else "global"
-        cache_key = self._build_cache_key(project_id, chapter_id)
+        cache_key = self._build_cache_key(
+            project_id, chapter_id, exclude_current=exclude_current
+        )
         chapters_hash = _compute_chapters_hash(target_chapters)
 
         # 缓存检查（比对 chapters_hash）
@@ -2208,6 +2229,7 @@ class ContextExtractor:
         force_refresh: bool = False,
         lookback_override: int | None = None,
         token_limit_override: int | None = None,
+        exclude_current: bool = False,
     ) -> ExtractResult:
         """提取上下文条目（非流式）。
 
@@ -2218,6 +2240,7 @@ class ContextExtractor:
             force_refresh: 强制刷新（跳过缓存）
             lookback_override: 覆盖 lookback_chapters（0=全部前文，None=用配置默认值）
             token_limit_override: 覆盖 token_limit（0=不限制，None=用配置默认值）
+            exclude_current: 排除当前章节（重写模式专用，True 时前文不含当前章节）
 
         Returns:
             ExtractResult 对象
@@ -2230,6 +2253,7 @@ class ContextExtractor:
             lookback_override=lookback_override,
             token_limit_override=token_limit_override,
             stream=False,
+            exclude_current=exclude_current,
         )
 
     async def extract_streaming(
@@ -2242,6 +2266,7 @@ class ContextExtractor:
         on_chunk: Callable[[str], None] | None = None,
         token_limit_override: int | None = None,
         on_batch_complete: Callable[[list, int, int], None] | None = None,
+        exclude_current: bool = False,
     ) -> ExtractResult:
         """流式提取上下文（不阻塞，通过 on_chunk 回调推送进度）。
 
@@ -2259,6 +2284,7 @@ class ContextExtractor:
             on_chunk: 每个 chunk 的回调函数（接收增量文本）
             token_limit_override: 覆盖 token_limit（0=不限制，None=用配置默认值）
             on_batch_complete: 每批完成回调（累计 entries, 批次序号, 总批数）
+            exclude_current: 排除当前章节（重写模式专用，True 时前文不含当前章节）
 
         Returns:
             ExtractResult 对象
@@ -2273,6 +2299,7 @@ class ContextExtractor:
             stream=True,
             on_chunk=on_chunk,
             on_batch_complete=on_batch_complete,
+            exclude_current=exclude_current,
         )
 
     async def extract_protagonist_streaming(

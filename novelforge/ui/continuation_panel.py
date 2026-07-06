@@ -1,7 +1,7 @@
 """续写控制面板。
 
 包含：
-- 顶部模式切换区（QComboBox 选择 single/volume 模式）
+- 顶部模式切换区（QComboBox 选择 single/volume/rewrite_current 模式）
 - 中部垂直 QSplitter：
   - 上半：模式面板区（续写配置区/VolumePanel，按模式显隐），撑满中间空间
   - 下半：用户输入区（QPlainTextEdit），默认小、可拖动把手调整高度
@@ -22,6 +22,8 @@ Signals:
     extract_context_requested(bool): 请求上下文提取（force_refresh 参数）
     swipe_info_requested(str): 请求 MainWindow 在状态栏显示 swipe 元信息
     toast_requested(str): 请求 MainWindow 在状态栏显示临时提示（限速等）
+    rewrite_current_analysis_requested(dict): 请求开始「重写当前章节」分析→生成流程
+        （rewrite_current 模式下点击「开始续写」/「重写」时发射，参数字典）
 """
 from __future__ import annotations
 
@@ -87,6 +89,7 @@ class ContinuationPanel(QWidget):
         edit_then_accept(): 编辑后接受
         compare_swipes(): 请求并排对比
         extract_context_requested(bool): 请求上下文提取（force_refresh）
+        rewrite_current_analysis_requested(dict): 请求开始「重写当前章节」分析→生成流程
     """
 
     start_continuation = Signal(dict)
@@ -102,7 +105,7 @@ class ContinuationPanel(QWidget):
     extract_context_requested = Signal(bool)
     # 查看组装后的续写提示词
     view_prompt_requested = Signal()
-    # 模式切换（"single"/"volume"）
+    # 模式切换（"single"/"volume"/"rewrite_current"）
     mode_changed = Signal(str)
     # 卷模式切换时请求显隐右侧续写输出面板（visible=True 显示输出面板，
     # visible=False 隐藏输出面板并把空间让给卷控制面板）
@@ -113,6 +116,8 @@ class ContinuationPanel(QWidget):
     toast_requested = Signal(str)
     # 高亮变化通知 MainWindow 持久化 [{start,end,color,note}]
     highlights_changed = Signal(list)
+    # 重写当前章节模式：触发「分析→检查点→生成」两步流程
+    rewrite_current_analysis_requested = Signal(dict)
 
     def __init__(self, parent=None) -> None:
         """初始化续写控制面板。"""
@@ -142,6 +147,7 @@ class ContinuationPanel(QWidget):
         self._mode_combo = QComboBox()
         self._mode_combo.addItem("单次续写", "single")
         self._mode_combo.addItem("卷续写（多章节）", "volume")
+        self._mode_combo.addItem("重写当前章节", "rewrite_current")
         mode_layout.addWidget(self._mode_combo)
         layout.addWidget(mode_group)
 
@@ -372,7 +378,7 @@ class ContinuationPanel(QWidget):
         self.mode_changed.emit(self.get_mode())
 
     def get_mode(self) -> str:
-        """获取当前续写模式（"single"/"volume"）。"""
+        """获取当前续写模式（"single"/"volume"/"rewrite_current"）。"""
         idx = self._mode_combo.currentIndex()
         if idx >= 0:
             data = self._mode_combo.itemData(idx)
@@ -384,7 +390,7 @@ class ContinuationPanel(QWidget):
         """设置续写模式。
 
         Args:
-            mode: 模式名（"single"/"volume"）
+            mode: 模式名（"single"/"volume"/"rewrite_current"）
         """
         for i in range(self._mode_combo.count()):
             if self._mode_combo.itemData(i) == mode:
@@ -611,17 +617,36 @@ class ContinuationPanel(QWidget):
     # ===== 按钮事件 =====
 
     def _on_start_clicked(self) -> None:
-        """开始续写按钮。"""
+        """开始续写按钮。
+
+        按 ``get_mode()`` 分发：
+        - ``single`` / ``volume``：发射 ``start_continuation`` 信号
+        - ``rewrite_current``：发射 ``rewrite_current_analysis_requested`` 信号
+          （触发 MainWindow 的「分析→检查点→生成」两步流程）
+        """
         params = self.get_parameters()
         params["model"] = self._model_combo.currentText()
-        self.start_continuation.emit(params)
+        if self.get_mode() == "rewrite_current":
+            self.rewrite_current_analysis_requested.emit(params)
+        else:
+            self.start_continuation.emit(params)
 
     def _on_rewrite_clicked(self) -> None:
-        """重写按钮。"""
+        """重写按钮。
+
+        按 ``get_mode()`` 分发：
+        - ``rewrite_current``：复用 ``rewrite_current_analysis_requested`` 信号
+          （重新走「分析→生成」流程；分析步骤会读取当前 swipe 与用户输入）
+        - 其他模式：发射 ``rewrite`` 信号（``created_by="rewrite"``）
+        """
         params = self.get_parameters()
         params["model"] = self._model_combo.currentText()
-        params["created_by"] = "rewrite"
-        self.rewrite.emit(params)
+        if self.get_mode() == "rewrite_current":
+            # 重写当前章节模式：重写按钮等同重新触发分析→生成
+            self.rewrite_current_analysis_requested.emit(params)
+        else:
+            params["created_by"] = "rewrite"
+            self.rewrite.emit(params)
 
     def _set_swipe_info(self, text: str, state: str = "metaText") -> None:
         """请求 MainWindow 在状态栏显示 swipe 元信息。

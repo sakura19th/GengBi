@@ -427,6 +427,10 @@ class MainWindow(QMainWindow):
         )
         self.continuation_panel.stop_continuation.connect(self._on_stop_continuation)
         self.continuation_panel.rewrite.connect(self._on_rewrite)
+        # 重写当前章节模式：触发分析→检查点→生成两步流程
+        self.continuation_panel.rewrite_current_analysis_requested.connect(
+            self._on_start_rewrite_current
+        )
         self.continuation_panel.accept_continuation.connect(self._on_accept_continuation)
         self.continuation_panel.accept_and_continue.connect(
             self._on_accept_and_continue
@@ -1750,6 +1754,11 @@ class MainWindow(QMainWindow):
         mode = self.continuation_panel.get_mode()
         if mode == "volume":
             self._on_start_volume_continuation(params)
+        elif mode == "rewrite_current":
+            # 重写当前章节模式由独立信号 rewrite_current_analysis_requested 触发，
+            # 此处保留兜底（不应到达，避免双重发射）
+            logger.debug("rewrite_current 模式应由独立信号触发，跳过路由")
+            return
         else:
             self._on_start_continuation(params)
 
@@ -1757,13 +1766,13 @@ class MainWindow(QMainWindow):
         """续写模式切换回调。
 
         Args:
-            mode: 模式名（"single"/"volume"）
+            mode: 模式名（"single"/"volume"/"rewrite_current"）
         """
         if mode == "volume":
             # 卷模式：显示 volume_panel，隐藏单次参数区
             self.continuation_panel.show_volume_panel(True)
         else:
-            # 单次模式：隐藏 volume_panel，显示单次参数区
+            # 单次/重写当前章节模式：隐藏 volume_panel，显示单次参数区
             self.continuation_panel.show_volume_panel(False)
         logger.info("续写模式切换: %s", mode)
 
@@ -2539,6 +2548,12 @@ class MainWindow(QMainWindow):
         lookback_override = config.get("lookback")
         token_limit_override = config.get("token_limit")
 
+        # 重写当前章节模式：上下文提取排除当前章节（当前章节是待重写对象，不是前文）
+        # 缓存 key 自动带 :rewrite 后缀避免与续写模式（含当前章节）缓存互相覆盖
+        exclude_current = (
+            self.continuation_panel.get_mode() == "rewrite_current"
+        )
+
         # 非阻塞提交：用 run_coroutine_threadsafe + 回调
         from novelforge.services.async_runner import AsyncLoopRunner
 
@@ -2564,6 +2579,7 @@ class MainWindow(QMainWindow):
                 on_chunk=on_chunk,
                 token_limit_override=token_limit_override,
                 on_batch_complete=on_batch_complete,
+                exclude_current=exclude_current,
             ),
             loop,
         )
@@ -3396,11 +3412,54 @@ class MainWindow(QMainWindow):
         self._on_start_continuation_routed(params)
 
     def _on_accept_continuation(self) -> None:
-        """接受续写：提升为独立章节插入到当前章节之后。"""
+        """接受续写：根据 ``created_by`` 分支处理。
+
+        - ``rewrite_current``：用 swipe 内容替换当前章节正文（不新建章节、不后移 index）
+        - 其他：提升为独立章节插入到当前章节之后（原 promote 逻辑）
+        """
         swipe = self.continuation_panel.current_swipe
         if not swipe or not self._current_chapter:
             return
 
+        # 重写当前章节模式：替换当前章节正文
+        if getattr(swipe, "created_by", "") == "rewrite_current":
+            reply = QMessageBox.question(
+                self,
+                "接受重写",
+                "确定用重写内容替换当前章节正文？\n原正文将被覆盖，不可撤销。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            try:
+                # 重新加载完整章节
+                chapter = self.storage_service.load_chapter(self._current_chapter.id)
+                if chapter is None:
+                    return
+                # 找到当前续写并更新引用
+                for c in chapter.continuations:
+                    if c.id == swipe.id:
+                        swipe = c
+                        break
+                # 替换当前章节正文
+                updated_chapter = self.chapter_service.replace_chapter_content(
+                    chapter, swipe
+                )
+                self._current_chapter = updated_chapter
+                # 刷新章节列表（word_count 变化）与编辑器内容
+                self._refresh_chapter_list()
+                # 重新加载章节到编辑器（替换后的正文）
+                self._on_chapter_selected(updated_chapter.id)
+                self.continuation_panel.clear_output()
+                self._set_status_message(
+                    f"已替换当前章节正文: {len(updated_chapter.content)} 字"
+                )
+            except Exception as e:
+                logger.error("重写接受失败: %s", e, exc_info=True)
+                QMessageBox.critical(self, "接受失败", str(e))
+            return
+
+        # 默认路径：提升为独立章节插入到当前章节之后
         reply = QMessageBox.question(
             self,
             "接受续写",
@@ -4005,6 +4064,453 @@ class MainWindow(QMainWindow):
         # 清理审计发起章节标记（rewrite 已交接给 _continuation_chapter_id）
         self._audit_chapter_id = None
         self._set_status_message("修正中...")
+
+    # ===== 重写当前章节模式：分析→检查点→生成 =====
+
+    @staticmethod
+    def _format_context_entries(entries: list | None) -> str:
+        """格式化上下文条目为可读 Markdown（空 → 占位文本）。
+
+        镜像 ``CustomAuditRuleService._format_context_entries`` 实现，
+        用于将 ``_current_context_entries`` 注入 ``phase_rewrite_analysis.txt``
+        的 ``{{context_entries}}`` 占位符。
+        """
+        if not entries:
+            return "（无上下文条目）"
+        parts: list[str] = []
+        for entry in entries:
+            if isinstance(entry, dict):
+                content = entry.get("content", "")
+                keys = entry.get("keys", "")
+                comment = entry.get("comment", "")
+            else:
+                content = getattr(entry, "content", "")
+                keys = getattr(entry, "keys", "")
+                comment = getattr(entry, "comment", "")
+            label = comment or keys or "条目"
+            if content:
+                parts.append(f"- [{label}] {content}")
+        return "\n".join(parts) if parts else "（无上下文条目）"
+
+    def _on_start_rewrite_current(self, params: dict) -> None:
+        """「重写当前章节」模式入口：分析→检查点→生成两步流程。
+
+        Step 1 分析：加载 ``phase_rewrite_analysis.txt`` 模板，str.replace 注入
+        6 占位符（current_chapter_text/user_input/world_ontology/protagonist_profile/
+        custom_audit_rules/context_entries，**前文不含当前章节**），用
+        ``AuditWorker``（低温稳定）流式输出「新章节生成详细需求」，弹
+        ``AuditDialog`` 供用户审阅/编辑。
+
+        Step 2 生成：用户采纳分析结果后，将分析文本作为 ``user_input`` 传入
+        ``prompt_assembler.assemble``（``exclude_current=True`` 让聊天历史不含
+        当前章节），创建 ``ContinuationWorker``（``created_by="rewrite_current"``）
+        流式输出新正文，存为 swipe 到当前章节。
+
+        Args:
+            params: 续写参数字典（由 continuation_panel 传入）
+        """
+        if not self._current_chapter:
+            QMessageBox.warning(self, "提示", "请先选择章节")
+            return
+
+        # 持久化续写参数到 config（温度/回溯章节数）
+        try:
+            cont = self.config_manager.config.setdefault("continuation", {})
+            cont["default_temperature"] = params.get("temperature", 0.8)
+            cont["default_target_words"] = params.get("target_words", 2000)
+            cont["default_lookback_chapters"] = params.get("lookback_chapters", 5)
+            self.config_manager.save()
+        except Exception as e:
+            logger.warning("保存续写参数失败: %s", e)
+
+        # 取 rewrite_analysis 流程端点（回退面板下拉）
+        endpoint = self.config_manager.get_flow_endpoint("rewrite_analysis")
+        if not endpoint:
+            endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            self._on_open_settings()
+            return
+
+        api_key = self.config_manager.decrypt_api_key(endpoint.get("id", ""))
+        if not api_key:
+            QMessageBox.warning(self, "提示", "API Key 无效，请检查设置")
+            self._on_open_settings()
+            return
+
+        model = params.get("model") or endpoint.get("default_model", "")
+        if not model:
+            QMessageBox.warning(self, "提示", "请选择模型")
+            return
+
+        # 上下文条目（重写模式下用户已用 exclude_current=True 提取，不含当前章节）
+        raw_entries = getattr(self, "_current_context_entries", None)
+        entries = self._merge_worldbook_entries(raw_entries)
+        if not entries:
+            QMessageBox.information(
+                self, "提示",
+                "请先在上下文提取预览区点击\"提取上下文\"按钮，\n"
+                "或启用一个全局世界书后再开始重写。",
+            )
+            return
+
+        # 加载项目对象
+        project = None
+        if self._current_project_id:
+            project = self.storage_service.load_project(self._current_project_id)
+
+        # 确保章节正文已加载
+        self._ensure_chapter_contents()
+
+        # 加载分析提示词模板
+        try:
+            template_path = get_agent_prompt_path("rewrite_analysis")
+            template = load_text_resource(template_path)
+        except Exception as e:
+            logger.error("加载重写分析模板失败: %s", e, exc_info=True)
+            QMessageBox.critical(self, "重写失败", f"加载重写分析模板失败: {e}")
+            return
+
+        # 组装宏（与 _on_audit_continuation 一致，不用 MacroEngine，纯 str.replace）
+        user_input = self.continuation_panel.get_user_input() or "（无用户额外指令）"
+        world_ontology_str = self._format_world_ontology(
+            project.world_ontology if project else None
+        )
+        protagonist_profile = None
+        if self._current_chapter:
+            if self._current_chapter.protagonist_profile:
+                protagonist_profile = self._current_chapter.protagonist_profile
+            else:
+                protagonist_profile = self._protagonist_profile_by_chapter.get(
+                    self._current_chapter.id
+                )
+        protagonist_profile_str = self._format_protagonist_profile(protagonist_profile)
+        custom_rules_str = self._format_custom_audit_rules(
+            project.custom_audit_rules if project else None
+        )
+        context_entries_str = self._format_context_entries(entries)
+        current_chapter_text = self._current_chapter.content or ""
+
+        rendered = template.replace("{{current_chapter_text}}", current_chapter_text)
+        rendered = rendered.replace("{{user_input}}", user_input)
+        rendered = rendered.replace("{{world_ontology}}", world_ontology_str)
+        rendered = rendered.replace("{{protagonist_profile}}", protagonist_profile_str)
+        rendered = rendered.replace("{{custom_audit_rules}}", custom_rules_str)
+        rendered = rendered.replace("{{context_entries}}", context_entries_str)
+
+        messages = [{"role": "system", "content": rendered}]
+
+        # 清理旧审计 worker（与 _on_audit_continuation 一致）
+        old_audit_worker = getattr(self, "_audit_worker", None)
+        if old_audit_worker is not None:
+            try:
+                old_audit_worker.chunk_received.disconnect()
+                old_audit_worker.finished.disconnect()
+                old_audit_worker.error.disconnect()
+                old_audit_worker.rate_limit_warning.disconnect()
+                old_audit_worker.auth_error.disconnect()
+                old_audit_worker.token_count.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            old_audit_worker.deleteLater()
+        self._audit_worker = None
+
+        # 解析思考强度（分析步骤无预设，仅端点级）
+        reasoning_effort = self._resolve_reasoning_effort(endpoint)
+
+        # 创建分析 worker（低温稳定，max_tokens=4000 容纳详细需求）
+        self._audit_worker = AuditWorker(
+            base_url=endpoint["base_url"],
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            temperature=0.3,
+            max_tokens=4000,
+            reasoning_effort=reasoning_effort,
+            parent=self,
+        )
+
+        # 记录重写发起章节与重写参数（生成步骤用）
+        self._rewrite_current_chapter_id = self._current_chapter.id
+        self._rewrite_current_params = dict(params)
+        self._rewrite_current_endpoint = endpoint
+
+        # 创建分析对话框（标题"重写需求分析"）
+        self._audit_dialog = AuditDialog(self)
+        self._audit_dialog.setWindowTitle("重写需求分析")
+
+        # 连接 worker 信号（复用审计对话框的流式输出）
+        self._audit_worker.chunk_received.connect(self._audit_dialog.append_chunk)
+        self._audit_worker.token_count.connect(
+            lambda count: self._token_count_label.setText(
+                f"Token: {count} (分析中)"
+            )
+        )
+        self._audit_worker.finished.connect(self._on_rewrite_analysis_finished)
+        self._audit_worker.error.connect(self._on_rewrite_analysis_error)
+        self._audit_worker.rate_limit_warning.connect(
+            lambda msg: self.continuation_panel.show_toast(msg)
+        )
+        self._audit_worker.auth_error.connect(self._on_auth_error)
+
+        # 连接对话框信号（采纳→进入生成步骤；取消→终止）
+        self._audit_dialog.accepted_text.connect(self._on_rewrite_analysis_accepted)
+        self._audit_dialog.cancelled.connect(self._on_rewrite_analysis_cancelled)
+
+        self._audit_dialog.show()
+        self._audit_worker.start()
+        self._set_status_message("重写需求分析中...")
+
+    def _on_rewrite_analysis_finished(self, full_text: str) -> None:
+        """分析 worker 流式完成。"""
+        if self._audit_dialog is not None:
+            self._audit_dialog.finish_streaming(full_text)
+        self._set_status_message("分析完成，请审阅并采纳需求")
+
+    def _on_rewrite_analysis_error(self, error: str) -> None:
+        """分析 worker 出错。"""
+        if self._audit_dialog is not None:
+            self._audit_dialog.fail(error)
+        self._set_status_message(f"重写分析失败: {error}")
+        self._rewrite_current_chapter_id = None
+        self._rewrite_current_params = None
+        self._rewrite_current_endpoint = None
+
+    def _on_rewrite_analysis_cancelled(self) -> None:
+        """用户取消分析：停止 worker，清理重写状态标记。"""
+        if self._audit_worker is not None:
+            self._audit_worker.stop()
+        self._audit_worker = None
+        self._audit_dialog = None
+        self._rewrite_current_chapter_id = None
+        self._rewrite_current_params = None
+        self._rewrite_current_endpoint = None
+        self._set_status_message("已取消重写")
+
+    def _on_rewrite_analysis_accepted(self, analysis_text: str) -> None:
+        """用户采纳分析结果：进入 Step 2 生成步骤。
+
+        将 ``analysis_text`` 作为 ``user_input`` 传入 ``prompt_assembler.assemble``
+        （``exclude_current=True`` 让聊天历史不含当前章节），创建
+        ``ContinuationWorker``（``created_by="rewrite_current"``）流式输出新正文，
+        存为 swipe 到当前章节。
+        """
+        rewrite_cid = getattr(self, "_rewrite_current_chapter_id", None)
+        if not rewrite_cid:
+            return
+
+        params = getattr(self, "_rewrite_current_params", None) or {}
+        endpoint = getattr(self, "_rewrite_current_endpoint", None)
+        if not endpoint:
+            endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            self._rewrite_current_chapter_id = None
+            return
+
+        api_key = self.config_manager.decrypt_api_key(endpoint.get("id", ""))
+        if not api_key:
+            QMessageBox.warning(self, "提示", "API Key 无效，请检查设置")
+            self._on_open_settings()
+            self._rewrite_current_chapter_id = None
+            return
+
+        model = params.get("model") or endpoint.get("default_model", "")
+        if not model:
+            QMessageBox.warning(self, "提示", "请选择模型")
+            self._rewrite_current_chapter_id = None
+            return
+
+        # 清理分析 worker 与对话框引用
+        self._audit_worker = None
+        self._audit_dialog = None
+
+        # 加载项目对象
+        project = None
+        if self._current_project_id:
+            project = self.storage_service.load_project(self._current_project_id)
+
+        # 重新合并 entries（避免中途变化）
+        raw_entries = getattr(self, "_current_context_entries", None)
+        entries = self._merge_worldbook_entries(raw_entries)
+        if not entries:
+            QMessageBox.information(
+                self, "提示",
+                "上下文条目为空，无法生成。请先提取上下文或启用世界书。",
+            )
+            self._rewrite_current_chapter_id = None
+            return
+
+        # 加载重写发起章节（避免用户切换章节后用错章节）
+        origin_chapter = self.storage_service.load_chapter(rewrite_cid)
+        if origin_chapter is None:
+            QMessageBox.warning(self, "提示", "重写发起章节不存在")
+            self._rewrite_current_chapter_id = None
+            return
+        # 同步当前章节为发起章节（重写流程针对发起章节）
+        self._current_chapter = origin_chapter
+        self._ensure_chapter_contents()
+
+        # 加载预设
+        preset_id = params.get("preset_id", "default")
+        preset = self.preset_service.load_preset(preset_id)
+        if preset is None:
+            preset = self.preset_service.load_default_preset()
+            logger.warning("预设 %s 不存在，回退到默认预设", preset_id)
+
+        # 取预设生成参数
+        gen_params = preset.generation_params
+        max_context = params.get("max_context") or gen_params.get("max_context", 9999999)
+        max_tokens = gen_params.get("max_tokens", 2000)
+        target_words = params.get("target_words", 2000)
+
+        # 取小说档案
+        novel_profile = project.novel_profile if project else {}
+
+        # 刷新正则脚本到引擎
+        self._refresh_regex_scripts()
+
+        # 章节元数据
+        chapter_metadata = dict(origin_chapter.metadata) if origin_chapter else {}
+
+        # 调用 PromptAssembler.assemble（exclude_current=True 让历史不含当前章节）
+        try:
+            assemble_result = self.prompt_assembler.assemble(
+                preset=preset,
+                chapters=self._current_chapters,
+                current_chapter=origin_chapter,
+                context_entries=entries,
+                model=model,
+                max_context=max_context,
+                max_tokens=max_tokens,
+                target_words=target_words,
+                novel_profile=novel_profile,
+                project_id=self._current_project_id or "",
+                chapter_metadata=chapter_metadata,
+                user_input=analysis_text,
+                lookback_chapters=params.get("lookback_chapters", 0),
+                world_ontology=project.world_ontology if project else None,
+                protagonist_profile=self._protagonist_profile_by_chapter.get(rewrite_cid),
+                custom_audit_rules=project.custom_audit_rules if project else None,
+                exclude_current=True,
+            )
+        except Exception as e:
+            logger.error("重写生成提示词组装失败: %s", e, exc_info=True)
+            QMessageBox.critical(self, "组装失败", f"重写生成提示词组装失败: {e}")
+            self._rewrite_current_chapter_id = None
+            return
+
+        messages = assemble_result.messages
+
+        # 显示 token 预算信息
+        usage = assemble_result.token_usage
+        is_exact, count_desc = assemble_result.count_mode
+        self._token_count_label.setText(
+            f"Token: {usage.get('total_used', 0)}/{max_context} ({count_desc})"
+        )
+
+        # 显示警告
+        for warning in assemble_result.warnings:
+            self._set_status_message(warning)
+            if "建议增大 max_context" in warning or "截断后仅" in warning:
+                QMessageBox.warning(self, "Token 预算警告", warning)
+
+        logger.info(
+            "重写生成提示词组装完成: %d 条消息, token=%d/%d",
+            len(messages), usage.get("total_used", 0), max_context,
+        )
+
+        # 收集正则脚本 ID 快照（用于 swipe 记录）
+        ordered_scripts = self.regex_service.get_ordered_scripts(
+            project_id=self._current_project_id or "",
+            preset_id=preset.id,
+            include_disabled=False,
+        )
+        regex_script_ids = [s.id for s, _ in ordered_scripts]
+
+        # 上下文条目快照
+        context_snapshot = [
+            e.model_dump(mode="json") if hasattr(e, "model_dump") else e
+            for e in entries
+        ]
+
+        # 锁定编辑器
+        self.chapter_editor.set_streaming_locked(True)
+        self.continuation_panel.start_streaming()
+
+        # 记录续写会话追踪信息
+        self._continuation_started_at = self.history_service.now_iso()
+        self._continuation_prompt_messages = list(messages)
+        self._continuation_model = model
+        self._continuation_parameters = dict(params)
+
+        # 断开旧 worker 的信号连接
+        old_worker = getattr(self, "_continuation_worker", None)
+        if old_worker is not None:
+            try:
+                old_worker.chunk_received.disconnect()
+                old_worker.reasoning_received.disconnect()
+                old_worker.token_count.disconnect()
+                old_worker.finished.disconnect()
+                old_worker.error.disconnect()
+                old_worker.rate_limit_warning.disconnect()
+                old_worker.auth_error.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            old_worker.deleteLater()
+
+        # 记录续写发起章节（完成回调用此 id 归档 swipe）
+        self._continuation_chapter_id = rewrite_cid
+        self._continuation_stream_text_by_chapter[rewrite_cid] = ""
+
+        # 注入思考强度（重写是续写任务，用 single_continuation 端点+预设）
+        # 复用 single_continuation 端点（与单章续写一致）
+        single_endpoint = self.config_manager.get_flow_endpoint("single_continuation") or endpoint
+        params["reasoning_effort"] = self._resolve_reasoning_effort(single_endpoint, preset)
+
+        # 创建生成 worker（created_by="rewrite_current" 标识重写当前章节 swipe）
+        self._continuation_worker = ContinuationWorker(
+            base_url=single_endpoint["base_url"],
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            parameters=params,
+            chapter_id=rewrite_cid,
+            created_by="rewrite_current",
+            preset_id=preset.id,
+            preset_snapshot=preset.model_dump(mode="json"),
+            token_budget=usage,
+            regex_engine=self.regex_engine,
+            template_engine=self.template_engine,
+            project_id=self._current_project_id or "",
+            chapter_metadata=chapter_metadata,
+            regex_script_ids=regex_script_ids,
+            extracted_context_snapshot=context_snapshot,
+            parent=self,
+        )
+
+        # chunk 路由：按章节缓冲，仅当前章节匹配时更新 UI
+        self._continuation_worker.chunk_received.connect(
+            self._on_continuation_chunk_received
+        )
+        self._continuation_worker.token_count.connect(
+            lambda count: self._token_count_label.setText(
+                f"Token: {count} (重写中)"
+            )
+        )
+        self._continuation_worker.finished.connect(self._on_continuation_finished)
+        self._continuation_worker.error.connect(self._on_continuation_error)
+        self._continuation_worker.rate_limit_warning.connect(
+            lambda msg: self.continuation_panel.show_toast(msg)
+        )
+        self._continuation_worker.auth_error.connect(self._on_auth_error)
+
+        self._continuation_worker.start()
+        # 清理重写状态标记（生成已交接给 _continuation_chapter_id）
+        self._rewrite_current_chapter_id = None
+        self._rewrite_current_params = None
+        self._rewrite_current_endpoint = None
+        self._set_status_message("重写生成中...")
 
     def _on_accept_and_continue(self) -> None:
         """接受并继续续写。"""

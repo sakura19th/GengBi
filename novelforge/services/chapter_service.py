@@ -426,6 +426,41 @@ class ChapterService:
         )
         return chapter, new_chapter
 
+    def replace_chapter_content(
+        self, chapter: Chapter, continuation: Continuation
+    ) -> Chapter:
+        """接受续写（重写当前章节模式）：用续写内容替换当前章节正文，并删除原续写记录。
+
+        与 ``promote_continuation_to_chapter`` 的区别：
+        - **不新建章节**：直接覆盖当前章节 ``content`` 与 ``word_count``
+        - **不后移 index**：当前章节位置不变，后续章节不受影响
+        - 用于 ``created_by="rewrite_current"`` 的 swipe 接受路径
+
+        Args:
+            chapter: 当前章节（待被覆盖正文）
+            continuation: 重写生成的续写
+
+        Returns:
+            更新后的当前章节（continuations 已移除该续写）
+        """
+        # 用续写内容替换当前章节正文
+        chapter.content = continuation.content
+        chapter.word_count = len(continuation.content)
+        chapter.updated_at = datetime.now()
+        self.storage.save_chapter(chapter)
+
+        # 删除原续写记录
+        self.storage.delete_continuation(continuation.id)
+        chapter.continuations = [
+            c for c in chapter.continuations if c.id != continuation.id
+        ]
+
+        logger.info(
+            "重写当前章节正文: chapter=%s, swipe=%s, new_word_count=%d",
+            chapter.id, continuation.id, chapter.word_count,
+        )
+        return chapter
+
     def delete_continuation(
         self,
         chapter: Chapter,

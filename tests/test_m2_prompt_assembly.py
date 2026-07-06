@@ -989,5 +989,76 @@ def main() -> int:
     return 0
 
 
+def test_build_history_exclude_current(result: TestResult) -> None:
+    """测试：exclude_current=True 时 _build_history 不含当前章节消息。
+
+    重写当前章节模式下，当前章节是待重写对象，不应出现在聊天历史中。
+    """
+    print("\n===== 测试：exclude_current 排除当前章节 =====")
+
+    chapters = make_test_chapters(3)  # ch_00, ch_01, ch_02
+    current = chapters[2]
+    assembler = PromptAssembler()
+
+    # 默认（含当前章节）：history 含 3 条消息（ch0/ch1/ch2）
+    history_default = assembler._build_history(
+        chapters, current, lookback_chapters=0, exclude_current=False
+    )
+    result.assert_equal(
+        len(history_default), 3,
+        "默认 exclude_current=False 应含 3 条历史消息",
+    )
+
+    # exclude_current=True：仅前 2 章（2 条消息）
+    history_exclude = assembler._build_history(
+        chapters, current, lookback_chapters=0, exclude_current=True
+    )
+    result.assert_equal(
+        len(history_exclude), 2,
+        "exclude_current=True 应排除当前章节，期望 2 条历史消息",
+    )
+    # 验证历史内容不含当前章节正文
+    for msg in history_exclude:
+        result.assert_true(
+            "这是第3章的正文内容" not in msg.get("content", ""),
+            "exclude_current 历史不应包含当前章节正文",
+        )
+
+    assert result.failed == 0, f"测试失败：{result.failures}"
+
+
+def test_build_history_exclude_current_with_lookback(result: TestResult) -> None:
+    """测试：exclude_current=True + lookback 截断作用于排除后列表。
+
+    4 章 + current=ch3，lookback=1，exclude_current=True
+    → history 仅 1 条（ch2），不含 ch3。
+    """
+    print("\n===== 测试：exclude_current + lookback 截断 =====")
+
+    chapters = make_test_chapters(4)  # ch_00, ch_01, ch_02, ch_03
+    current = chapters[3]
+    assembler = PromptAssembler()
+
+    # lookback=1：仅取最近 1 章前文 = ch2（不含 ch3）
+    history = assembler._build_history(
+        chapters, current, lookback_chapters=1, exclude_current=True
+    )
+    result.assert_equal(
+        len(history), 1,
+        "lookback=1 + exclude_current=True 应仅 1 条历史消息",
+    )
+    # 验证历史内容含 ch2 但不含 ch3
+    result.assert_true(
+        "第3章" in history[0].get("content", ""),
+        "历史应包含第3章（前一章）",
+    )
+    result.assert_true(
+        "第4章" not in history[0].get("content", ""),
+        "历史不应包含第4章（当前章节）",
+    )
+
+    assert result.failed == 0, f"测试失败：{result.failures}"
+
+
 if __name__ == "__main__":
     sys.exit(main())

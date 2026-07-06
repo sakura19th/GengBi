@@ -1776,6 +1776,101 @@ class TestIntegration:
         assert result.entries[0].uid == "1"
 
 
+# ===== 13. exclude_current 参数测试（重写当前章节模式） =====
+
+
+class TestContextExtractorExcludeCurrent:
+    """ContextExtractor exclude_current 参数测试（重写当前章节模式）。
+
+    重写模式下「前文提取」不得包含当前章节（当前章节是待重写对象，不是前文）。
+    """
+
+    def test_build_cache_key_exclude_current_suffix(self) -> None:
+        """exclude_current=True 时缓存 key 带 :rewrite 后缀。"""
+        from novelforge.services.context_extractor import ContextExtractor
+
+        storage_service = MagicMock()
+        config_manager = MagicMock()
+        config_manager.get_context_extract_settings.return_value = {}
+        extractor = ContextExtractor(storage_service, config_manager)
+
+        chapters = [
+            make_chapter(index=0, content="ch0"),
+            make_chapter(index=1, content="ch1"),
+        ]
+        # 排除当前章节的 key 应以 :rewrite 结尾
+        key_exclude = extractor._build_cache_key(
+            "proj_123", chapters, exclude_current=True
+        )
+        assert key_exclude.endswith(":rewrite"), (
+            f"重写模式 key 应带 :rewrite 后缀，实际: {key_exclude}"
+        )
+
+        # 默认（含当前章节）的 key 不应带 :rewrite 后缀
+        key_normal = extractor._build_cache_key(
+            "proj_123", chapters, exclude_current=False
+        )
+        assert not key_normal.endswith(":rewrite"), (
+            f"续写模式 key 不应带 :rewrite 后缀，实际: {key_normal}"
+        )
+
+        # 两个 key 应不同（避免互相覆盖）
+        assert key_exclude != key_normal
+
+    def test_get_lookback_chapters_exclude_current(self) -> None:
+        """exclude_current=True 时 _get_lookback_chapters 不含当前章节。"""
+        from novelforge.services.context_extractor import ContextExtractor
+
+        storage_service = MagicMock()
+        config_manager = MagicMock()
+        config_manager.get_context_extract_settings.return_value = {}
+        extractor = ContextExtractor(storage_service, config_manager)
+
+        chapters = [
+            make_chapter(index=0, content="前文0"),
+            make_chapter(index=1, content="前文1"),
+            make_chapter(index=2, content="当前章节"),
+            make_chapter(index=3, content="后续章节"),
+        ]
+        current = chapters[2]
+
+        # exclude_current=True：应返回 ch0/ch1（不含 ch2 当前章节）
+        result = extractor._get_lookback_chapters(
+            chapters, current, lookback=0, exclude_current=True
+        )
+        result_ids = [c.id for c in result]
+        assert "ch_0" in result_ids
+        assert "ch_1" in result_ids
+        assert "ch_2" not in result_ids, "当前章节不应出现在 exclude_current 结果中"
+        assert "ch_3" not in result_ids, "后续章节也不应出现"
+
+    def test_get_lookback_chapters_exclude_current_with_lookback(self) -> None:
+        """exclude_current=True 时 lookback 截断作用于排除后的列表。"""
+        from novelforge.services.context_extractor import ContextExtractor
+
+        storage_service = MagicMock()
+        config_manager = MagicMock()
+        config_manager.get_context_extract_settings.return_value = {}
+        extractor = ContextExtractor(storage_service, config_manager)
+
+        chapters = [
+            make_chapter(index=0, content="ch0"),
+            make_chapter(index=1, content="ch1"),
+            make_chapter(index=2, content="ch2"),
+            make_chapter(index=3, content="ch3_current"),
+        ]
+        current = chapters[3]
+
+        # lookback=1：仅取最近 1 章前文 = ch2（不含 ch3_current）
+        result = extractor._get_lookback_chapters(
+            chapters, current, lookback=1, exclude_current=True
+        )
+        result_ids = [c.id for c in result]
+        assert "ch_2" in result_ids
+        assert "ch_3" not in result_ids
+        assert "ch_1" not in result_ids
+
+
 if __name__ == "__main__":
     # 直接运行时执行所有测试
     pytest.main([__file__, "-v", "--tb=short"])

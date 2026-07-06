@@ -1,6 +1,6 @@
 """流程端点配置对话框。
 
-列出全部 7 个 LLM 流程，允许用户为每个流程选择使用的 API 端点。
+列出全部 8 个 LLM 流程，允许用户为每个流程选择使用的 API 端点。
 默认使用端点管理中的默认端点（首项），也可选择其它已配置端点。
 配置持久化到 ``config["flow_endpoints"]``（``{flow_key: endpoint_id}``），
 由 ``ConfigManager.get_flow_endpoint(flow_key)`` 解析（未配置或端点被删则回退默认端点）。
@@ -25,6 +25,7 @@ FLOW_DEFINITIONS: list[tuple[str, str]] = [
     ("single_continuation", "单章续写"),
     ("volume_continuation", "卷续写"),
     ("single_audit", "单章审计"),
+    ("rewrite_analysis", "重写当前章节分析"),
     ("context_extraction", "上下文提取"),
     ("ontology_extraction", "世界观底层提取"),
     ("protagonist_extraction", "主角形象提取"),
