@@ -69,6 +69,7 @@ def _make_window():
     win.continuation_panel = MagicMock()
     win.continuation_panel.context_preview_panel = MagicMock()
     win.chapter_editor = MagicMock()
+    win.chapter_list = MagicMock()
     win.storage_service = MagicMock()
     win.chapter_service = MagicMock()
     win.chapter_service.storage = MagicMock()

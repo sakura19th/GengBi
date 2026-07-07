@@ -63,6 +63,7 @@ from novelforge.services.exporter import (
 )
 from novelforge.services.history_service import HistoryService
 from novelforge.services.importer import TxtImporter
+from novelforge.services.jailbreak_provider import JailbreakProvider
 from novelforge.services.ontology_extractor import OntologyExtractor
 from novelforge.services.preset_service import PresetService
 from novelforge.services.regex_service import RegexService
@@ -233,6 +234,8 @@ class MainWindow(QMainWindow):
         self.custom_rule_service = CustomAuditRuleService(
             self.storage_service, config_manager
         )
+        # 流程破限文本提供器（非正文流程按等级注入 system 消息）
+        self._jailbreak_provider = JailbreakProvider()
         # M4: 当前续写使用的上下文条目（提取后存入，供 worker 快照使用）
         self._current_context_entries: list = []
         # 按章节绑定的上下文条目内存缓存（chapter_id -> entries），使用 OrderedDict 实现 LRU 淘汰
@@ -935,6 +938,36 @@ class MainWindow(QMainWindow):
                 return re
         return endpoint.get("reasoning_effort", "") or ""
 
+    def _get_flow_jailbreak_text(self, flow_key: str) -> str:
+        """查配置返回非正文流程的破限文本（自定义优先于等级模板）。
+
+        Args:
+            flow_key: 流程标识（如 ``single_audit``/``context_extraction``）
+
+        Returns:
+            破限文本；off 或无文本返回空串（调用方据此跳过注入）
+        """
+        custom = self.config_manager.get_flow_jailbreak_custom(flow_key)
+        if custom.strip():
+            return custom.strip()
+        level = self.config_manager.get_flow_jailbreak(flow_key)
+        return self._jailbreak_provider.get_jailbreak(flow_key, level)
+
+    @staticmethod
+    def _inject_jailbreak(messages: list[dict], jailbreak_text: str) -> list[dict]:
+        """把破限文本作为 system 消息前置到 messages 开头（空文本不注入）。
+
+        Args:
+            messages: 原始 messages 数组
+            jailbreak_text: 破限文本
+
+        Returns:
+            注入后的 messages 数组（原数组不变）
+        """
+        if not jailbreak_text:
+            return messages
+        return [{"role": "system", "content": jailbreak_text}] + messages
+
     def _refresh_presets(self) -> None:
         """刷新预设列表到续写面板（仅显示启用的预设）。"""
         try:
@@ -1185,6 +1218,7 @@ class MainWindow(QMainWindow):
             return
 
         self._current_chapter = chapter
+        self.chapter_list.set_current_chapter(chapter_id)
         self.chapter_editor.load_chapter(
             chapter_id=chapter.id,
             project_id=chapter.project_id,
@@ -2580,6 +2614,7 @@ class MainWindow(QMainWindow):
                 token_limit_override=token_limit_override,
                 on_batch_complete=on_batch_complete,
                 exclude_current=exclude_current,
+                jailbreak_text=self._get_flow_jailbreak_text("context_extraction"),
             ),
             loop,
         )
@@ -2851,6 +2886,7 @@ class MainWindow(QMainWindow):
                 token_limit=token_limit_override,
                 on_chunk=on_chunk,
                 on_batch_complete=on_batch_complete,
+                jailbreak_text=self._get_flow_jailbreak_text("ontology_extraction"),
             ),
             loop,
         )
@@ -3017,6 +3053,7 @@ class MainWindow(QMainWindow):
                 lookback=lookback,
                 on_chunk=on_chunk,
                 on_batch_complete=on_batch_complete,
+                jailbreak_text=self._get_flow_jailbreak_text("protagonist_extraction"),
             ),
             loop,
         )
@@ -3623,6 +3660,7 @@ class MainWindow(QMainWindow):
                 raw_input=raw_input,
                 context_entries=context_entries,
                 on_chunk=on_chunk,
+                jailbreak_text=self._get_flow_jailbreak_text("custom_rule_parsing"),
             ),
             loop,
         )
@@ -3795,6 +3833,10 @@ class MainWindow(QMainWindow):
         rendered = rendered.replace("{{custom_audit_rules}}", custom_rules_str)
 
         messages = [{"role": "system", "content": rendered}]
+        # 注入破限（single_audit 流程，等级由 FlowEndpointDialog 配置）
+        messages = self._inject_jailbreak(
+            messages, self._get_flow_jailbreak_text("single_audit")
+        )
 
         # 清理旧审计 worker
         old_audit_worker = getattr(self, "_audit_worker", None)
@@ -4199,6 +4241,10 @@ class MainWindow(QMainWindow):
         rendered = rendered.replace("{{context_entries}}", context_entries_str)
 
         messages = [{"role": "system", "content": rendered}]
+        # 注入破限（rewrite_analysis 流程，等级由 FlowEndpointDialog 配置）
+        messages = self._inject_jailbreak(
+            messages, self._get_flow_jailbreak_text("rewrite_analysis")
+        )
 
         # 清理旧审计 worker（与 _on_audit_continuation 一致）
         old_audit_worker = getattr(self, "_audit_worker", None)

@@ -518,6 +518,7 @@ class OntologyExtractor:
         on_chunk: Callable[[str], None] | None,
         stop_event: threading.Event | None,
         batch_ranges: list[tuple[int, int]] | None = None,
+        jailbreak_text: str = "",
     ) -> dict | None:
         """合并多批次 WorldOntology 结果（【信息汇总】环节）。
 
@@ -555,7 +556,10 @@ class OntologyExtractor:
         template = self._load_ontology_merge_prompt_template()
         entries_blocks = self._build_entries_blocks(merge_results, merge_ranges)
         prompt = template.replace("{{entries_blocks}}", entries_blocks)
-        messages = [{"role": "user", "content": prompt}]
+        messages = []
+        if jailbreak_text:
+            messages.append({"role": "system", "content": jailbreak_text})
+        messages.append({"role": "user", "content": prompt})
 
         # 流式分隔标记
         if on_chunk is not None:
@@ -722,6 +726,7 @@ class OntologyExtractor:
         on_chunk: Callable[[str], None] | None = None,
         on_batch_complete: Callable[[int, int], None] | None = None,
         stop_event: threading.Event | None = None,
+        jailbreak_text: str = "",
     ) -> tuple[WorldOntology | None, str]:
         """流式提取世界观底层。
 
@@ -813,7 +818,10 @@ class OntologyExtractor:
                     return None, f"构建提示词失败: {e}"
 
                 # 调用 LLM（2 次尝试：温度 0.2 / 0.0，仅 2 次均失败才中止整体提取）
-                messages = [{"role": "user", "content": prompt}]
+                messages = []
+                if jailbreak_text:
+                    messages.append({"role": "system", "content": jailbreak_text})
+                messages.append({"role": "user", "content": prompt})
                 extract_temperatures = [
                     ONTOLOGY_EXTRACT_TEMPERATURE,
                     ONTOLOGY_EXTRACT_TEMPERATURE_RETRY,
@@ -942,6 +950,7 @@ class OntologyExtractor:
                     on_chunk=on_chunk,
                     stop_event=stop_event,
                     batch_ranges=batch_ranges,
+                    jailbreak_text=jailbreak_text,
                 )
                 if merged_ontology is not None:
                     accumulated_ontology = merged_ontology

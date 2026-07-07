@@ -63,6 +63,18 @@ from novelforge.utils.paths import secure_file
 
 logger = logging.getLogger(__name__)
 
+# 流程默认破限等级：提取类默认 low，其余 off；正文流程由预设控制
+FLOW_DEFAULT_JAILBREAKS: dict[str, str] = {
+    "single_continuation": "off",
+    "volume_continuation": "off",
+    "single_audit": "off",
+    "rewrite_analysis": "off",
+    "context_extraction": "low",
+    "ontology_extraction": "low",
+    "protagonist_extraction": "low",
+    "custom_rule_parsing": "off",
+}
+
 
 def get_default_config() -> dict[str, Any]:
     """返回默认配置字典。"""
@@ -71,6 +83,8 @@ def get_default_config() -> dict[str, Any]:
         "api_endpoints": [],
         "default_endpoint_id": "",
         "flow_endpoints": {},  # {flow_key: endpoint_id}，未配置的流程回退默认端点
+        "flow_jailbreaks": {},  # {flow_key: level_str}，未配置回退 FLOW_DEFAULT_JAILBREAKS
+        "flow_jailbreaks_custom": {},  # {flow_key: custom_text}，空串=用等级模板
         "appearance": {
             "theme": "dark",
             "font_family": "Microsoft YaHei",
@@ -367,6 +381,60 @@ class ConfigManager:
         """
         with self._lock:
             self.config["flow_endpoints"] = mapping
+            self.save()
+
+    # ===== 流程破限配置 =====
+
+    def get_flow_jailbreaks(self) -> dict[str, str]:
+        """获取流程破限等级映射 ``{flow_key: level}``，未配置返回 ``{}``。"""
+        return self.config.get("flow_jailbreaks", {})
+
+    def get_flow_jailbreak(self, flow_key: str) -> str:
+        """解析流程破限等级。
+
+        优先读 ``flow_jailbreaks[flow_key]``，未配置回退到
+        ``FLOW_DEFAULT_JAILBREAKS``（提取类默认 low，其余 off）。
+
+        Args:
+            flow_key: 流程标识
+
+        Returns:
+            破限等级（``off``/``low``/``mid``/``high``）
+        """
+        mapping = self.config.get("flow_jailbreaks", {})
+        return mapping.get(flow_key) or FLOW_DEFAULT_JAILBREAKS.get(flow_key, "off")
+
+    def set_flow_jailbreaks(self, mapping: dict[str, str]) -> None:
+        """保存流程破限等级映射并持久化。
+
+        Args:
+            mapping: ``{flow_key: level}``，level 为 ``off``/``low``/``mid``/``high``/
+                ``custom``（custom 表示用自定义文本，等级文本忽略）
+        """
+        with self._lock:
+            self.config["flow_jailbreaks"] = mapping
+            self.save()
+
+    def get_flow_jailbreak_custom(self, flow_key: str) -> str:
+        """获取流程自定义破限文本，未配置返回空串。
+
+        Args:
+            flow_key: 流程标识
+
+        Returns:
+            自定义破限文本；空串表示用等级模板
+        """
+        mapping = self.config.get("flow_jailbreaks_custom", {})
+        return mapping.get(flow_key, "")
+
+    def set_flow_jailbreaks_custom(self, mapping: dict[str, str]) -> None:
+        """保存流程自定义破限文本映射并持久化。
+
+        Args:
+            mapping: ``{flow_key: custom_text}``，空串表示用等级模板
+        """
+        with self._lock:
+            self.config["flow_jailbreaks_custom"] = mapping
             self.save()
 
     # ===== 配置项访问 =====

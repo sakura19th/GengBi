@@ -6,360 +6,241 @@
 
 赓笔 (GengBi) 是一个 SillyTavern (ST) 兼容的小说续写工具，提供从 TXT 导入、章节管理、上下文提取、提示词组装到 LLM 流式续写的完整工作流。
 
-**当前版本：v0.2.6**（定义于 `novelforge/__init__.py` 的 `__version__`，由"关于"对话框引用，README 顶部同步标注）
+**当前版本：v0.2.7**（定义于 `novelforge/__init__.py` 的 `__version__`，由"关于"对话框引用，README 顶部同步标注）
 
-**版本更新记录**：维护在 `README.md` 的"更新记录"章节，按版本倒序排列，每次发版须追加新版本小节（新增功能/修复/优化分类，每条一行简洁描述）
+**版本更新记录**：维护在 `README.md` 的"更新记录"章节，按版本倒序排列，每次发版须追加新版本小节。
 
 ## 技术栈
 
-- **语言**：Python 3.11+
-- **GUI 框架**：PySide6 (Qt6)
-- **数据模型**：pydantic v2
-- **异步 HTTP**：aiohttp（LLM 流式调用）
-- **存储**：aiosqlite（异步 SQLite）+ JSON 文件
-- **测试**：pytest
+- Python 3.11+ / PySide6 (Qt6) / pydantic v2 / aiohttp（LLM 流式调用）/ aiosqlite（异步 SQLite）+ JSON 文件 / pytest
 
 ## 架构分层
 
 ```
 novelforge/
-├── models/          # 数据模型（pydantic）
-│   ├── chapter.py       # Chapter、Continuation（续写模型：parent_id 字段保留向后兼容不再使用；accept=promote_continuation_to_chapter 提升为新章节插入当前章节之后，非链式入链；Continuation.highlights: list[dict] 字段保存输出栏高亮 {start,end,color,note}，持久化到 continuations 表 highlights TEXT 列；Chapter.protagonist_profile: ProtagonistProfile | None 字段保存主角形象提取结果，持久化到 chapters 表 protagonist_profile TEXT 列（JSON 序列化））
-│   ├── context.py       # ContextEntry（含条目级 enabled 开关，控制是否注入上下文）、VALID_CATEGORIES/POSITIONS/ROLES
-│   ├── preset.py        # WritingPreset、Prompt、PromptOrderEntry
-│   ├── project.py       # Project、NovelProfile（Project.custom_audit_rules: list[Any] 字段保存用户自定义设定/审计必查项，全局共享，由 CustomAuditRuleService 持久化）
-│   ├── regex.py         # RegexScript、PLACEMENT_* 常量
-│   ├── custom_audit_rule.py  # CustomAuditRule 模型（id/title/raw_input 原始输入/requirement 结构化要求/audit_criteria 审计向/severity 严重度 high|medium|low/created_at；用户输入经 AI 结合世界观底层与上下文结构化为 requirement + audit_criteria 两字段，保存到 Project.custom_audit_rules 全局共享）
-│   ├── agent.py         # 续写流程共享数据模型（Outline/Scene/CritiqueReport/CritiqueIssue + VALID_CRITIQUE_* 常量，VALID_CRITIQUE_CATEGORIES 含 16 值：consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance/custom_rules_compliance/outline_alignment/detail_outline_alignment/chapter_transition/rigid_ai_text（刻板AI文本禁令）；前 13 值对齐 phase_outline_audit 的 13 维度，全部 16 值对齐 phase_verify 的 16 维度；4 个新维度 custom_rules_compliance/outline_alignment/detail_outline_alignment/chapter_transition 均为一票否决，rigid_ai_text 严格给分，被 volume.py 复用）
-│   └── volume.py        # 卷级多章节续写数据模型（DeepAnalysis/VolumeOutline/VolumeArtifacts/VolumeRunConfig；DeepAnalysis 新增 user_directive_analysis 字段含 required_elements/emphasized_elements/interpretation/conflicts 四子字段；DEFAULT_AUDIT_DIMENSIONS 13 维度含 user_directive_compliance 用户指令遵从性 + custom_rules_compliance 自定义设定遵从性一票否决 + rigid_ai_text 刻板AI文本禁令严格给分）
+├── models/          # 数据模型（pydantic v2）
+│   ├── chapter.py        # Chapter、Continuation（accept=promote_continuation_to_chapter 提升为新章节插入当前章之后；Continuation.highlights 输出栏高亮持久化；Chapter.protagonist_profile 主角形象档案持久化）
+│   ├── context.py        # ContextEntry（条目级 enabled 开关控制注入）、VALID_CATEGORIES/POSITIONS/ROLES
+│   ├── preset.py         # WritingPreset、Prompt、PromptOrderEntry
+│   ├── project.py        # Project、NovelProfile（Project.world_ontology 世界观底层；Project.custom_audit_rules 自定义设定全局共享）
+│   ├── regex.py          # RegexScript、PLACEMENT_* 常量
+│   ├── custom_audit_rule.py  # CustomAuditRule（id/title/raw_input/requirement/audit_criteria/severity/created_at）
+│   ├── agent.py          # 续写流程共享模型（Outline/Scene/CritiqueReport/CritiqueIssue + VALID_CRITIQUE_* 16 维度常量）
+│   └── volume.py         # 卷级多章节续写模型（DeepAnalysis/VolumeOutline/VolumeArtifacts/VolumeRunConfig；DEFAULT_AUDIT_DIMENSIONS 13 维度）
 ├── core/            # 核心逻辑（无 UI 依赖）
-│   ├── prompt_assembler.py  # 提示词组装（三阶段：排序→注入→裁剪；worldInfoBefore/After 按 category 分组 Markdown 格式输出，_CATEGORY_LABELS 提供中文标签映射；assemble 加 world_ontology/protagonist_profile/skip_history/custom_audit_rules 四参数，_build_macro_context 将 world_ontology/protagonist_profile 序列化为 JSON 字符串填入 MacroContext.extra，custom_audit_rules 经 _format_custom_audit_rules 格式化为文本填入 {{custom_audit_rules}} 宏，skip_history=True 时 _build_history 返回空列表跳过聊天历史构建供卷模式使用，单章与卷级 chapter_writing 共享此链路）
+│   ├── prompt_assembler.py  # 提示词组装（三阶段：排序→注入→裁剪；worldInfoBefore/After 按 category 分组 Markdown；assemble 接收 world_ontology/protagonist_profile/skip_history/custom_audit_rules）
 │   ├── regex_engine.py      # ST 兼容正则引擎 + strip_html_tags
-│   ├── template_engine.py   # Jinja2 模板渲染
+│   ├── template_engine.py   # Jinja2 沙箱（双白名单函数防 SSTI，render_pre_send/render_post_receive）
 │   ├── token_counter.py     # Token 计数（tiktoken 优先，回退估算）
-│   ├── macros.py            # ST 宏引擎（{{user}}、{{char}} 等）
-│   ├── variable_store.py    # 变量存储（{{setvar}}/{{getvar}}）
-│   ├── json_utils.py        # JSON 解析工具（strip_markdown_fences + parse_json_response）
-│   ├── config.py            # 配置管理（API 端点、密钥加密；flow_endpoints:{flow_key: endpoint_id} 映射持久化到 config.json 顶层，get_flow_endpoint 解析流程端点未配置/端点被删时回退默认端点，set_flow_endpoints 持久化映射；add_endpoint setdefault reasoning_effort 字段）
-│   └── storage.py           # SQLite 异步存储层（aiosqlite；SCHEMA_SQL 建 projects/chapters/continuations/cache 表，chapters/continuations 外键 ON DELETE CASCADE；continuations 表含 parent_id 列 + idx_continuations_parent 索引；_migrate_continuations_columns 补 continuations 表 agent_artifacts/volume_artifacts/parent_id/highlights 列（highlights TEXT 存 JSON 序列化的高亮列表）、_migrate_projects_columns 补 projects 表 world_ontology/worldbook_id 列、_migrate_chapters_columns 补 chapters 表 protagonist_profile 列、update_chapter_protagonist 只更新 protagonist_profile 单列避免 save_chapter 用空 content 覆盖正文、save_chapter INSERT/UPSERT 加 protagonist_profile 列、chapters 表 SCHEMA 新增 protagonist_profile TEXT 列；open 流程已补调 _migrate_chapters_columns（修复此前迁移函数已实现但漏调用，导致旧库缺 protagonist_profile 列保存报错 OperationalError）；save_chapter 回滚区分已存在/新章节：已存在章节 SQLite 写入失败时用 write_bytes(old_bytes) 恢复旧正文而非删文件（修复编辑现有章节保存失败时正文丢失），新章节仍 unlink 删刚写入文件；save_project/save_chapter 用 UPSERT（ON CONFLICT DO UPDATE）避免 INSERT OR REPLACE 触发级联删除子表；list_continuations/load_chapters_with_continuations 用显式列名 SELECT（非 SELECT *）保证 row 索引与 INSERT 列序一致；list_chapters 检测 DB 无章节但磁盘有 .txt 文件时自动调 rebuild_chapters_from_disk 从磁盘重建 DB 行；_row_to_chapter row[8]=protagonist_profile + len(row) 防御（JSON 反序列化为 dict）、_row_to_continuation row[6]=parent_id 后续字段顺延 + len(row) 防御（highlights 列读取并 JSON 反序列化为 list）、_row_to_project 读 row[10]/row[11] 加 len(row) 防御；存储路径、JSON 读写工具）
+│   ├── macros.py            # ST 宏引擎（{{user}}、{{char}} 等 11 内置宏 + setvar/getvar 四作用域）
+│   ├── variable_store.py    # 变量存储（global/project/chapter/cache 四作用域）
+│   ├── json_utils.py        # JSON 解析工具
+│   ├── config.py            # 配置管理（API 端点、密钥加密、flow_endpoints 流程端点映射）
+│   └── storage.py           # SQLite 异步存储层（外键 CASCADE；列迁移函数；list_chapters 检测 DB 缺章自动从磁盘重建）
 ├── services/        # 业务服务
-│   ├── context_extractor.py  # 上下文提取（extract + extract_streaming；多批次 token 拆分 + 【信息汇总】环节 _run_merge_entries，batch_count>1 触发 LLM 合并去重，失败降级 best-effort uid 替换合并；ExtractResult 含 batch_count/merged/protagonist_profile/protagonist_batch_count/protagonist_merged 字段；_extract_common 不再调用 _extract_protagonist（与主角形象完全解耦，protagonist_profile 恒为 None）；主角形象独立链路：公共方法 extract_protagonist_streaming 流式触发 + load_cached_protagonist 章节级独立加载，独立缓存 key 前缀 protagonist:（与 ctx_extract: 解耦避免互相覆盖），_extract_protagonist 复用 batches 划分，逐批增量合并 _merge_protagonist_fields 程序化字段级合并 growth_arc 直接覆盖/其他维度序列化长度启发式，batch_count>1 触发 _run_protagonist_merge 语义整合 2 次重试温度 0.2/0.0 失败降级 accumulated_protagonist，失败不阻塞 8 维度结果；模块级 _filter_protagonist_dimensions/_safe_serialize_dim/_parse_protagonist_response 辅助函数；PROTAGONIST_DIMENSIONS 8 维度常量）
-│   ├── ontology_extractor.py # 世界观底层提取器（extract_ontology_streaming 全文拆分分析提取 WorldOntology 7 大维度；镜像 ContextExtractor 三大机制：_split_chapters_by_token_limit 拆批 + 增量更新携带 {{accumulated_ontology}} + batch_count>1 触发 _run_ontology_merge 语义整合，失败降级 accumulated_ontology；2 次重试温度 0.2/0.0；_merge_ontology_fields 程序化字段级合并按序列化长度启发式冲突消解新批次优先；_save_ontology_to_worldbook 拆 7 维度为 ContextEntry category="plot_state" 绑定 project.worldbook_id；提取结果固化到 Project.world_ontology；协程内 await self.storage_service.storage.save_project 直连异步层避免重入死锁，不调用同步 storage_service.save_project；finally await client.close() 释放 aiohttp session 避免 Unclosed client session 警告；_get_llm_client(flow_key="") 支持流程端点解析（flow_key 非空时 get_flow_endpoint，空串用默认端点），端点 reasoning_effort 一并传入 LLMClient；调用点传 "ontology_extraction"）
-│   ├── continuation_worker.py # QThread + asyncio 续写 worker（__init__ 保留 parent_continuation_id 参数但不再传入，默认 None；构造 Continuation 时 parent_id=None，单章续写不再链式）
-│   ├── audit_worker.py          # QThread + asyncio 单章续写审计 worker（流式 stream_chat_completion 输出审计报告 JSON，不做正则后处理，finished 信号返回完整文本字符串而非 Continuation；temperature 0.2/max_tokens 3000 低温稳定输出）
-│   ├── custom_audit_rule_service.py # 自定义设定/审计必查项服务（CustomAuditRuleService；parse_rule_streaming 异步协程：用户原始输入 raw_input + 世界观底层 world_ontology + 上下文 context_entries 注入 phase_custom_rule_parse.txt 模板，AI 结合世界观与上下文结构化为 requirement（要求）+ audit_criteria（审计向）两字段，stream_chat_completion 真流式逐 chunk 推送到 UI + on_chunk 回调，2 次重试温度 0.2/0.0，协程内 await storage_service.storage.save_project 持久化到 Project.custom_audit_rules 列表，finally await client.close() 释放 aiohttp session 避免 Unclosed client session 警告；_format_world_ontology 用 model_dump(mode="json") 递归转 datetime→ISO 字符串避免序列化失败 + except Exception as e: logger.warning 暴露根因（修复"世界观底层序列化失败"静默吞错；_get_llm_client(flow_key="") 同 ontology_extractor 模式（timeout=120），调用点传 "custom_rule_parsing"））
-│   ├── volume_orchestrator.py # 卷级多章节续写编排器（QThread+asyncio，独立类；深度分析切分模式追加 _run_deep_analysis_merge LLM 语义整合润色，失败降级返回原 accumulated；__init__ 接收 world_ontology + protagonist_profile + custom_audit_rules 三参数，8 个 phase 方法（deep_analysis/deep_analysis_merge/volume_outline/outline_audit/outline_final/chapter_outline/chapter_verify/chapter_revise）+ chapter_writing/chapter_rewrite 调用均通过 _format_world_ontology/_format_protagonist_profile 格式化为 JSON 注入 {{world_ontology}}/{{protagonist_profile}} 占位符，9 处 phase 方法注入 {{custom_audit_rules}} 宏（_format_custom_audit_rules 静态方法格式化为 [SEVERITY] title\n要求：...\n审计向：... 文本）；5 个模板文件 phase_deep_analysis/phase_deep_analysis_merge/phase_outline_final/phase_chapter_outline/phase_revise 已补全对应占位符；_run_deep_analysis_single/_run_deep_analysis_merge/_run_volume_outline 注入 {{context_entries}}/{{user_input}} 占位符，_run_volume_outline/_run_outline_audit/_run_outline_final 注入 {{user_directive_analysis}} 占位符，_merge_deep_analysis 合并 user_directive_analysis 4 子字段（required_elements/emphasized_elements/conflicts 列表去重拼接 + interpretation 取较新块非空值），_run_deep_analysis 不切分场景与 _run_volume_outline 章节范围改为插入点前 10 章 _build_lookback_10_chapters_text）
-│   ├── llm_client.py         # LLM 客户端（流式 + 非流式）
-│   ├── preset_service.py     # 预设管理（导入/导出/启用/禁用；reset_default_preset 将本地默认预设覆盖为内置最新版本，用于内置默认升级后用户主动同步）
-│   ├── regex_service.py      # 正则脚本管理（global/scoped/preset；ensure_default_scripts_exist 首次运行将 default_regex_scripts.json 4 条默认正则注入 global.json，已存在不覆盖）
-│   ├── importer.py           # TXT 导入与章节拆分
-│   ├── exporter.py           # 导出（TXT/Markdown/备份）
-│   ├── async_runner.py       # 后台事件循环运行器（单例）
-│   └── storage_service.py    # 存储服务（项目/章节/续写 CRUD；load_project 把 DB 中的 world_ontology dict 还原为 WorldOntology 实例，失败保留 dict；update_chapter_protagonist 同步代理只更新 protagonist_profile 单列（model_dump(mode="json") + json.dumps））
+│   ├── context_extractor.py     # 上下文提取（多批次 token 拆分 + 【信息汇总】合并；主角形象独立链路 extract_protagonist_streaming，独立缓存 key 前缀 protagonist:）
+│   ├── ontology_extractor.py    # 世界观底层提取（WorldOntology 7 大维度；镜像 ContextExtractor 三大机制：拆批/增量合并/语义整合）
+│   ├── continuation_worker.py   # QThread + asyncio 续写 worker
+│   ├── audit_worker.py          # 单章续写审计 worker（流式 stream_chat_completion，低温稳定输出）
+│   ├── custom_audit_rule_service.py  # 自定义设定结构化解析（parse_rule_streaming，AI 结合世界观+上下文结构化为 requirement+audit_criteria）
+│   ├── volume_orchestrator.py   # 卷级多章节续写编排器（QThread+asyncio，7 阶段流程 + 暂停点 + 调试模式）
+│   ├── llm_client.py            # LLM 客户端（流式 + 非流式）
+│   ├── preset_service.py        # 预设管理（reset_default_preset 同步内置最新版）
+│   ├── regex_service.py         # 正则脚本管理（global/scoped/preset）
+│   ├── importer.py              # TXT 导入与章节拆分
+│   ├── exporter.py              # 导出（TXT/Markdown/备份 zip，含 ZIP slip 防护）
+│   ├── async_runner.py          # 后台事件循环运行器（单例）
+│   ├── jailbreak_provider.py     # 流程破限文本提供器（加载 jb_{flow}.txt 按 ### LOW/MID/HIGH ### 分段，4 等级 off/low/mid/high 返回文本；文件缓存）
+│   └── storage_service.py       # 存储服务（项目/章节/续写 CRUD；update_chapter_index 仅更新 index 列不写文件）
 ├── ui/              # UI 组件（PySide6）
-│   ├── main_window.py           # 主窗口（5 栏 QSplitter 布局 + 主题管理 + 调试菜单；OntologyExtractor 实例 + _protagonist_profile_by_chapter 内存 LRU 缓存镜像 _context_entries_by_chapter 模式；4 个 ontology 信号处理方法 _on_extract_ontology_requested 调 context_panel.start_ontology_extraction/_on_ontology_chunk_received 调 update_ontology_progress/_on_ontology_batch_done 调 update_ontology_batch/_on_ontology_done 调 finish_ontology_extraction 或 fail_ontology_extraction 且不再 UI 线程重复 save_project；_on_view_ontology_requested 加载 project.world_ontology 弹 QDialog 按 7 维度分节展示 + _format_ontology_for_display 兼容 dict/WorldOntology 实例；6 个 protagonist 信号处理方法镜像 ontology 模式 _on_extract_protagonist_requested 调 context_panel.start_protagonist_extraction + asyncio.run_coroutine_threadsafe 提交 extract_protagonist_streaming/_on_protagonist_chunk_received 调 update_protagonist_progress/_on_protagonist_batch_done 调 update_protagonist_batch/_on_protagonist_done 调 finish_protagonist_extraction 或 fail_protagonist_extraction ，完成后调 storage_service.update_chapter_protagonist 落盘到 chapters 表 protagonist_profile 列 + 内存 LRU 热缓存（持久化失败仅 warning 不阻塞）/_on_view_protagonist_requested 从 _protagonist_profile_by_chapter.get(chapter_id) 加载弹 QDialog 按 8 维度分节展示 + _format_protagonist_for_display 静态方法 json.dumps 格式化；章节切换状态保留新增 _protagonist_stream_text 单字符串缓冲（按钮互斥保证同时仅一种提取运行）+ restore_extraction_state(is_protagonist=True) 恢复；_load_context_entries_for_chapter 独立 protagonist 恢复分支：优先 chapter.protagonist_profile 持久化字段 → 兜底 load_cached_protagonist cache 表 → LRU（与 ctx_extract 缓存解耦避免互相覆盖）；_on_extract_done 删除原 result.protagonist_profile 捕获代码（解耦后 ExtractResult.protagonist_profile 恒为 None）；_load_project 解耦——项目元数据加载失败时仍尝试 list_chapters 加载章节表避免章节列表为空；VolumeOrchestrator 构造传 project.world_ontology + 当前章节 protagonist_profile；单章续写 _on_start_continuation 的 prompt_assembler.assemble 调用传 project.world_ontology + 优先 chapter.protagonist_profile 兜底 _protagonist_profile_by_chapter.get(chapter.id)；单章续写提升为章节模型：_on_accept_continuation 调 promote_continuation_to_chapter 将续写提升为新章节插入当前章节之后并删除续写记录，_refresh_chapter_list 刷新列表后 _on_chapter_selected(new_chapter.id) 自动选中新章节加载到编辑器；_on_delete_continuation 调 storage_service.delete_continuation 删除当前续写记录；续写仅作为待定候选在续写面板可见，不在章节列表中显示；单章续写审计：_on_audit_continuation 加载 phase_single_audit.txt 模板（8 维度精简审计 consistency/style/coherence/user_directive_compliance/protagonist_consistency/worldview_consistency/custom_rules_compliance/rigid_ai_text）注入 written_text/user_input/world_ontology/protagonist_profile/custom_audit_rules 5 占位符（user_input 用 <user_directive> XML 标签定界符包裹，解决 AI 评审员无法正确识别用户续写指令边界问题；新增维度 4 user_directive_compliance 用户指令遵从性条件性必审项 + summary 【用户指令遵从性审计】标记段落）（_format_world_ontology/_format_protagonist_profile 静态方法 JSON 序列化，custom_rules_str = _format_custom_audit_rules + rendered.replace('{{custom_audit_rules}}', custom_rules_str)），AuditWorker 流式输出审计报告到 AuditDialog，_on_audit_accepted 用户编辑后采纳→构造修正 messages（原续写 messages + 原内容 + 审计意见 + 修正要求）新建 ContinuationWorker created_by="audit_rewrite" 流式重写为新 swipe，_on_continuation_finished 保存不删原 swipe；自定义设定/审计必查项：CustomAuditRuleService 实例 + 5 方法 _format_custom_audit_rules（静态格式化为 [SEVERITY] title\n要求：...\n审计向：... 文本）/_on_add_custom_rule_requested（弹 CustomRuleInputDialog → asyncio.run_coroutine_threadsafe 提交 parse_rule_streaming → on_done 回调 QMessageBox 提示）/_on_view_custom_rules_requested（弹 CustomRulesViewDialog + on_delete 回调 self._delete_custom_rule）/_delete_custom_rule（过滤后 save_project 持久化）/_on_highlights_changed（swipe.highlights = list(highlights) + save_continuation(swipe, current_chapter.id) 持久化）；3 处注入：单章续写 assemble 调用传 custom_audit_rules=project.custom_audit_rules、单章审计 rendered.replace 注入 custom_rules_str、VolumeOrchestrator 构造传 custom_audit_rules=project.custom_audit_rules；章节切换状态保留：7 个缓冲字段 + 章节守卫 on_origin_chapter + _on_chapter_selected 优先 restore_streaming_state/restore_extraction_state，详见 §12；工具菜单新增“流程端点配置(&E)...”入口调 _on_open_flow_endpoint_dialog 弹 FlowEndpointDialog，关闭后 _refresh_endpoints 同步面板端点到当前模式流程配置（volume_continuation/single_continuation）；_resolve_reasoning_effort(endpoint, preset) 解析思考强度——预设级 generation_params.reasoning_effort 优先（更具体），其次端点级，均空则不发送；4 处 worker 注入点（_on_start_continuation L1700/_on_start_volume_continuation L1909/_on_audit_continuation L3756/_on_audit_accepted L3967）调用此方法注入 reasoning_effort；single_audit 流程端点配置优先（L3682-3685）回退面板下拉）
-│   ├── continuation_panel.py    # 续写控制面板（流式布局按钮区，含审计按钮 + audit_continuation 信号；输出框 _output_edit 启用右键菜单高亮——4 色 黄#FFFACD/绿#C8FFB4/蓝#B4DCFF/红#FFB4B4 + 可选备注 QInputDialog + 清除选区/全部；_on_output_context_menu/_prompt_note_and_add/_add_highlight/_clear_highlights_in_range/_clear_all_highlights/apply_highlights（setExtraSelections）/set_highlights 7 方法；highlights_changed = Signal(list) 通知 MainWindow 持久化；set_current_swipe 加载 swipe.highlights + apply_highlights，clear_output 同步清空；_current_highlights: list[dict] 缓冲当前 swipe 高亮）
-│   ├── volume_panel.py          # 卷续写控制面板（卷配置/审计与逐章/暂停点/两层进度/产物；_AUDIT_DIMENSION_LABELS 含 13 维度含 protagonist_consistency主角一致性/worldview_consistency世界观一致性/user_directive_compliance用户指令遵从性/custom_rules_compliance自定义设定遵从性/rigid_ai_text刻板AI文本禁令，复选框网格自动迭代 DEFAULT_AUDIT_DIMENSIONS）
-│   ├── checkpoint_dialog.py     # 检查点对话框（卷续写简单暂停：after_deep_analysis/after_volume_outline/after_audit，接受/编辑/取消）
-│   ├── chapter_confirm_dialog.py # 每章后暂停点对话框（正文展示+通过/不通过/取消，不通过展开反馈输入）
-│   ├── artifact_detail_dialog.py # 章节阶段产物完整内容查看对话框（只读 QPlainTextEdit + 关闭按钮，按 stage_type 格式化 outline/audit/revise/draft）
-│   ├── audit_dialog.py          # 单章续写审计对话框（流式输出区 + 可编辑文本框 + 采纳/取消；accepted_text/cancelled 信号；append_chunk 流式中只读，finish_streaming 完成后设为可编辑启用采纳按钮）
-│   ├── custom_rule_dialog.py    # 自定义设定对话框（CustomRuleInputDialog：QPlainTextEdit 输入 raw_input + 确定/取消，确定后 emit submitted(str) 信号；CustomRulesViewDialog：列表展示已保存 CustomAuditRule（title/severity/requirement/audit_criteria）+ 删除按钮 on_delete 回调 + 关闭按钮）
-│   ├── context_preview_panel.py # 上下文提取预览面板（流式布局操作行；"提取世界观底层"按钮 + extract_ontology_requested 信号 + "查看世界观底层"按钮 + view_ontology_requested 信号；"提取主角形象"按钮 #primaryBtn + extract_protagonist_requested 信号 + "查看主角形象"按钮 #secondaryBtn + view_protagonist_requested 信号；"新增自定义设定"按钮 #primaryBtn + add_custom_rule_requested 信号 + "查看自定义设定"按钮 #secondaryBtn + view_custom_rules_requested 信号（参考世界观底层提取模式，按钮位于 _view_protagonist_btn 之后、QLabel("前文:") 之前）；CATEGORY_DISPLAY_NAMES/CATEGORY_ORDER 新增 protagonist_behavior 主角行为维度，位于 characters 之后 locations 之前；5 个 ontology 流式方法 start_ontology_extraction/update_ontology_progress/update_ontology_batch/finish_ontology_extraction/fail_ontology_extraction 复用 _stream_view 展示世界观提取流式输出；5 个 protagonist 流式方法 start_protagonist_extraction/update_protagonist_progress/update_protagonist_batch/finish_protagonist_extraction/fail_protagonist_extraction 同样复用 _stream_view；4 个 custom_rule 流式方法 start_custom_rule_parsing/update_custom_rule_progress/finish_custom_rule_parsing/fail_custom_rule_parsing（无 batch 方法，单次 LLM 调用无批次概念）同样复用 _stream_view，与 ontology/protagonist 互斥；restore_extraction_state(stream_text, is_ontology=False, is_protagonist=False) 三参数互斥恢复章节切换提取状态，is_protagonist 优先级高于 is_ontology；get_lookback_config() 返回 {"lookback": int, "token_limit": int} 供 MainWindow 主角提取调用；4 个提取按钮的 setEnabled(False/True) 与 ontology/protagonist/custom_rule 按钮同步联动）
-│   ├── debug_prompt_dialog.py   # 调试提示词预览对话框（调试模式下发送前确认）
-│   ├── flow_layout.py           # QFlowLayout 流式布局（窄屏自动换行）
-│   ├── wheel_filter.py          # 滚轮事件过滤器（未聚焦控件不响应滚轮，转发父级滚动区域）
-│   ├── chapter_list.py          # 章节列表（虚拟滚动/搜索/右键菜单；ChapterTreeModel 扁平单层仅章节按 index 排序，续写不在列表中显示仅面板可见）
-│   ├── chapter_editor.py        # 章节预览/编辑（自动保存/undo/拆分；工具栏含字数标签 + 保存状态标签 + 保存按钮 _save_btn + 编辑/预览切换按钮 _edit_btn；save_requested = Signal() 由保存按钮点击 emit，MainWindow _connect_signals 连接到 _on_save 复用 Ctrl+S 落盘链路；set_streaming_locked 流式输出时禁用保存与编辑按钮）
-│   ├── history_panel.py         # 续写历史日志面板
-│   ├── font_settings.py         # 字体设置对话框（字体/字号/行距）
-│   ├── extraction_dialog.py     # 提取失败重试对话框
-│   ├── dialogs.py               # 通用对话框（隐私声明等）
-│   ├── project_panel.py         # 项目管理对话框
-│   ├── preset_manager.py        # 预设管理器（工具栏含新建/导入/导出/复制/删除/禁用/恢复默认预设 七按钮；生成参数含 temperature/max_tokens/max_context/top_p/top_k/reasoning_effort 六项，top_p 用 0-100 整数×0.01 映射 0.0-1.0 浮点，reasoning_effort 五档 auto/low/medium/high/max；恢复默认预设按钮调用 reset_default_preset 覆盖本地旧版本为内置最新版，含确认对话框与刷新）
-│   ├── regex_manager.py         # 正则管理器（当前作用域脚本列表含内联勾选开关，反向映射 disabled，点击即时持久化）
-│   ├── template_editor.py       # 模板编辑器（变量/模板渲染）
-│   ├── worldbook_manager.py     # 世界书管理器（导入/编辑/启停；条目列表含内联勾选开关控制条目级 enabled，禁用条目不注入上下文）
-│   ├── worldbook_panel.py       # 世界书选择面板（嵌入续写配置）
-│   ├── settings_dialog.py       # 设置对话框（API 端点管理；端点编辑表单含思考强度下拉 REASONING_EFFORT_OPTIONS 7 档：不发送("")/auto/minimal/low/medium/high/max，对应 OpenAI o 系列/DeepSeek V4 等 OpenAI 兼容网关 reasoning_effort 字段，空串/none/off 不写入 payload；编辑按钮 clicked 信号用 lambda 包裹避免 bool 传给 item 参数导致提前 return；ModelFetchWorker parent=None 解耦对话框生命周期 + finished→deleteLater 自清理，run() finally 调 client.close() 关闭 aiohttp session，closeEvent 断开 worker 信号避免回调已销毁 UI——修复编辑保存端点时 QThread 被强制销毁导致闪退）
-│   ├── flow_endpoint_dialog.py   # 流程端点配置对话框（FLOW_DEFINITIONS 7 流程：single_continuation 单章续写/volume_continuation 卷续写/single_audit 单章审计/context_extraction 上下文提取/ontology_extraction 世界观底层提取/protagonist_extraction 主角形象提取/custom_rule_parsing 自定义设定解析；FlowEndpointDialog 为每流程提供端点下拉，默认选项=端点管理默认端点，可选端点管理中已配置的其它端点；保存调 set_flow_endpoints 持久化 {flow_key: endpoint_id} 映射）
+│   ├── main_window.py           # 主窗口（5 栏 QSplitter + 主题管理 + 调试菜单；ont/protagonist/custom_rule 提取信号处理；续写/审计/重写三模式接线；章节切换状态保留 7 缓冲字段）
+│   ├── continuation_panel.py    # 续写控制面板（三模式下拉；输出框右键 4 色高亮 + 备注；highlights_changed 信号持久化）
+│   ├── volume_panel.py          # 卷续写控制面板（配置/两层进度/五 Tab 产物查看/流式区）
+│   ├── context_preview_panel.py # 上下文提取预览面板（ontology/protagonist/custom_rule 三类提取按钮互斥 + 流式展示）
+│   ├── chapter_list.py          # 章节列表（虚拟滚动/搜索/右键菜单；当前选中章节持续高亮——ChapterHighlightDelegate 自定义 QStyledItemDelegate 在 paint() 中 fillRect 绕开 QSS 选中态覆盖）
+│   ├── chapter_editor.py        # 章节预览/编辑（自动保存/undo/拆分；流式锁定）
+│   ├── audit_dialog.py          # 单章审计对话框（流式→可编辑→采纳）
+│   ├── custom_rule_dialog.py    # 自定义设定对话框（输入/查看+删除）
+│   ├── checkpoint_dialog.py     # 卷续写暂停点对话框（接受/编辑/取消）
+│   ├── chapter_confirm_dialog.py # 每章后暂停点（通过/不通过+反馈/取消）
+│   ├── artifact_detail_dialog.py # 阶段产物完整内容查看
+│   ├── debug_prompt_dialog.py   # 调试提示词预览
+│   ├── preset_manager.py        # 预设管理器（7 按钮；6 生成参数含 reasoning_effort 5 档）
+│   ├── regex_manager.py         # 正则管理器（内联勾选即时持久化）
+│   ├── worldbook_manager.py     # 世界书管理器（条目级 enabled 开关）
+│   ├── settings_dialog.py       # 设置对话框（API 端点管理；reasoning_effort 7 档）
+│   ├── flow_endpoint_dialog.py  # 流程端点配置（8 流程端点映射 + 6 非正文流程破限等级下拉 off/low/mid/high/custom + 自定义文本编辑入口）
+│   ├── jailbreak_custom_dialog.py # 自定义破限文本编辑对话框（QPlainTextEdit + 确定/取消）
+│   ├── font_settings.py / history_panel.py / project_panel.py / template_editor.py / worldbook_panel.py / dialogs.py / flow_layout.py / wheel_filter.py
 │   └── ...
 └── resources/       # 资源文件
-    ├── defaults/        # 默认预设、正则、提取提示词
-    │   ├── default_preset.json         # 默认写作预设（16 条分层模块化提示：系统基础层 main + 功能模块层 抗八股（8 大类句式/词汇/描写/对白/情节/认知/AI痕迹/正面要求）/抗重复（7 大类前文/句式/词汇/对话/情节套路/描写套路/节奏）/字数 + 文风互斥层 通用网文（5 维度）/古风（4 维度）/轻小说（5 维度）+ 推进互斥层 适中/保守/冒险 + 增强层 思维链 + 可选层 NSFW + Marker 层；main 含 {{world_ontology}}/{{protagonist_profile}}/{{custom_audit_rules}} 宏引用 + <novelforge_thinking>/<novelforge_chapter> XML 输出；【主角信息】段后追加【自定义设定/审计必查项】段注入 {{custom_audit_rules}}；generation_params 含 temperature/top_p/top_k/max_tokens/max_context/reasoning_effort 八项）
-    │   ├── default_regex_scripts.json  # 默认正则脚本（4 条核心：GB-思维链隐藏/GB-八股抹除/GB-破折号规范/GB-空行清理，placement 均为 AI_OUTPUT=2；脚本内部 ID 仍为 nf_regex_* 保持向后兼容）
-    │   ├── extract_prompt.txt          # 上下文提取提示词模板（单批次提取）
-    │   ├── extract_merge_prompt.txt    # 上下文提取【信息汇总】环节提示词（多批次 LLM 合并去重，含 {{entries_blocks}} 占位符）
-    │   └── agent/       # 续写阶段提示词模板（phase_*.txt，卷续写用）
-    │       ├── phase_verify.txt          # 卷续写复用：验证（16 维度：consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance/custom_rules_compliance/outline_alignment/detail_outline_alignment/chapter_transition/rigid_ai_text；前 13 维度对齐 phase_outline_audit，后 3 维度为新增一票否决维度，rigid_ai_text 为必审项严格给分；protagonist_consistency/worldview_consistency/custom_rules_compliance/outline_alignment/detail_outline_alignment/chapter_transition/rigid_ai_text 为必审项；summary 强制含 8 个固定标记段落【主角一致性审计】/【世界观一致性审计】/【用户指令遵从性审计】/【自定义设定审计】/【大纲一致性审计】/【细纲一致性审计】/【章节衔接审计】/【刻板AI文本审计】；含 {{previous_chapter_text}} 占位符注入紧邻上一章正文供 chapter_transition 维度审计章节开头与前一章结尾衔接（第一章为空串跳过审查）；含 {{custom_audit_rules}} 占位符注入自定义设定供 custom_rules_compliance 维度审计；worldview_consistency 8 条检查项对齐 WorldOntology 7 大维度；user_directive_compliance 维度对照 user_directive_analysis.required_elements/emphasized_elements/conflicts 检查，未满足 required_elements 任一项至少判 major；custom_rules_compliance 维度对照 custom_audit_rules 的 requirement/audit_criteria 检查，未满足任一 high 严重度项判 critical 一票否决；outline_alignment 维度对照 ChapterPlan 检查 key_events 覆盖与 plot_role 一致；detail_outline_alignment 维度对照 Outline 检查场景规划落实；chapter_transition 维度对照前一章结尾检查衔接平滑过渡；rigid_ai_text 维度严格检查 AI 套路痕迹，3 处以上判 major，5 处以上或整段 AI 套路判 critical passed=false）
-    │       ├── phase_custom_rule_parse.txt # 自定义设定结构化解析模板（用户原始输入 raw_input + 世界观底层 world_ontology + 上下文 context_entries 注入，AI 结合世界观与上下文结构化为 CustomAuditRule JSON：id/title/raw_input/requirement/audit_criteria/severity/created_at；severity 三档 high/medium/low；2 次重试温度 0.2/0.0）
-    │       ├── phase_revise.txt          # 卷续写复用：修订（含 previous_chapters_text + pacing_speed + world_ontology + protagonist_profile 占位符）
-    │       ├── phase_chapter_rewrite.txt # 卷续写：审计后章节重写（旧模板，保留向后兼容但不再使用；原 10 占位符含 {{revision_guidance}}，已被 phase_audit_rewrite.txt 取代）
-    │       ├── phase_audit_rewrite.txt  # 统一审计后修改流程模板（单章+卷共用，取代 phase_chapter_rewrite.txt；不复用 prompt_assembler 直接模板组装；9 占位符 {{original_content}}/{{critique}}/{{world_ontology}}/{{protagonist_profile}}/{{custom_audit_rules}}/{{previous_chapters_text}}/{{chapter_plan}}/{{outline}}/{{pacing_speed}}/{{target_words}}，无 {{revision_guidance}}（审计报告整体即修改意见）；聚焦"修改任务"段强调逐条对照 issues 的 suggestion 落实修订；结尾"⚠️ 输出严格要求"段强调必须重写完整正文、严禁续写或追加、严禁输出元信息、直接输出正文）
-    │       ├── phase_deep_analysis.txt   # 卷续写：前文深度分析（DeepAnalysis，含 world_ontology + protagonist_profile + context_entries + user_input 占位符）
-    │       ├── phase_deep_analysis_merge.txt  # 卷续写：深度分析【信息汇总】环节（切分模式下 LLM 语义整合润色，12 占位符含 world_ontology + protagonist_profile + context_entries + user_input + chapters_text）
-    │       ├── phase_volume_outline.txt  # 卷续写：N 章卷大纲（VolumeOutline）
-    │       ├── phase_outline_audit.txt   # 卷续写：大纲多维度审计+修订（OutlineAuditReport；13 维度：原 12 维度 + rigid_ai_text 刻板AI文本禁令，严格给分：3 处以上 AI 痕迹 score≤5，5 处以上或整段 AI 套路 score≤3 passed=false）
-    │       ├── phase_outline_final.txt   # 卷续写：终稿大纲生成（基于最后一轮审计+原大纲+前文+深度分析+推进速度，含 world_ontology + protagonist_profile 占位符）
-    │       └── phase_chapter_outline.txt # 卷续写：单章场景级细纲（Outline，场景数量按 pacing_speed 动态：slow=1-3/medium=3-5/fast=5-8，含 world_ontology + protagonist_profile 占位符）
-    └── themes/          # QSS 主题（Apple HIG 风格 暗色/亮色）
+    ├── defaults/
+    │   ├── default_preset.json     # 默认写作预设（20 条分层模块：main/抗八股/抗重复/字数/文风互斥/推进互斥/思维链/破限层 4 套互斥+助手预填充/Marker；破限默认全关；nf_jb_* 已前置到 main 之前定调；nf_jb_high 含 NSFW 指引覆盖原 nf_nsfw）
+    │   ├── jailbreaks/                # 非正文流程破限模板（6 个 jb_*.txt，每文件含 ### LOW/MID/HIGH ### 三档）
+    │   ├── default_regex_scripts.json  # 4 条默认正则（思维链隐藏/八股抹除/破折号规范/空行清理）
+    │   ├── extract_prompt.txt / extract_merge_prompt.txt  # 上下文提取 + 汇总环节
+    │   └── agent/                   # 续写阶段提示词模板（phase_*.txt）
+    │       ├── phase_verify.txt          # 16 维度验证（含 4 个一票否决 + rigid_ai_text 严格给分）
+    │       ├── phase_custom_rule_parse.txt # 自定义设定结构化解析
+    │       ├── phase_revise.txt / phase_chapter_rewrite.txt / phase_audit_rewrite.txt  # 修订/重写（audit_rewrite 为统一模板取代 chapter_rewrite）
+    │       ├── phase_deep_analysis.txt / phase_deep_analysis_merge.txt  # 深度分析 + 切分汇总
+    │       ├── phase_volume_outline.txt / phase_outline_audit.txt / phase_outline_final.txt  # 卷大纲/审计/终稿
+    │       ├── phase_chapter_outline.txt  # 单章细纲
+    │       ├── phase_single_audit.txt     # 单章审计（8 维度）
+    │       └── phase_rewrite_analysis.txt # 重写当前章节需求分析
+    └── themes/          # QSS 主题（light/dark，Apple HIG 风格）
 ```
 
 ## 关键设计决策
 
 ### 1. ST 兼容性
 
-- 预设格式兼容 SillyTavern 的 `prompts` + `prompt_order` + `extensions.regex_scripts` 结构
-- 正则脚本支持 ST 的 `findRegex`（`/pattern/flags` 格式）、`trimStrings`、`placement`（1=USER_INPUT, 2=AI_OUTPUT, 5=WORLD_INFO）
-- 宏系统兼容 ST 的 `{{user}}`、`{{char}}`、`{{setvar::name::value}}`、`{{getvar::name}}` 等
-- 世界书条目级开关：`ContextEntry.enabled`（默认 True）与 ST `disable` 字段反向映射——导入 ST 世界书时 `disable=true → enabled=false`（`worldbook_importer._convert_entry`），导出时 `disable = not enabled`（`worldbook_service._entry_to_st_dict`）；正则 `RegexScript.disabled` 与 ST 同向（disabled=true 表示禁用）
+- 预设格式兼容 SillyTavern 的 `prompts` + `prompt_order` + `extensions.regex_scripts`
+- 正则脚本支持 ST 的 `findRegex`（`/pattern/flags`）、`trimStrings`、`placement`（1=USER_INPUT/2=AI_OUTPUT/5=WORLD_INFO）
+- 宏系统兼容 ST 的 `{{user}}`/`{{char}}`/`{{setvar::name::value}}`/`{{getvar::name}}`
+- 世界书条目级开关：`ContextEntry.enabled` 与 ST `disable` 反向映射；正则 `RegexScript.disabled` 与 ST 同向
 
 ### 2. QThread + asyncio 桥接
 
-- `ContinuationWorker` 继承 `QThread`，在 `run()` 中创建独立 asyncio 事件循环
-- 流式 chunk 通过 Qt 信号 `chunk_received(str)` 跨线程推送至 UI
-- `AsyncLoopRunner` 单例提供持久后台事件循环，供同步 UI 代码提交协程
+- Worker（ContinuationWorker/AuditWorker/VolumeOrchestrator）继承 QThread，`run()` 创建独立 asyncio 事件循环
+- 流式 chunk 通过 Qt 信号跨线程推送至 UI
+- `AsyncLoopRunner` 单例提供持久后台事件循环供同步 UI 代码提交协程
 
 ### 3. 提取与续写解耦
 
-- 上下文提取是独立步骤：用户先点击"提取上下文"按钮，确认结果后再续写
-- 提取使用流式 `extract_streaming()`，不阻塞 UI 线程
-- 续写时使用已提取的 `self._current_context_entries`，不再自动提取
-- **多批次【信息汇总】环节**：前文超 token_limit 时按章节边界拆分为多批次，每批独立全量提取 ContextEntry；`batch_count > 1` 时触发 `_run_merge_entries`（加载 `extract_merge_prompt.txt`，LLM 合并去重/冲突消解/字段补全），失败降级使用 best-effort uid 替换合并的 `all_entries`；`ExtractResult.merged` 标识是否经汇总环节
-- **批次级自动重试**（`ContextExtractor` 8 维度批次 + `_extract_protagonist` 主角形象批次 + `OntologyExtractor` 批次）：每批次 LLM 调用失败（TimeoutError/AuthError/RateLimitError/APIError/LLMError/JSONDecodeError/无 choices/其他非取消异常）立即重试 1 次（温度归零 0.0），2 次均失败才中止整体提取并返回失败状态；`asyncio.CancelledError` 不重试（用户取消立即生效）；流式分支重试时清空 `content_parts` 避免拼接残缺内容；镜像【信息汇总】合并环节的 2 次重试策略
-- **单次续写上下文条目格式化输出**：`PromptAssembler._build_world_info_message` 按 `category` 分组为 Markdown（`# 上下文条目（自动提取）` + `## {中文标签}` + `- {content}（{keys}）`），`_CATEGORY_LABELS` 提供 characters→人物/locations→地点/events→事件/style→风格/plot_state→剧情状态/relationships→关系/atmosphere→氛围/foreshadowing→伏笔/other→其他 映射；worldInfoBefore/After 仍为独立 system 消息，position 语义不变
-- **世界书条目级开关控制注入**：`MainWindow._get_enabled_worldbook_entries` 过滤 `enabled=False` 的条目，单点覆盖 3 处续写入口（单章/卷/提示词预览均经 `_merge_worldbook_entries` 调用此方法）；世界书管理器条目列表内联勾选开关（`itemChanged` → `worldbook_service.set_entry_enabled`）即时持久化条目级 enabled；自动提取的 ContextEntry 默认 enabled=True 不受影响
-- **底层世界观元描述提取**（`OntologyExtractor`）：全文拆分分析提取 `WorldOntology` 7 大维度（existential_topology/causal_architecture/spatio_temporal_ontology/information_epistemology/axiological_foundation/becoming_dynamics/narrative_ontology）参数化描述，固化到 `Project.world_ontology`（全文提取一次，不随章节变化）；镜像 `ContextExtractor` 三大机制：①`_split_chapters_by_token_limit` 按 token 拆批（token_limit=0 不拆分）②增量更新每批次携带 `{{accumulated_ontology}}` 占位符（首批注入"（首批提取，无前序参考）"，后续注入累积 JSON），`_merge_ontology_fields` 程序化字段级合并（空字段取另侧/双侧非空按序列化长度启发式/冲突新批次优先）③`batch_count > 1` 触发 `_run_ontology_merge`（加载 `extract_ontology_merge_prompt.txt`，`{{entries_blocks}}` 拼接各批 JSON 含 `## 批次 i/N（章节 X-Y）` 标题，2 次重试温度 0.2/0.0，失败降级返回 accumulated_ontology）；非流式 `chat_completion` + 批次级 2 次重试（温度 0.2/0.0，见上文「批次级自动重试」），`stop_event` 跨线程取消；`_save_ontology_to_worldbook` 拆 7 维度为 `ContextEntry`（category="plot_state"，uid=`{wb_id}_{dim}`，comment=中文标签）绑定 `project.worldbook_id`（空则 `_generate_id("wb_")` 新建）；返回 `tuple[WorldOntology | None, str]`（成功状态消息/失败错误消息/取消"用户取消提取"）
-- **主角形象一致性提取**（`ContextExtractor._extract_protagonist`）：与 8 维度提取共用 `batches` 划分（继承 token 拆分），逐批调用 `extract_protagonist_prompt.txt`，每批携带 `{{accumulated_protagonist}}` 增量上下文（首批注入"（首批提取，无前序参考）"），`_merge_protagonist_fields` 程序化字段级合并（`growth_arc` 维度新批次直接覆盖反映弧光演变，其他 7 维度按序列化长度启发式）；批次级 2 次重试（温度 0.2/0.0，见上文「批次级自动重试」）；`batch_count > 1` 触发 `_run_protagonist_merge`（加载 `extract_protagonist_merge_prompt.txt`，2 次重试温度 0.2/0.0，失败降级返回 accumulated_protagonist）；失败不阻塞 8 维度结果；**独立链路解耦**：公共方法 `extract_protagonist_streaming` 流式触发（镜像 `OntologyExtractor.extract_ontology_streaming` 模式），独立缓存 key 前缀 `protagonist:{project_id}:{chapter_id}`（与 `ctx_extract:` 解耦避免互相覆盖），`load_cached_protagonist` 章节级独立加载；`_extract_common` 不再调用 `_extract_protagonist`（上下文提取不再产出 protagonist_profile，ExtractResult.protagonist_profile 恒为 None）；UI 独立按钮触发（见 §5 context_preview_panel + main_window）；章节级 LRU 仅内存缓存 `_protagonist_profile_by_chapter`，不持久化到 Project 模型（无 schema 迁移）；8 维度心理学档案（basic_anchors/motivation_system/personality_structure/cognitive_style/defense_mechanisms/behavioral_fingerprint/relationship_coordinates/growth_arc）+ OOC 红线；大纲审计 `protagonist_consistency` 维度一票否决（score ≤ 4 → 整体 passed=false），章节验证 critical 级主角一致性问题 → passed=false
+- 上下文提取是独立步骤：用户先提取，确认结果后再续写；提取用流式不阻塞 UI
+- **多批次【信息汇总】**：前文超 token_limit 按章节边界拆批，每批独立全量提取；batch_count>1 触发 LLM 合并去重，失败降级 best-effort
+- **批次级自动重试**：每批次失败立即重试 1 次（温度归零），2 次均失败才中止；CancelledError 不重试
+- **世界观底层提取**（OntologyExtractor）：全文提取 WorldOntology 7 大维度固化到 Project.world_ontology（全文一次不随章节变）；镜像 ContextExtractor 三大机制
+- **主角形象提取**（ContextExtractor._extract_protagonist）：8 维度心理学档案，独立链路（extract_protagonist_streaming + 独立缓存 key 前缀 protagonist:），与上下文提取解耦避免互相覆盖；按章节缓存
+- **世界书条目级开关**：`_get_enabled_worldbook_entries` 过滤 enabled=False，单点覆盖 3 处续写入口
 
 ### 4. trimStrings 行为
 
-- TGbreak 等预设的 `trimStrings` 会剥离 `<` 和 `>` 字符
-- `strip_html_tags` 需额外清理残留碎片（半残标签、HTML 注释碎片、配对标签碎片）
-- `strip_html_tags` 仅在检测到 HTML 特征时调用（`_contains_html` 检测）
+- TGbreak 等预设的 trimStrings 会剥离 `<`/`>` 字符；`strip_html_tags` 需额外清理残留碎片，仅在检测到 HTML 特征时调用
 
 ### 5. UI 布局规范
 
 主窗口 5 栏 QSplitter 布局（左→右）：
-1. 章节目录（最小 160px，默认 200px，不伸缩）
-2. 预览/编辑器（最小 250px，默认 420px，伸缩）
-3. 上下文提取预览（最小 200px，默认 280px，伸缩）
-4. 续写控制（最小 220px，默认 260px，不伸缩）
-5. 续写输出（最小 280px，默认 400px，伸缩）
+1. 章节目录（200px，不伸缩）2. 预览/编辑器（420px，伸缩）3. 上下文提取预览（280px，伸缩）4. 续写控制（260px，不伸缩）5. 续写输出（400px，伸缩）
 
-- 初始窗口大小：1600×900（`resize(1600, 900)`）
-- 最小窗口大小：1280×700
-- `DEFAULT_PANEL_SIZES = [200, 420, 280, 260, 400]`（总和 1560px ≤ 1600px）
-- `showEvent` 在首次启动时应用默认面板尺寸（QSettings 无保存时）
-- CollapsiblePanel 添加控件必须用 `add_widget()`，不能用 `QVBoxLayout(content_layout.widget())`（后者返回 None）
-- 续写模式切换：单次续写 / 卷续写（多章节）
-- 卷续写模式显示 VolumePanel（章节数/分析深度/审计与逐章设置/暂停点/两层进度/产物查看器），隐藏单次参数区
-- 单次模式显示原有续写参数区（温度/字数/Token/回溯章节数）；**回溯章节数仅在单章模式生效**（控制 `prompt_assembler._build_history` 截断聊天历史到最近 N 章），卷模式不使用该参数（改用 `skip_history=True` 跳过聊天历史 + "最近 10 章正文参考（含本卷已生成）"系统消息提供前文）
-- ContinuationPanel 内部布局：顶部 `mode_group`（续写模式下拉框，固定高度）+ 中部 `_content_splitter`（垂直 QSplitter，伸缩因子 1）+ 底部 `btn_layout`（流式按钮区，固定）；`_content_splitter` 上半为 `_mode_content_widget`（容纳 `_config_group`/`_volume_panel`，二者 `addWidget` 均传伸缩因子 1，确保可见面板撑满中间空间），下半为 `_user_input_group`（用户输入框，伸缩因子 0 默认小、可拖动把手调整高度，`setChildrenCollapsible(False)` 防止拖到消失，`setHandleWidth(6)` 加宽把手，初始 sizes `[400, 60]`）
-- 二模式路由：`_on_start_continuation_routed` 按 `continuation_panel.get_mode()` 分发到 `_on_start_continuation`/`_on_start_volume_continuation`；Ctrl+Enter 与重写按钮均经此路由
-- `_on_mode_changed` 调用 `show_volume_panel` 管理两种模式的面板显隐互斥
-- 窄屏自适应：续写控制面板按钮区、上下文提取预览操作行/按钮行使用 `QFlowLayout`（`flow_layout.py`），按宽度自动换行，避免窄屏按钮文字截断/溢出
-- 按钮高度统一：普通按钮与 `#primaryBtn` 主按钮均 `min-height: 28px`，由全局 QSS 接管
+- 初始窗口 1600×900，最小 1280×700；`DEFAULT_PANEL_SIZES = [200, 420, 280, 260, 400]`
+- 续写模式三选一：单次续写 / 卷续写 / 重写当前章节
+- 卷模式隐藏右侧输出面板，VolumePanel 流式区承接章节流式
+- 单次模式用 `lookback_chapters` 截断聊天历史；卷模式用 `skip_history=True` 跳过聊天历史，前文由"最近 10 章正文参考"系统消息提供
+- 窄屏自适应：按钮区用 QFlowLayout 自动换行
+- CollapsiblePanel 添加控件必须用 `add_widget()`
+- 按钮高度统一 28px（全局 QSS 接管）
 
 ### 6. 主题系统（Apple HIG 风格）
 
-- 主题文件：`resources/themes/{light,dark}.qss`，由 `main_window._apply_theme()` 读取并用 `app.setStyleSheet()` 全局应用
-- 主题三态：暗色/亮色/跟随系统（后者读 `styleHints().colorScheme()`，并监听 `colorSchemeChanged` 信号实时重应用）
-- 设计 token：主色 System Blue `#007aff`（亮）/`#0a84ff`（暗）；背景层次 `#ffffff`/`#f2f2f7`（亮）、`#1c1c1e`/`#2c2c2e`/`#3a3a3c`（暗）
-- 圆角分级：按钮 8px、主按钮胶囊 14px、卡片/文本框 10px、列表项选中块 6px
-- 列表选中态：淡 accent 半透明圆角（`rgba(0,122,255,0.12)`），文字不变色
-- 阴影近似：QSS 不支持 box-shadow，用极淡边框 `rgba(0,0,0,0.06)` + 背景层次色差近似
-- 内联样式禁用：UI 代码不使用 `setStyleSheet`，所有样式通过对象名（`setObjectName`）由全局 QSS 接管（如 `panelTitle`/`textSecondary`/`textInfo`/`textSuccess`/`textDanger`/`metaText` 等）
-- 状态色语义：进行中=橙 `#ff9500`、成功=绿 `#34c759`、错误=红 `#ff3b30`、次要=半透明黑/白
+- 主题文件 `resources/themes/{light,dark}.qss`，由 `main_window._apply_theme()` 全局应用
+- 三态：暗色/亮色/跟随系统（监听 colorSchemeChanged 实时重应用）
+- 设计 token：主色 System Blue `#007aff`（亮）/`#0a84ff`（暗）；圆角分级（按钮 8px/主按钮 14px/卡片 10px/列表项 6px）
+- **内联样式禁用**：UI 代码不用 `setStyleSheet`，所有样式通过 `setObjectName` 由全局 QSS 接管
+- 状态色：进行中=橙/成功=绿/错误=红/次要=半透明
 
 ### 7. Token 预算
 
-- `PromptAssembler.assemble()` 计算 token 预算：`max_context - max_tokens - system_tokens - injection_tokens - user_input_tokens`
-- 超限时自动降低 `max_tokens` 以保证当前章节最低上下文
-- `assemble()` 是纯本地操作，不调用 LLM，可用于提示词预览
+- `PromptAssembler.assemble()` 计算 `max_context - max_tokens - system_tokens - injection_tokens - user_input_tokens`，超限时自动降低 max_tokens
+- assemble 是纯本地操作不调用 LLM，可用于提示词预览
 
-### 8. 单章续写提升为章节模型（Promote to Chapter）
+### 8. 单章续写提升为章节（Promote to Chapter）
 
-- **工作流**：选定章节续写 → 续写作为待定候选（仅在续写面板可见，不在章节列表）→ 接受=提升为独立章节插入到当前章节之后 → 选中新章节再续写，以此往复
-- **续写状态**：续写仅作为待定候选存在，不显示在章节列表中（`ChapterTreeModel` 扁平单层，仅章节）
-- **接受即提升**：`ChapterService.promote_continuation_to_chapter(chapter, continuation) -> (chapter, new_chapter)`——将当前章节之后所有章节 index 后移 1 位，创建新 `Chapter`（index=当前+1，content=续写内容），删除原续写记录（从存储与 chapter.continuations 移除）；原章节正文不变
-- **删除续写**：`ContinuationPanel._delete_btn`("删除") + `delete_continuation` 信号 → `MainWindow._on_delete_continuation` 调 `storage_service.delete_continuation` 直接删除续写记录
-- **章节列表**：`ChapterTreeModel`（`chapter_list.py`）扁平单层（仅章节，按 index 排序，标题过滤）；续写不在此列表中显示；`update_chapter` 重建过滤索引
-- **主窗口接受流程**：`_on_accept_continuation` 调 `promote_continuation_to_chapter` → `_refresh_chapter_list`（新增章节）→ `_on_chapter_selected(new_chapter.id)` 自动选中新章节加载到编辑器
-- **接受并继续**：`_on_accept_and_continue` 先提升（已选中新章节），500ms 后从新章节发起续写，符合"以此往复"
-- **存储**：continuations 表 `parent_id TEXT` 列保留（向后兼容，不再使用）；`save_continuation`/`list_continuations` 显式列名 SELECT；`_row_to_continuation` row[6]=parent_id
-- **面板按钮**：开始续写/查看提示词/停止/重写/接受/接受并继续/编辑后接受/删除/并排对比
+- 工作流：选定章节续写 → 续写作为待定候选仅在续写面板可见 → 接受=提升为独立章节插入当前章节之后 → 选中新章节再续写
+- `ChapterService.promote_continuation_to_chapter(chapter, continuation) -> (chapter, new_chapter)`：当前章之后所有章节 index 后移 1 位，创建新 Chapter（index=当前+1），删除原续写记录
+- 续写不在章节列表显示（ChapterTreeModel 扁平单层仅章节）
+- 删除续写：`delete_continuation` 信号 → 直接删除记录
 
-### 9. 卷级多章节续写（Volume-level Multi-chapter Continuation）
+### 9. 卷级多章节续写（Volume）
 
-- "卷续写"流程：一次产出 N 章正文
-- 数据模型定义于 `novelforge/models/volume.py`（镜像 agent.py 的 pydantic v2 风格）：
-  - `DeepAnalysis`：前文深度分析产物，分故事状态/深度分析/结构化清单三组字段，所有字段默认空；`character_arc_patterns` 与 `key_phrases` 均为 `list[dict[str, Any]]`（与 phase_deep_analysis.txt 模板要求输出对象数组一致，避免 pydantic 校验报错）；结构化清单末尾新增 `user_directive_analysis: dict[str, Any]` 字段（用户剧情输出需求解析，含 required_elements/emphasized_elements/interpretation/conflicts 四子字段）
-  - `VolumeOutline`/`ChapterPlan`：卷大纲与单章节计划，`plot_role` 枚举（起/承/转/合/高潮/过渡）
-  - `OutlineAuditReport`/`AuditDimension`：大纲审计，DEFAULT_AUDIT_DIMENSIONS 13 维度（consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance/custom_rules_compliance/rigid_ai_text），新增 style（文风：文风/语言特色/叙事视角是否与前文统一）；user_directive_compliance 用户指令遵从性（严格给分：未满足 required_elements 任一项时 score ≤ 3）；custom_rules_compliance 自定义设定遵从性（一票否决：未满足任一 high 严重度自定义规则判 critical，score ≤ 2）；rigid_ai_text 刻板AI文本禁令（严格给分：3 处以上典型 AI 痕迹判 major，5 处以上或整段 AI 套路文本判 critical score≤3 passed=false）
-  - `ChapterArtifacts`/`VolumeArtifacts`：复用 `agent.py` 的 `Outline`/`CritiqueReport`，聚合卷级各阶段产物；`VolumeArtifacts` 新增 `audit_reports: list[OutlineAuditReport]`（多轮审计报告列表）与 `final_outline: VolumeOutline|None`（终稿大纲，审计+终稿生成后的最终版本）；`ChapterArtifacts` 新增 `stages: list[ChapterStageArtifact]` 字段（默认空列表，向后兼容旧 JSON）记录完整阶段产物序列；`ChapterStageArtifact` 模型（`stage_type`∈outline/draft/audit/revise + `round_index` + `content`/`critique`/`guidance`/`outline` 四个可选产物字段）按阶段次序单条记录每步产物，供 UI 按次序展示与完整内容查看
-  - `VolumeRunConfig`：`chapter_count` 校验范围 [2,20]，`analysis_depth` 枚举校验（light/standard/thorough/exhaustive），5 个暂停点（after_deep_analysis/after_volume_outline/before_audit/after_audit/after_chapter），其中 `before_audit` 默认开启（审计前用户输入协助审定窗口），`after_chapter` 默认关闭（每章验证通过后用户确认，不通过则按反馈重写+重新验证，循环直至通过），其余默认关闭；`analysis_chunk_tokens`（0=不切分全量发送，>0=按该 token 数切分前文章节）+ `analysis_chunk_strategy`（sequential=按章节顺序切分）两字段支持深度分析 token 切分；VolumePanel `_analysis_chunk_tokens_combo` 默认选项为"100k"（index 2，对应 100000 tokens/块），使深度分析默认启用切分与增量更新（前文超 100k 时自动切分逐块分析，不足 100k 时单次调用无副作用），用户可手动改为"不限制"或其他档位；新增 `audit_rounds: int=1`（大纲审计轮次，1-3 校验器）与 `pacing_speed: str="medium"`（推进速度 slow/medium/fast 校验器，slow=缓速同一场景1-2章/medium=中速一个场景半章/fast=快速按目前设定）两字段
-  - `Continuation.volume_artifacts` 字段默认 None，向后兼容旧 JSON（无该字段时反序列化为 None）
-  - 卷级产物持久化到 SQLite continuations 表的 `volume_artifacts TEXT` 列（紧跟 `agent_artifacts` 之后），随 swipe 保存；`save_continuation` INSERT 17 列，None 存 NULL，非 None 用 `json.dumps` 序列化；`_row_to_continuation` 从 row[16] 读取并容错 None（旧 NULL 行加载为 None 不报错）；幂等迁移：PRAGMA table_info 检测列存在性再 ALTER TABLE ADD COLUMN（continuations 表的 agent_artifacts / volume_artifacts 两列均走此模式，迁移函数 `_migrate_continuations_columns` 集中处理；agent_artifacts 列与 Continuation.agent_artifacts 字段保留向后兼容旧数据库，类型为 dict|None）
-  - 导入链无循环：volume.py → agent.py，chapter.py → volume.py，无反向依赖
-- 7 阶段独立提示词模板（resources/defaults/agent/phase_*.txt）：
-  - phase_deep_analysis.txt：前文深度分析（DeepAnalysis），强调**非模板化**、基于前文实际内容剖析剧情排布/张力/钩子/文风/对话/伏笔/常用梗/设定库/人物弧光/反复元素/故事状态/用户剧情输出需求解析；受 analysis_depth（light/standard/thorough/exhaustive）与 max_analysis_entries 共同约束条目上限；模板含单个 `{{chapters_text}}` 占位符（共 13 个占位符，含 `{{context_entries}}`/`{{user_input}}`），由编排器注入 lookback chapters 文本（插入点之前，不切分时）或切分块文本（切分时）；早期 Task 5 曾区分 `{{full_chapters_text}}`（全文）与 `{{lookback_chapters_text}}`（续写点前文）两个占位符，但因导致 token 重复注入超限且切分逻辑复杂，已合并为单个 `{{chapters_text}}`；"# 分析任务"段开头"重要：文本使用说明"改为说明所有维度分析均基于上述章节文本，切分模式下每块仅含部分章节通过增量合并产出完整报告；"# 章节文本"段说明补充"仅含插入点前 10 章正文，含当前章"；新增"# 上下文条目"段（`{{context_entries}}` 占位符，注入自动提取的人物/地点/事件/风格/伏笔等）与"# 用户剧情输出需求"段（`{{user_input}}` 占位符，注入用户剧情输出指令）；"# 分析任务"列表新增第 12 项"用户剧情输出需求解析"（提取 required_elements 必备要素/emphasized_elements 着重强调部分/interpretation 整体理解/conflicts 冲突）；"# 输出格式"新增 `user_directive_analysis` 字段（对象，含 required_elements/emphasized_elements/interpretation/conflicts 四子字段）；"# 分析原则"末尾新增"用户指令优先"原则（用户剧情输出需求视为后续续写硬约束，required_elements 与 emphasized_elements 作为大纲生成强制依据，冲突在 conflicts 中标注而非忽略）
-  - phase_deep_analysis_merge.txt：深度分析【信息汇总】环节提示词（切分模式下 LLM 语义整合润色），12 个占位符（6 个 profile 宏 + world_ontology + protagonist_profile + context_entries + user_input + `{{deep_analysis}}` 注入程序化合并后的 DeepAnalysis JSON + chapters_text 注入续写点前 10 章正文含当前章）；五大整合任务：消除跨块重复、冲突消解、补全与连贯、非模板化、用户指令解析整合（合并各块 user_directive_analysis，去重拼接 required_elements/emphasized_elements/conflicts，interpretation 取更详尽版本）；输出严格 DeepAnalysis JSON 对象（含 user_directive_analysis 字段：required_elements/emphasized_elements/interpretation/conflicts）；编排器 `_run_deep_analysis_merge` 加载此模板，2 次重试（温度 0.2/0.0），失败降级返回原 accumulated 不阻塞卷续写流程
-  - phase_volume_outline.txt：依据 DeepAnalysis 规划 N 章 VolumeOutline，按起承转合（约 25%/50%/25%）分配 plot_role，跨章张力曲线，伏笔回收/埋设；强调**严格依据 DeepAnalysis** 而非套通用模板；Task 5 起前文段落标签改为 "# 续写点前 10 章正文（含当前章）"（仍用 `{{chapters_text}}` 占位符，由编排器注入 lookback 文本而非全文）；新增 `{{pacing_speed}}` 占位符（卷参数段），推进速度说明：缓速=同一场景1-2章/中速=一个场景半章/快速=按目前设定；新增 `{{context_entries}}` 占位符（上下文条目段，由 `_build_context_entries_text` 注入自动提取的人物/地点/事件/风格/伏笔等）；新增 `{{user_directive_analysis}}` 占位符（用户剧情输出需求解析段，位于 deep_analysis 与 chapters_text 之间，含 required_elements/emphasized_elements/interpretation/conflicts 四子字段，空对象 {} 表示无指令可跳过）；规划任务段开头新增"首要约束：严格遵从用户剧情输出需求"段（required_elements 必备/emphasized_elements 着重/conflicts 权衡/优先级高于通用规划原则但低于 OOC 红线与世界观底层规则）；规划原则列表末尾新增"用户指令优先"项（共 10 个占位符，编排器 macros 注入 user_directive_analysis JSON）
-  - phase_outline_audit.txt：一轮调用同时完成多维度审计（13 维度：consistency/pacing/engagement/structure/coherence/foreshadowing/characters/style/protagonist_consistency/worldview_consistency/user_directive_compliance/custom_rules_compliance/rigid_ai_text）与修订，产出 OutlineAuditReport（含 revised_outline 完整 VolumeOutline）；注入 `{{previous_chapters_text}}`（最近 10 章正文，Task 9 起按 `_current_chapter_index` 回看：取 `[max(0, idx-9) .. idx]` 区间而非 `chapters[-10:]`，避免把卷续写新追加的章节算进审计前文）与 `{{deep_analysis}}`（DeepAnalysis JSON）两个占位符供一致性审计参考；新增 `{{round_idx}}`/`{{total_rounds}}` 占位符（审计任务段开头，标注当前轮次/总轮次，支持多轮审计循环）；新增 `{{audit_focus}}` 占位符（用户指定的审计重点段，由 `before_audit` 检查点收集用户输入的 `_audit_focus` 注入，空则注入"（用户未指定重点）"，审计任务段补充"用户特别关注"提示）；新增 `{{user_directive_analysis}}` 占位符（用户剧情输出需求解析段，位于 deep_analysis 与 protagonist_profile 之间，含 required_elements/emphasized_elements/interpretation/conflicts 四子字段，空对象 {} 表示无指令可跳过用户指令遵从性维度审计）；审计任务段新增"用户指令遵从性审计"项（检查 required_elements 必备要素满足情况与 emphasized_elements 着重体现，conflicts 冲突需明确处理）；维度定义列表新增 user_directive_compliance（严格给分：未满足 required_elements 任一项时 score ≤ 3，conflicts 未明确处理也应低分）；审计原则末尾新增"用户指令优先"项（硬约束，required_elements 未满足必须低分，不可因其他维度优秀而豁免）；输出格式 dimensions.dimension 枚举与"启用的审计维度"括号说明均追加 user_directive_compliance，共 10 个占位符（编排器 macros 注入 user_directive_analysis JSON）
-  - phase_outline_final.txt：**终稿大纲生成**（阶段③.5），将最后一轮审计结果+原大纲+前10章前文+深度分析+推进速度一起发送给 AI 生成终稿 VolumeOutline；6 个占位符：`{{original_outline}}`/`{{audit_report}}`/`{{previous_chapters_text}}`/`{{deep_analysis}}`/`{{user_directive_analysis}}`/`{{pacing_speed}}`（另含 `{{world_ontology}}`/`{{protagonist_profile}}`）；新增 `{{user_directive_analysis}}` 占位符（用户剧情输出需求解析段，位于 deep_analysis 与 world_ontology 之间，含 required_elements/emphasized_elements/interpretation/conflicts 四子字段，空对象 {} 表示无指令可跳过）；终稿生成任务段核心要求列表首位新增"首要约束：严格遵从用户剧情输出需求"项（required_elements 必备/emphasized_elements 着重/conflicts 权衡/优先级高于通用规划原则但低于主角 OOC 红线与世界观底层规则）；编排器 `_run_outline_final` 校验 chapters 长度 == chapter_count，失败降级保持审计后大纲
-  - phase_chapter_outline.txt：基于卷大纲+当前章 ChapterPlan 产出场景级 Outline（3-7 个 Scene），格式与 phase_outline.txt 完全一致以保证兼容；章末钩子需与下一章衔接；新增 `{{previous_chapter_text}}`（紧邻上一章完整正文）占位符用于紧密衔接；Task 9 起新增 `{{lookback_chapters_text}}`（续写点前文，由 `_build_lookback_10_chapters_text` 注入插入点前 10 章，不再注入全量 `_lookback_chapters_text`）占位符；新增 `{{pacing_speed}}` 占位符（推进速度段，slow=同一场景1-2章/medium=一个场景半章/fast=按目前设定）；新增 `{{context_entries}}` 占位符（上下文条目段，由 `_build_context_entries_text` 注入，共 8 个占位符）；任务描述区强调当前章 ChapterPlan 优先级高于用户总指令 `{{user_input}}`
-  - phase_chapter_rewrite.txt：审计后章节重写提示词（旧模板，保留向后兼容但不再使用；原 10 占位符含 `{{revision_guidance}}` 修订指导，已被 phase_audit_rewrite.txt 取代）
-  - phase_audit_rewrite.txt：**统一审计后修改流程模板**（单章+卷共用，取代 phase_chapter_rewrite.txt）；不复用 prompt_assembler 组装，由 `_run_chapter_rewrite`/`_on_audit_accepted` 直接加载模板 + str.replace 宏替换；9 占位符注入原章节正文/审计报告（整体即修改意见）/世界观底层/主角形象档案/自定义设定/前 10 章正文/卷大纲章节规划/续写细纲/推进速度/目标字数，**无 `{{revision_guidance}}`**（审计报告整体即修改意见，不再单独生成修订指导）；"# 修改任务"段强调"本次修改聚焦在修改意见部分，审计报告即修改意见，须逐条对照 issues 中的 suggestion 落实修订，不得跳过任何 critical 与 major 级别问题"；重写任务核心要求覆盖聚焦修改意见、针对问题修订、保留优质元素、世界观一致性、主角一致性、大纲对齐、前文一致性、章节衔接、推进速度、完整性；结尾"⚠️ 输出严格要求"段反复强调必须重写完整章节、严禁续写或追加、严禁输出元信息、第一句话必须是正文开头、最后一句话必须是正文结尾
-- 路径解析：`paths.get_volume_prompt_path(phase)` 镜像 `get_agent_prompt_path`，但限定 phase 取值（deep_analysis/deep_analysis_merge/volume_outline/outline_audit/outline_final/chapter_outline），非法值抛 ValueError；`paths.get_extract_merge_prompt_path()` 返回上下文提取【信息汇总】环节提示词路径（`defaults/extract_merge_prompt.txt`）
-- 阶段提示词仍走 str.replace 宏替换（不用 MacroEngine/Jinja2）
-- JSON 输出要求严格（只输出 JSON、不用 markdown 代码块、所有字段必须存在）
-- 编排器 `novelforge/services/volume_orchestrator.py` 的 `VolumeOrchestrator` 采用 QThread+asyncio 模式（独立类，不继承，通过组合持有 PromptAssembler，复用 post_process_content）：
-  - `__init__` 参数 config 类型为 `VolumeRunConfig`
-  - 信号：`phase_started(str)`/`phase_finished(str,object)`（卷级阶段 deep_analysis/volume_outline/outline_audit/outline_final）+ `chapter_started(int)`/`chapter_finished(int,object)`（章节级）+ `chunk_received`/`reasoning_received`/`checkpoint_reached`/`finished`/`error`/`auth_error`/`token_count` + `prompt_debug_requested(str,str)`（Task 9 调试模式：phase_name + messages JSON，UI 线程弹窗确认后调 `confirm_debug_prompt` 恢复）
-  - `_async_run` 流程：①deep_analysis（non-stream+JSON，失败重试温度归零，再失败返回 None 降级；**改为基于 lookback chapters（插入点之前 `chapters[0..current_chapter_index]`）切分判断，不切分时发送插入点前 10 章（`_build_lookback_10_chapters_text()`）而非全量 lookback，不再分析全文**；支持 token 切分：`analysis_chunk_tokens`>0 时按 lookback chapters 章节边界累积 token 切分，逐块调用 `_run_deep_analysis_single`，每块携带已有分析 JSON 增量补充，最终 `_merge_deep_analysis` 合并：字符串字段 base 空则取 new、列表字段拼接按 JSON 序列化去重、`user_directive_analysis` 字段合并 4 子字段（required_elements/emphasized_elements/conflicts 列表去重拼接 + interpretation 取较新块非空值）；**切分模式下程序化合并后追加 `_run_deep_analysis_merge`（加载 phase_deep_analysis_merge.txt 模板，注入 6 个 profile 宏 + `{{deep_analysis}}` 程序化合并 JSON + `{{context_entries}}`/`{{user_input}}`/`{{chapters_text}}`（插入点前 10 章），LLM 语义整合润色，2 次重试温度 0.2/0.0，失败降级返回原 accumulated 不阻塞流程）**）→ ②volume_outline（注入 DeepAnalysis JSON + user_directive_analysis JSON + 插入点前 10 章文本（`_build_lookback_10_chapters_text()`） + pacing_speed + context_entries，校验 chapters 长度==chapter_count，超长截断/不足返回 None emit error 终止）→ **before_audit 检查点（可选，默认开启，emit checkpoint_reached 让用户输入需着重审计的部分，resume payload 为字符串存入 `self._audit_focus`，多轮审计共享同一焦点；空字符串/None 视为无重点）**→ ③outline_audit（可选，**多轮循环** `for round_idx in range(audit_rounds)`，每轮审计上一轮修订版，注入最近 10 章前文正文 + DeepAnalysis JSON + user_directive_analysis JSON + round_idx/total_rounds + audit_focus 供一致性审计，Task 9 起最近 10 章按 `_current_chapter_index` 回看 `[max(0, idx-9) .. idx]` 而非 `chapters[-10:]`，失败降级用原大纲作为 final_outline；**暂停点 after_audit 移到审计循环后**，显示最后一轮修订大纲供用户编辑）→ **③.5 outline_final（终稿大纲生成，输入=最后一轮审计结果+原大纲+前10章前文+深度分析+user_directive_analysis+推进速度，`_run_outline_final` 产出终稿 VolumeOutline，失败降级保持审计后大纲）**→ ④逐章循环（每章：chapter_outline→writing→verify→rewrite；维护 `previous_chapters_text`（本卷已生成正文累积）与 `previous_chapter_text`（紧邻上一章正文，供下一章紧密衔接）两个变量；**新流程下修订循环重写时调 `_run_chapter_rewrite`（加载 phase_audit_rewrite.txt 模板，审计报告整体即修改意见，不再单独生成修订指导）**）；**强制修改流程**：`enable_chapter_revise=True` 时审计①即使通过也强制触发1轮修改（`rounds=0` 进入 while 循环条件 `rounds==0 or (critique not passed)`），**新流程跳过 `_run_chapter_revise` 直接调 `_run_chapter_rewrite`（审计报告作为修改意见）**，修改后重新验证为审计②；若审计②仍未通过则进入自动修订循环直至 `max_revise_rounds_per_chapter` 上限；`enable_chapter_revise=False` 时无强制修改与自动修订；每步产物以 `ChapterStageArtifact` 追加到 `stages` 列表（revise 阶段 `guidance=None`），最终 `ChapterArtifacts.stages` 含完整序列（细纲/初稿/审计①/修改正文①/审计②/...）；after_chapter 拒绝后用户反馈作为 `extra_feedback` 传入 `_run_chapter_rewrite`（拼入 critique 文本末尾作为 # 用户额外修改意见），`rounds` 计数继续递增（不重置），stages 继续追加
-  - 单章写作/验证/修订逻辑在本类内重新实现（接受少量代码重复换取隔离性）：写作用 `format_outline` 格式化大纲+ContextEntry(position=before)注入+worldInfoBefore marker fallback+`stream_chat_completion` 流式；`_run_chapter_writing` 不再接收 `previous_chapter_text` 参数（已删除独立的"# 上一章正文（用于衔接）"system 消息，前文参考统一由动态前文窗口末尾含前一章正文覆盖）；将 `prompt_assembler.assemble` 的 `user_input` 替换为本章 ChapterPlan 派生的生成要求（标题/摘要/剧情角色/关键事件/章节钩子，chapter_plan 为 None 时回退 `self.user_input`）；`_run_chapter_writing` 仍接收 `revision_guidance` + `original_content` 两参数（向后兼容，但修订循环已改用 `_run_chapter_rewrite` 不再走此路径）；**审计后重写流程分离**：新增 `_run_chapter_rewrite` 方法，不复用 prompt_assembler 组装，**新流程直接加载 `phase_audit_rewrite.txt` 模板** + str.replace 宏替换 9 占位符（original_content/critique/world_ontology/protagonist_profile/custom_audit_rules/previous_chapters_text/chapter_plan/outline/pacing_speed/target_words，**无 revision_guidance**，审计报告整体即修改意见）；新增 `extra_feedback: str = ""` 参数（after_chapter reject 场景，拼入 critique 文本末尾作为 # 用户额外修改意见）；user 消息改为"请基于审计结果与修改意见，重写完整正文。"；动态前文窗口注入到 `messages[len-2]`，流式调用 `stream_chat_completion` + `_post_process` 后处理；模板结尾"⚠️ 输出严格要求"段强调必须重写完整章节、严禁续写或追加，避免 LLM 在原章节后追加内容；`_run_chapter_outline` 同样接收 `previous_chapter_text` 注入到 `{{previous_chapter_text}}` 占位符，macros 新增 `{{lookback_chapters_text}}` 注入 `_build_lookback_10_chapters_text()`（插入点前 10 章，不再注入全量 `_lookback_chapters_text`）+ `{{pacing_speed}}` 注入推进速度 + `{{context_entries}}` 注入 `_build_context_entries_text()`（自动提取的人物/地点/事件/风格/伏笔等，供细纲场景设计参考）；`_run_chapter_verify` 的 macros Task 9 起新增 `{{previous_chapters_text}}` 注入 `_build_lookback_10_chapters_text()`（前 10 章，与细纲/审计一致，不再注入全量 `_lookback_chapters_text`）供验证阶段参考前文；新增 `{{previous_chapter_text}}` 占位符注入紧邻上一章完整正文（由 `_async_run` 维护 `previous_chapter_text` 变量逐章更新），供 chapter_transition 维度审计章节开头与前一章结尾的衔接（第一章为空串，chapter_transition 维度跳过审查）；`_run_chapter_verify` 签名新增 `previous_chapter_text: str = ""` 参数，主修订循环与 after_chapter reject 循环均传入该参数；`_run_chapter_revise` macros 新增 `{{previous_chapters_text}}`（前 10 章，供修订指导参考前文一致性）+ `{{pacing_speed}}`（推进速度，让修订指导与节奏匹配）；验证/修订复用 `phase_verify.txt`/`phase_revise.txt`（用 `get_agent_prompt_path`）
-  - 暂停点 after_deep_analysis/after_volume_outline/before_audit/after_audit/after_chapter：`_wait_for_resume` 采用 asyncio.wait_for 轮询 + call_soon_threadsafe 线程安全唤醒，恢复后从 `_checkpoint_payload` 取编辑后的产物；after_deep_analysis/after_volume_outline/after_audit 用 CheckpointDialog 简单模式（不显示产物）提供 接受/编辑/取消，"编辑"仅关闭对话框并显示 VolumePanel"继续"按钮（不解析产物），用户在面板编辑产物后点"继续"由 `_on_volume_continue` 读取编辑版产物并 resume；**before_audit 用 CheckpointDialog 审计前模式（QPlainTextEdit + 确认/取消，无 edit 路径），确认后 resume payload 为用户输入字符串（可能为空），由 `_on_volume_checkpoint` 捕获 `dialog.get_result()` 的 result_payload 传给 orchestrator.resume()**（其他检查点 resume 传原产物 payload）；**after_chapter 用 `ChapterConfirmDialog`（非 CheckpointDialog），显示章节正文 + 通过/不通过/取消三选项，不通过展开反馈输入框，`_wait_for_resume_with_chapter` emit `checkpoint_reached("after_chapter", {chapter_index, content})` 携带章节正文供 UI 弹窗**
-  - 停止机制：threading.Event + asyncio.Task.cancel 双重中断，逐章循环每轮检查 `_stop_event`
-  - 深度分析 max_tokens 按深度调整：light=8000 / standard=20000 / thorough=50000 / exhaustive=不设上限(200000 近似)；**前文章节文本基于 lookback chapters（插入点之前 `chapters[0..current_chapter_index]`）注入，不再分析全文**；`analysis_chunk_tokens`>0 时按 lookback chapters 章节边界切分（`_split_chapters_by_tokens` 用 `count_text_tokens` 累积 token，不跨章切分），逐块调用 LLM 并增量携带已有分析（`# 已有分析内容（增量补充参考）` 段落追加到 system_prompt），最终合并为完整 DeepAnalysis
-  - lookback 文本缓存（供卷大纲/章节细纲/验证/修订阶段使用）：`__init__` 中通过 `current_chapter.id` 在 `chapters` 列表中查找位置计算 `_current_chapter_index`（找不到为 -1，fallback 为全量）；`_build_lookback_chapters_text()` 返回 `chapters[0..current_chapter_index]` 拼接（找不到时 fallback 全量）；`_build_lookback_10_chapters_text()` 委托 `_build_dynamic_lookback_text(window=10)`，基于 `_get_effective_chapters()` 取末尾 10 章（含本卷已生成章节，动态滑动：新生成章节挤入窗口末尾，最老章节挤出），供深度分析/深度分析汇总/卷大纲/终稿大纲阶段前文参考注入；本卷未生成章节时（深度分析/卷大纲/终稿大纲阶段）动态窗口 = 插入点前 10 章结果相同；`_async_run` 预构建两份文本缓存 `_chapters_text`（全文）与 `_lookback_chapters_text`（续写点前文，注入卷大纲 `{{chapters_text}}` 与验证的 `{{previous_chapters_text}}`）；`_run_deep_analysis_single` 的 macros 含 `{{chapters_text}}`/`{{context_entries}}`/`{{user_input}}`（早期 Task 5 曾含 `{{full_chapters_text}}`/`{{lookback_chapters_text}}` 两占位符，已移除合并为单个）；`_run_deep_analysis` 切分判断基于 lookback chapters（用户要求只分析插入点之前），不切分时发送 `_build_lookback_10_chapters_text()`（动态滑动 10 章，本卷未生成章节时为插入点前 10 章含当前章）而非全量 `_lookback_chapters_text`；`_run_volume_outline` 的 `{{chapters_text}}` 注入 `_build_lookback_10_chapters_text()`（动态滑动 10 章）；`_build_context_entries_text()` 格式化 `self.context_entries` 为可读 Markdown（按 category 分组 characters/locations/events/style/plot_state/relationships/atmosphere/foreshadowing，order 升序，空列表或无 content 返回空字符串），注入卷大纲与章节细纲的 `{{context_entries}}` 占位符（审计与终稿阶段不注入）；**动态前文窗口 `_build_dynamic_lookback_text(window=10)`：基于 `_get_effective_chapters()` 构造有效章节序列（插入点前章节 + 本卷已生成章节，跳过插入点后原章节），取末尾 window 章拼接；`_get_effective_chapters()` 返回 `chapters[0:_current_chapter_index+1] + chapters[_original_chapter_count:]`，其中 `_original_chapter_count`（`__init__` 时记录 `len(self.chapters)`）用于跳过从中间续写时 chapters 列表中"插入点后原章节"段；`_run_chapter_writing` 的 `prompt_assembler.assemble` 也使用 `effective_chapters` 而非全量 `chapters`，且传 `skip_history=True` 跳过聊天历史构建（卷模式不注入章节正文到 chat history，前文仅由"最近 10 章正文参考（含本卷已生成）"系统消息提供，避免章节正文重复；单章模式继续用 `lookback_chapters` 截断聊天历史）；此修复确保从中间续写时动态前文窗口只含插入点前章节 + 本卷已生成章节，不会误把全文末尾章节当作前文（用户案例：生成第 11 章时前文只含刚生成的 10 章，不再混入插入点之后原章节）；4 个章节级方法（`_run_chapter_outline`/`_run_chapter_writing`/`_run_chapter_verify`/`_run_chapter_revise`）签名新增 `lookback_chapters_text` 参数，逐章循环传入 `dynamic_lookback`，细纲/验证/修订的 `{{lookback_chapters_text}}`/`{{previous_chapters_text}}` 占位符改为注入 `_build_dynamic_lookback_text()` 动态前文（与 `_build_lookback_10_chapters_text()` 共享同一动态滑动逻辑），写作阶段注入为 system 消息（标签 `# 最近 10 章正文参考（含本卷已生成）`）插入 messages[len-2]（最后一条消息之前，避免稀释 system 指令权重）；审计后重写阶段 `_run_chapter_rewrite` 同样注入到 messages[len-2]**
-  - Task 9 调试模式 + 审计章节范围修复 + 写作消息顺序优化：①`__init__` 新增 `debug_mode: bool=False`、`_debug_confirmed: asyncio.Event|None=None`、`_debug_confirmed_result: bool=False` 三字段（UI 线程设 `debug_mode=True` 启用）；`_async_run` 开头创建 `self._debug_confirmed = asyncio.Event()`；新增 `confirm_debug_prompt(confirmed)` 方法（UI 线程调，设结果并通过 `call_soon_threadsafe` 唤醒 Event）和 `_maybe_debug_prompt(messages, phase_name)` 协程（debug_mode=False 直接返回 True，否则 emit `prompt_debug_requested(phase_name, messages_json)` 并 `await _debug_confirmed.wait()` 返回用户确认结果）。②所有 7 个 LLM 调用方法（`_run_deep_analysis_single`/`_run_volume_outline`/`_run_outline_audit`/`_run_chapter_outline`/`_run_chapter_writing`/`_run_chapter_verify`/`_run_chapter_revise`）在 messages 组装完成、`for attempt in range(2)` 重试循环之前调 `_maybe_debug_prompt`，取消时返回方法签名对应的"空产物"（None / `("", "", [])` / `{}`）；`_run_chapter_writing` 的检查位于所有 messages 组装之后（previous_chapter_text 插入 + outline fallback + revision guidance 追加之后）、流式循环之前。③审计阶段 `_run_outline_audit` 的最近 10 章前文改用 `_current_chapter_index` 回看 `[max(0, idx-9) .. idx+1]` 区间，避免把卷续写过程中新追加的章节误算进审计前文。④`_run_chapter_writing` 的 `previous_chapter_text` 注入位置从 `messages.insert(0, ...)` 改为 `messages.insert(len(messages)-1, ...)`（插入到最后一条消息之前），避免上一章正文被塞到 system prompt 前面稀释 system 指令权重。⑤`_run_chapter_writing` 新增 `original_content: str=""` 参数，修订循环重写时由 `_async_run` 传入当前已生成的 `content`，让 LLM 基于现有内容重写而非从零续写。⑥`_run_chapter_outline` 的 macros 新增 `{{lookback_chapters_text}}`，`_run_chapter_verify` 的 macros 新增 `{{previous_chapters_text}}`，两者均注入 `_lookback_chapters_text` 供阶段参考前文。
-  - 逐章循环中每章正文作为新 `Chapter` 追加到 `chapters` 列表供下一章前文；`previous_chapters_text` 累积本卷已生成正文
-  - **after_chapter 暂停点**（可选，`checkpoints["after_chapter"]` 开启时）：verify/rewrite 循环结束后触发 `_wait_for_resume_with_chapter` emit `checkpoint_reached("after_chapter", {chapter_index, content})`，UI 弹 `ChapterConfirmDialog`。用户 approve → 继续下一章；reject → **用户反馈作为 `extra_feedback` 传入 `_run_chapter_rewrite`（拼入 critique 文本末尾作为 # 用户额外修改意见，不再构造 `user_guidance` 短路 `_run_chapter_revise`）**→ 重写 → `_run_chapter_verify` 重新验证 → 自动修订循环 → 再次触发 after_chapter；cancel → 抛 CancelledError 终止。无最大不通过次数限制；**critical 问题忽略 `max_revise_rounds_per_chapter` 上限**：主修订循环（强制修改+自动修订）与 after_chapter reject 循环均适用——当 `critique.issues` 中存在 `severity == "critical"` 的问题时，突破 `max_revise_rounds_per_chapter` 上限一直修正到审计通过为止；无 critical 问题时仍受上限约束达到上限退出；此逻辑确保严重问题（如主角 OOC、世界观违规、章节衔接断裂、大纲偏离）必修正到位
-  - 最终拼接所有 `chapter_artifacts.content` 为完整卷正文，构建 `Continuation`（`created_by="volume"`，含 `volume_artifacts`），emit finished
-  - `get_writing_messages()`/`get_writing_model()` 返回最后一章写作阶段的 messages 和 model（供历史日志）
-  - 测试 `tests/test_volume_orchestrator.py` 覆盖 48 用例（Task 9 新增 10 用例 + Task 10 新增 8 用例；Task 9 新增 10 用例：动态前文含本卷已生成章节 `test_dynamic_lookback_includes_generated_chapters`/动态前文窗口恰好 10 章 `test_dynamic_lookback_window_size`/after_chapter approve `test_after_chapter_checkpoint_approved`/after_chapter reject 后重写再 approve `test_after_chapter_checkpoint_rejected_then_approved`/after_chapter 未开启无触发 `test_after_chapter_disabled_no_checkpoint`/style 审计维度 `test_style_audit_dimension`/强制修改流程阶段产物捕获 `test_forced_revise_flow_stages_captured`（N=2 max=1 审计①通过仍强制修改，断言 stages=[outline,draft,audit,revise,audit] + revision_rounds==1）/强制修改 max=2 自动修订循环 `test_forced_revise_max_2_auto_loop`（审计①通过→强制修改→审计②失败→自动修改→审计③失败，断言 revision_rounds==2 + 7 stages + 3 audits round_index [1,2,3] + 2 revises round_index [1,2]）/动态前文排除插入点后原章节 `test_dynamic_lookback_excludes_post_insertion_chapters`（20 章从 ch10 续写，断言 ch2 verify prompt 含插入点前 9 章标记 + 卷章 0 标记，不含插入点后 ch10/19 标记）/after_chapter 拒绝后阶段计数 `test_stages_capture_after_chapter_reject`（N=2 after_chapter 开启，reject 后 approve，断言 7 stages + reject revise round_index==2 接续强制 round_index==1）/critical 问题忽略修订上限 `test_revise_loop_critical_ignores_max`（max_revise_rounds_per_chapter=1 + 审计返回 critical 问题，断言 revision_rounds==2 突破上限一直修正到通过；用 `CRITIQUE_CRITICAL_FAILED_JSON` 常量 severity=critical/category=protagonist_consistency）/章节衔接消息注入更新 `test_chapter_continuity_chapter2_injects_chapter1_and_plan`（断言"最近 10 章正文参考（含本卷已生成）"system 消息含第1章正文 + 卷模式写作跳过聊天历史 `test_volume_writing_skips_chat_history`（N=2 预置 1 章含唯一正文标记，断言写作 messages 含"最近 10 章正文参考"系统消息但无 user 消息含预置章节正文，验证 skip_history=True 消除 chat history 与系统消息的章节正文重复）/动态前文窗口含本卷已生成章节 `test_lookback_10_dynamic_with_generated_chapters`/动态前文窗口滑动挤出最老章节 `test_lookback_10_dynamic_window_sliding`）：深度分析成功/失败降级、卷大纲成功/失败/章节数不匹配、审计成功/失败降级、逐章循环 N=2、修订循环（单轮/上限）、暂停点触发/停止、停止机制、marker 存在/不存在、章节追加、get_writing_messages、审计阶段注入前文+深度分析（Task 7）、章节衔接（第 2 章注入第 1 章正文+第 2 章 ChapterPlan，Task 8）、深度分析 token 切分增量合并 + 【信息汇总】环节（Task 3：analysis_chunk_tokens=10 触发 2 块切分，验证多块调用+增量携带+合并字段；test_deep_analysis_chunked_incremental 验证三段式调用 chunk1→chunk2→merge，第 3 次 LLM 调用为 `_run_deep_analysis_merge` 汇总，注入程序化合并后的 DeepAnalysis JSON，断言整合结果含两块字段）、Task 5 全文 vs 续写点前文区分（`_current_chapter_index` 计算/`_build_lookback_chapters_text` 截断/深度分析宏含 full+lookback 双文本/卷大纲用 lookback 文本）；FakeLLMClient 增加 `chat_messages_history` 捕获每次 chat_completion 的 messages 供宏注入断言；Task 10 新增 8 用例：深度分析章节范围 `test_deep_analysis_lookback_10_chapters_range`（15 章场景断言深度分析 prompt 含第 6-15 章标记不含第 1-5 章）/深度分析占位符注入 `test_deep_analysis_context_entries_user_input_injection`（断言含 # 上下文条目 与 # 用户剧情输出需求 段无残留占位符）/深度分析合并占位符注入 `test_deep_analysis_merge_placeholders_injection`（切分模式触发合并断言含 3 段标题）/卷大纲章节范围 `test_volume_outline_lookback_10_chapters_range`（15 章场景断言卷大纲 prompt 含第 6-15 章）/卷大纲 user_directive_analysis 注入 `test_volume_outline_user_directive_analysis_injection`/审计 user_directive_analysis 注入 `test_outline_audit_user_directive_analysis_injection`/终稿大纲 user_directive_analysis 注入 `test_outline_final_user_directive_analysis_injection`/`_merge_deep_analysis` 合并 user_directive_analysis `test_merge_deep_analysis_user_directive_analysis`（两块各含不同 required_elements 合并后去重拼接 + interpretation 取较新块非空值）
-  - 测试 `tests/test_volume_prompts.py` 覆盖 5 模板存在性/占位符完整性（深度分析 11 占位符含 chapters_text/context_entries/user_input + user_directive_analysis 输出字段、深度分析汇总 10 占位符含 deep_analysis + 6 profile 宏 + context_entries/user_input/chapters_text + user_directive_analysis 输出字段、卷大纲 7 占位符含 user_directive_analysis 前文标签改为 # 续写点前 10 章正文（含当前章）+ 首要约束段、审计含 user_directive_analysis 占位符 + user_directive_compliance 维度定义 + 用户指令遵从性审计任务、终稿大纲含 user_directive_analysis 占位符 + 首要约束段）/深度参数注入/章节数约束/16 审计维度（含 style 文风 + user_directive_compliance 用户指令遵从性 + custom_rules_compliance 自定义设定遵从性 + outline_alignment 大纲一致性 + detail_outline_alignment 细纲一致性 + chapter_transition 章节衔接 + rigid_ai_text 刻板AI文本禁令）/get_volume_prompt_path 路径与非法抛错/get_agent_prompt_path 对 verify/revise/chapter_rewrite/audit_rewrite 四 phase 返回存在路径/str.replace 宏替换无残留；新增 `test_phase_deep_analysis_merge_template_exists` + `test_phase_deep_analysis_merge_placeholders` 验证汇总模板存在性与 10 占位符完整性；新增 `test_phase_outline_final_placeholders` 验证终稿大纲 6 占位符完整性；新增 `test_phase_chapter_rewrite_template_exists` + `test_phase_chapter_rewrite_placeholders` 验证重写模板存在性与 10 占位符完整性 + "重写完整章节" + "严禁续写或追加"严格要求；新增 `test_phase_audit_rewrite_template_exists` + `test_phase_audit_rewrite_placeholders` 验证统一审计后修改模板存在性与 9 占位符完整性（无 revision_guidance）+ "修改意见" + "重写完整正文" + "严禁续写或追加"严格要求；新增 `test_phase_verify_template_16_dimensions` 验证 16 维度定义 + 4 个一票否决新增维度（含 custom_rules_compliance）+ rigid_ai_text 严格给分；新增 `test_phase_verify_previous_chapter_text_placeholder` 验证 `{{previous_chapter_text}}` 占位符；新增 `test_phase_verify_eight_summary_markers` 验证 8 个 summary 固定标记段落（含【自定义设定审计】与【刻板AI文本审计】）
-  - 测试 `tests/test_volume_e2e.py` 用合成 preset + 合成章节 mock LLM 跑 N=3 全流程（DeepAnalysis/VolumeOutline/OutlineAuditReport/3 章 ChapterArtifacts/Continuation 产物/phase_logs），含深度分析降级场景与修订循环场景
-  - 测试 `tests/test_volume_ui.py` 覆盖卷续写及相关面板 UI 检查点（离屏 Qt 平台，模块级 QApplication fixture）：VolumePanel `set_presets`/`get_selected_preset_id` 预设选择与切换、`_analysis_chunk_tokens_combo` 联动 `get_config().analysis_chunk_tokens`（不限制=0/50k=50000/100k=100000）、VolumePanel `set_config` 回填 roundtrip、before_audit 审计重点内嵌输入区、ContinuationPanel `_user_input_edit` 高度约束（minHeight 36，无 maxHeight 上限）、VolumePanel `show_continue_button`/`hide_continue_button` 显隐（用 `isHidden()` 断言显式 show/hide 状态）与产物 tab 切换（after_deep_analysis→tab0/after_volume_outline→tab1/after_audit→tab2）、`switch_to_tab` 阶段名映射；新增 `TestAddChapterArtifactsStages` 类 2 用例：`test_add_chapter_artifacts_with_stages`（5 阶段 stages，断言 5 个"查看完整内容"按钮 + 阶段标签含"细纲/初稿/审计①/修改正文①/审计②"）、`test_add_chapter_artifacts_legacy_fallback`（空 stages 旧数据，断言三块摘要标签"细纲摘要/评审摘要/正文摘要"存在 + 无查看按钮）
-  - 测试 `tests/test_artifact_detail_dialog.py` 5 用例（新文件，覆盖 `ArtifactDetailDialog` 所有 stage_type 格式化）：`test_dialog_outline_stage`（outline 阶段显示 `format_outline` 输出）、`test_dialog_audit_stage`（audit 阶段显示 `format_critique` 输出）、`test_dialog_revise_stage`（revise 阶段文本含"【修订指导】"与"【修改后正文】"）、`test_dialog_draft_stage`（draft 阶段显示正文原文）、`test_dialog_close_button`（关闭按钮点击触发 accept 信号）
-  - 测试 `tests/test_volume_models.py` 新增 4 个 `ChapterStageArtifact` 模型用例：`test_chapter_stage_artifact_defaults`（验证所有字段默认值）、`test_chapter_stage_artifact_construction`（构造含 outline/critique/guidance 的完整对象）、`test_chapter_artifacts_stages_default_empty`（验证 `ChapterArtifacts.stages` 默认空列表）、`test_chapter_artifacts_stages_roundtrip`（model_dump → model_validate 往返 4 个 stages 不丢字段）；Task 10 更新 `DEFAULT_AUDIT_DIMENSIONS` 断言从 10 维度改为 11 维度（追加 user_directive_compliance），后续再改为 12 维度（追加 custom_rules_compliance 自定义设定遵从性一票否决），再改为 13 维度（追加 rigid_ai_text 刻板AI文本禁令严格给分），新增 2 个 `DeepAnalysis.user_directive_analysis` 字段用例：`test_deep_analysis_user_directive_analysis_defaults`（默认 `user_directive_analysis == {}`）、`test_deep_analysis_user_directive_analysis_roundtrip`（构造含 4 子字段的 DeepAnalysis，model_dump/model_validate/model_dump_json 往返不丢字段）
-  - 测试 `tests/test_checkpoint_dialog.py` 覆盖 CheckpointDialog 简单模式（after_deep_analysis/after_volume_outline/after_audit）四用例：默认动作=cancel、on_edit=("edit",None)、on_accept=("accept",payload)、on_cancel=("cancel",None)
-  - 测试 `tests/test_chapter_confirm_dialog.py` 覆盖 ChapterConfirmDialog 三用例：approve 返回 `("approve","")`、reject 输入反馈后返回 `("reject",反馈内容)`、cancel 返回 `("cancel","")`
-  - 测试 `tests/test_m2_prompt_assembly.py` 的 worldInfoBefore/After 断言更新为 Markdown 格式（`# 上下文条目（自动提取）` 标题 + `## 人物`/`## 地点`/`## 剧情状态`/`## 风格` 等 category 分组标题 + `- {content}（{keys}）` 条目格式），验证 `_build_world_info_message` 按 category 分组输出
-  - 测试 `tests/test_m4_context_extraction.py` 新增 4 个【信息汇总】环节测试：`test_multi_batch_triggers_merge`（3 章长内容 + token_limit=10 触发 3 批次，第 4 次 LLM 调用为汇总，断言 merged=True + batch_count=3 + 汇总 prompt 含 `## 批次 i/N` 标记）、`test_single_batch_no_merge`（单批次 token_limit=0 不触发汇总，merged=False + call_count=1）、`test_merge_failure_degrades_to_all_entries`（汇总 LLM 抛 LLMError 降级使用 best-effort uid 替换合并，merged=False + entries 来自 all_entries）、`test_extract_result_merged_field`（ExtractResult.merged/batch_count 字段默认值与赋值断言）
-  - 测试 `tests/test_protagonist_extraction.py` 覆盖 ProtagonistProfile 主角形象提取（16 用例 9 测试类）：`test_filter_protagonist_dimensions`（8 维度过滤/非 dict 值替换空 dict/额外字段丢弃/空输入）、`test_parse_protagonist_response`（JSON 对象 + ```json/``` markdown fence 去除 + 字段过滤 + 无效 JSON 抛 JSONDecodeError）、`test_merge_protagonist_fields_growth_arc_override`（growth_arc 新批次非空直接覆盖旧值不按长度启发式 + 新批次空保留旧值）、`test_merge_protagonist_fields_length_heuristic`（其他维度序列化长度启发式新值更长或相等覆盖/旧值更长保留/双侧空/单侧空取另侧）、`test_extract_result_protagonist_fields`（ExtractResult protagonist_profile/protagonist_batch_count/protagonist_merged 默认值与字段存在性）、`test_extract_result_protagonist_construction`（ExtractResult 携带 ProtagonistProfile 构造 roundtrip）、`test_protagonist_dimensions_constant`（PROTAGONIST_DIMENSIONS tuple 含 8 维度顺序一致）、`test_protect_protagonist_model_validation`（ProtagonistProfile 8 维度默认空 dict + 全字段构造 + 序列化/反序列化往返不丢字段）、`test_safe_serialize_dim`（dict→JSON 字符串 ensure_ascii=False/str 直接返回/set 与自定义对象回退 str(value)/int/list/None 可序列化）
-- UI 面板 `novelforge/ui/volume_panel.py` 的 `VolumePanel`（QWidget/信号/配置读写/QGroupBox 分组/`set_label_state`+`_OBJ_PHASE_*` 进度样式/`from __future__ import annotations`+logging+中文文档字符串）：
-  - 整体用 QScrollArea 包裹（窄高面板可滚动，避免内容挤压）；**顶部固定整卷进度条** `QProgressBar#volumeProgressBar`（高 24px，不随滚动，始终可见，初始文本"准备中..."）；配置区用 QGridLayout 横排五行（预设选择 `_preset_combo` QComboBox(AdjustToContents+Expanding，默认"default") / 章节数+分析深度 / 条目上限+每章字数 `_target_words_spin` QSpinBox(500-20000,步进500,默认2000) / 切分 tokens `_analysis_chunk_tokens_combo` QComboBox(不限制/50k/100k/250k/500k，默认不限制=0，`parse_token_limit` 解析文本为数值) / 推进速度 `_pacing_speed_combo` QComboBox(缓速slow/中速medium/快速fast，默认中速)+审计轮次 `_audit_rounds_spin` QSpinBox(1-3,默认1)），暂停点 5 复选框横排并入配置组底部（分析后/大纲后/审计前[默认开启]/审计后/每章后，不再单独成组）；审计与逐章设置组：审计/逐章验证/逐章修订 3 开关横排 + 8 维度勾选组（含 style 文风） + 每章最大修订轮次 SpinBox(1-3,默认1) 单独一行
-  - 两层进度 + 顶部进度条：卷阶段 4 标签(深度分析/卷大纲/审计/逐章)+当前章节"第 i/N 章"+4 步标签(细纲/写作/验证/修订)；`update_volume_phase_progress`/`update_chapter_progress` 镜像 `update_phase_progress`，**两者内部均调用 `update_volume_progress(percent, text)` 同步顶部整卷进度条**；权重：deep_analysis 10% / volume_outline 20% / audit 30% / chapter 30-100%（章节加权：进行中 `30+int((n-1)/total*70)`、完成 `30+int(n/total*70)`）；文本格式如"深度分析中... 10%"/"第 3/5 章 写作 44%"
-  - 产物查看：QTabWidget **五标签页**切换（深度分析预览可编辑 / 卷大纲预览可编辑,终稿生成后 `update_final_outline` 更新为终稿 / **审计报告**上半 `_audit_report_edit` readonly 显示审计维度/分数/问题/建议/总体评估（多轮支持，`_format_audit_report(report,round_idx)` 格式化）+下半 `_revised_outline_edit` readonly 显示修订版大纲预览，审计阶段 `update_audit_report(report,round_idx)` 更新 / 各章产物折叠列表 QScrollArea 内动态 `add_chapter_artifacts` 添加可折叠 QGroupBox / **当前章节正文流式区** `QPlainTextEdit#volumeChapterStream` readonly min-height 200，承接卷续写写作流式增量，避免路由到右侧输出面板）；Tab 索引：0=深度分析/1=卷大纲/2=审计报告/3=各章产物/4=当前章节正文；流式方法：`append_chapter_chunk`(moveCursor End + insertPlainText 真流式无额外换行)/`start_chapter_streaming`(清空+切 tab via `indexOf(_chapter_stream_tab)`+placeholder)/`reset_streaming`/`set_full_volume_content`(完成后显示完整卷正文)
-  - **`add_chapter_artifacts` 阶段产物展示重构**：当 `artifacts.stages` 非空时按阶段次序每阶段一行（`QLabel` "阶段 N：{阶段名}" + "查看完整内容" `QPushButton`），点击按钮调 `_show_stage_detail` 弹 `ArtifactDetailDialog`（只读 `QPlainTextEdit` 按 `stage_type` 格式化：outline→`format_outline` / audit→`format_critique` / revise→"【修订指导】"+"【修改后正文】" / draft→原文 + 关闭按钮）；`_format_stage_label` 映射 stage_type+round_index 为中文标签（细纲/初稿/审计①②③/修改正文①②③，`_round_suffix` 数字转圈号 1→①/2→②/...）；`stages` 为空（旧数据兼容）时回退 `_build_legacy_summary` 三块摘要布局（细纲/评审/正文截断 1000 字）；同一 `chapter_index` 重复添加时先 `deleteLater` 旧 QGroupBox 再插入新的
-  - 信号 `config_changed(object)`/`resume(object)`/`cancel_checkpoint()`/`continue_requested(str)`（检查点选择编辑后点击"继续"恢复）；`get_config()` 返回 `VolumeRunConfig`；`set_presets(list[dict], default_id)`/`get_selected_preset_id()` 管理卷模式独立预设（`_preset_combo`，clear+addItem+`select_combo_by_id` 选中 default_id，空时返回"default"）；`get_edited_deep_analysis`/`get_edited_volume_outline` 宽松解析回对象(失败返回 None)；`show_continue_button(checkpoint_name)`/`hide_continue_button()` 显隐顶部"继续"按钮并切换到对应产物 tab（深度分析→tab0/卷大纲→tab1/审计报告→tab2）；`switch_to_tab(phase)` 按阶段名切换产物 Tab（deep_analysis→tab0/volume_outline+outline_final→tab1/outline_audit→tab2，供 `_on_volume_phase_finished` 自动切 Tab 复用）；`reset()` 清空产物+流式区+审计报告区+重置进度（含进度条）并 `hide_continue_button()`；`_on_config_changed` 更新联动(审计关闭禁用维度组、逐章验证关闭禁用修订相关)并 emit；`_preset_combo`/`_analysis_chunk_tokens_combo` 的 currentIndexChanged 均接入 `_on_config_changed`；继续按钮 `_continue_btn`（`#primaryBtn`）置于顶部进度条与滚动区之间
-  - 不用 `setStyleSheet`，样式由 `setObjectName`+全局 QSS 接管；DeepAnalysis/VolumeOutline 的格式化与宽松解析内置于本模块（outline_serializer 未覆盖此类模型）；`QProgressBar#volumeProgressBar` 样式定义于 `light.qss`/`dark.qss`（亮色 chunk `#007aff`、暗色 chunk `#0a84ff`，圆角 5-6px，文本居中白色加粗）
-- MainWindow 二模式接线（`novelforge/ui/main_window.py` + `continuation_panel.py`）：
-  - `ContinuationPanel._mode_combo` 二项：单次续写(single)/卷续写(volume)；`_volume_panel = VolumePanel()` 实例由 `show_volume_panel` 控制显隐；`volume_panel` 属性 + `get_volume_panel()`/`get_volume_config()` 方法；`ContinuationPanel.set_presets` 末尾同步调用 `_volume_panel.set_presets(presets, default_id)`（卷模式独立预设，单次模式 combo 仍保留原 current_id/default_id 逻辑）；用户输入框 `_user_input_edit` minHeight 36（紧凑化，QGroupBox 内边距 2px/spacing 2px）
-  - **卷模式显隐右侧输出面板**：`ContinuationPanel` 新增 `output_panel_visibility_requested(bool)` 信号，`show_volume_panel(visible)` 末尾 `emit(not visible)`（卷模式开启→emit False 隐藏输出面板，卷模式关闭→emit True 恢复）；MainWindow `_on_output_panel_visibility_requested(visible)` 调 `_splitter.widget(4).setVisible(visible)`，visible 时 `setSizes(DEFAULT_PANEL_SIZES)` 恢复默认，非 visible 时把第 4 栏尺寸并入第 3 栏（卷控制面板）让 VolumePanel 产物查看器获得更大空间；二模式切换均经 `show_volume_panel` 触发该信号，保证 single↔volume 互切时输出面板正确显隐
-  - `_on_start_continuation_routed` 按 `get_mode()` 分发到单次/卷续写流程；Ctrl+Enter 与重写按钮均经此路由
-  - `_on_start_volume_continuation`：验证 API 配置→获取 VolumeRunConfig→检查上下文条目(无则提示先提取)→创建 `VolumeOrchestrator`→连接信号→start()；预设 ID 从 `continuation_panel.volume_panel.get_selected_preset_id()` 读取（卷模式独立预设，不再从 params 取 preset_id）；**卷模式不调用 `continuation_panel.start_streaming()`**（卷模式不用右侧输出面板的流式状态，流式由 VolumePanel 自身流式区承接），仅 `chapter_editor.set_streaming_locked(True)` + `volume_panel.reset()`
-  - 信号接线：`phase_started`→`_on_volume_phase_started`(仅更新卷阶段进度，不写输出面板)；`phase_finished`→`_on_volume_phase_finished`(更新深度分析/卷大纲/审计产物预览+进度，不写输出面板，避免 deep_analysis 阶段输出面板跳动；**outline_audit 阶段调 `update_audit_report(artifact, round_idx)` 显示审计报告+修订版大纲到审计报告 Tab（不再覆盖卷大纲 Tab）**，多轮审计 round_idx 取 `len(panel._audit_reports)` 并 append；**outline_final 阶段调 `update_final_outline(artifact)` 更新卷大纲 Tab 为终稿**)；`chapter_started`→`_on_volume_chapter_started`(调 `volume_panel.start_chapter_streaming` 清空流式区+切 tab，再更新章节进度)；`chapter_finished`→`_on_volume_chapter_finished`(添加章节产物+标记完成)；**`chunk_received`→`volume_panel.append_chapter_chunk`**（路由到 VolumePanel 流式区，不再走 `continuation_panel.append_chunk`）；`token_count` 复用现有 label 方法；`reasoning_received` 信号在 service 层保留但 UI 端不再连接（推理内容框已移除，推理内容仍通过 finished 回调落库）；`checkpoint_reached`→`_on_volume_checkpoint`(CheckpointDialog 简单模式三选一：接受/编辑/取消；接受=resume(payload)，编辑=关闭对话框并调 `volume_panel.show_continue_button` 显隐"继续"按钮不 resume，取消=stop()；`volume_panel.continue_requested`→`_on_volume_continue` 一次性连接在 `_connect_signals`，点击继续时读 `_get_edited_volume_checkpoint_payload` 后 `resume(edited)`，resume 设置 `_checkpoint_payload` 并 `_resume_event.set` 唤醒 `_wait_for_resume`)；`finished`→`_on_volume_continuation_finished`(**每章作为新章节插入当前章节之后**：从 `continuation.volume_artifacts.chapter_artifacts` 拆分每章正文，先 将当前章节之后的所有章节 index 后移 N 位（N=新章节数），再为每章创建新 `Chapter` 插入到 `current_index+1..current_index+N` 位置，标题从 `final_outline.chapters` 按 `chapter_index` 匹配获取，无则用 `第{index}章`；不再创建 swipe 保存到当前章节；调 `_refresh_chapter_list()` 刷新列表；容器 Continuation 仍携带完整卷正文与 volume_artifacts 用于历史日志；仍调 `volume_panel.set_full_volume_content(continuation.content)` 显示完整卷正文 + `stop_streaming()`/`set_streaming_locked(False)`/记录历史日志)；`error`/`auth_error` 复用现有方法
-  - `_map_volume_phase` 将 orchestrator 阶段名(outline_audit)映射到面板阶段名(audit)
-  - 历史日志兼容：启动时设 `_continuation_model=model`/`_continuation_prompt_messages=[]`；完成时用 `get_writing_messages()` 填充后再 `_record_history`
-  - `_on_stop_continuation` 二模式统一处理：worker/volume_orchestrator 任一运行中均调 stop()
-  - 暂停点统一使用 CheckpointDialog 简单模式（卷续写 after_deep_analysis/after_volume_outline/after_audit）仅提示信息无编辑区（产物已在 VolumePanel 内置可编辑预览区展示）；actions 为 接受/编辑/取消，"编辑"只关闭对话框并显示面板"继续"按钮（`_continue_btn#primaryBtn`），不解析产物也不立即 resume，用户在面板编辑后点"继续"由 `_on_volume_continue` 读取编辑版产物再 resume
-  - **暂停点暂停修复**：`VolumeOrchestrator._wait_for_resume` 移除"检查 `_checkpoint_payload is not None` 提前返回"路径（该路径会因上次运行残留 stale payload 触发立即返回，导致用户编辑内容被忽略、直接用原产物继续）；改为仅在 `resume()` 设置 `_resume_event` 后才读取 payload；`_async_run` 开头额外 `self._checkpoint_payload = None` + `self._resume_event.clear()` 清理可能残留状态
-  - **阶段完成自动切 Tab**：`_on_volume_phase_finished` 在更新产物预览后调 `volume_panel.switch_to_tab(phase)` 自动切换产物查看 Tab（deep_analysis→tab0/volume_outline+outline_final→tab1/outline_audit→tab2），便于用户即时看到刚生成的产物；`VolumePanel.switch_to_tab(phase)` 镜像 `show_continue_button` 的 Tab 切换逻辑但独立成方法以便 phase_finished 复用
-  - **调试模式 UI**：MainWindow 菜单栏新增"调试(&D)"菜单，含可勾选 `调试模式` QAction（`_debug_mode_action`），状态存于 `self._debug_mode`（默认 False）；`_on_debug_mode_toggled(checked)` 实时同步 `_debug_mode` 并更新运行中的 `_volume_orchestrator` 的 `debug_mode` 属性；创建 orchestrator 后立即 `orchestrator.debug_mode = self._debug_mode` 同步初始状态，并连接 `prompt_debug_requested(str,str)` 信号到 `_on_prompt_debug_requested`；该槽解析 messages JSON 后弹出 `DebugPromptDialog`（显示阶段名+完整 messages JSON 只读文本+"发送"/"取消"按钮），用户确认后调运行中 orchestrator 的 `confirm_debug_prompt(bool)` 回传结果（取消则跳过本次 LLM 调用）
-  - **滚轮事件过滤器**：新增 `novelforge/ui/wheel_filter.py` 的 `WheelEventFilter(QObject)`，安装到 QComboBox/QSpinBox/QDoubleSpinBox 后，未聚焦时拦截 QWheelEvent 并转发给父级 `QAbstractScrollArea.viewport()` 滚动页面（避免误滚动改值），聚焦时放行正常响应；ContinuationPanel 安装到 `_mode_combo`/`_preset_combo`/`_endpoint_combo`/`_model_combo`/`_temp_spin`/`_lookback_spin`，VolumePanel 安装到 `_preset_combo`/`_analysis_depth_combo`/`_analysis_chunk_tokens_combo`/`_chapter_count_spin`/`_max_entries_spin`/`_max_revise_spin`；过滤器实例存为面板 `_wheel_filter` 属性（parent=面板自身，生命周期随面板）
-  - **用户输入框紧凑化**：`ContinuationPanel._user_input_edit` 的 `user_input_group` QVBoxLayout 设置 `setContentsMargins(2,2,2,2)` + `setSpacing(2)` 压缩内边距；后续改造移除 maxHeight 固定约束（见"续写控制面板布局重排"），保留 minHeight=36 作为拖动底线
-  - **续写控制面板布局重排**：`ContinuationPanel._setup_ui` 引入垂直 `QSplitter`（`_content_splitter`）重构布局——顶部 `mode_group`（续写模式下拉框，固定）+ 中部 QSplitter（伸缩因子 1）+ 底部 `btn_layout`（按钮区，固定）；QSplitter 上半 `_mode_content_widget` 容纳 `_config_group`/`_volume_panel`（二者 `addWidget` 均传伸缩因子 1，确保可见面板撑满中间空间），下半 `_user_input_group`（用户输入框，伸缩因子 0 默认小、可拖动把手调整高度）；`setChildrenCollapsible(False)` 防止拖到消失，`setHandleWidth(6)` 加宽把手，初始 sizes `[400, 60]`；移除 `_user_input_edit.setMaximumHeight(50)`，保留 `setMinimumHeight(36)`；`user_input_group` 改存为 `self._user_input_group` 实例属性；测试 `tests/test_volume_ui.py::TestContinuationPanelInputHeight` 更新——删除 `maxHeight==50` 断言，新增 `maxHeight==16777215`（QWIDGETSIZE_MAX）断言（验证无固定上限），保留 `minHeight==36` 断言
-  - **续写控制面板显示框撑满修复**：上一轮 `mode_content_layout` 末尾的 `addStretch(0)` 会吸收剩余空间导致模式面板按 sizeHint 显示、下方留白（"显示框被截取到中间"）；修复改为两个模式面板 `addWidget` 均传伸缩因子 1 + 移除末尾 `addStretch(0)`，使当前可见面板（卷模式→VolumePanel / 单次→配置区）撑满从【续写模式】下拉框下方到【用户输入】框上方的整个空间；两种模式互斥（`hide()` 不参与布局），故两个面板都传伸缩因子 1 即可保证任意模式切换后可见面板撑满，无需动态调整
-  - **产物编辑区高度增大**：`VolumePanel._deep_analysis_edit`/`_volume_outline_edit` 的 `setMinimumHeight` 从 100 增至 200，给可编辑产物预览区更多展示空间
-  - **删除 swipe 信息标签与推理内容框**：`ContinuationPanel` 移除 `_swipe_info_label`（QLabel "无续写版本"）、`_reasoning_group`/`_reasoning_edit`（可折叠推理内容框）、`_reasoning_buffer`（半废弃缓冲）；新增两信号 `swipe_info_requested(str)`/`toast_requested(str)` 解耦——swipe 元信息（模型/状态/字数/创建时间/已接受）与限速提示（原 `show_toast`，被 `rate_limit_warning` 复用）改路由到 MainWindow 状态栏 `_save_status_label`；`_set_swipe_info` 改为 emit `swipe_info_requested`，`show_toast` 改为 emit `toast_requested`；MainWindow 新增 `_on_toast_requested`（写状态栏 + `QTimer.singleShot(3000, _restore_status_after_toast)`，还原为简化 swipe 元信息或"就绪"）、`_restore_status_after_toast`；`append_reasoning` 改为 no-op（保留签名兼容）；service 层 3 个 `reasoning_received` 信号定义+emit 保留（持久化不依赖此信号，仍通过 finished 回调落库），但 main_window.py 三处 `reasoning_received.connect(append_reasoning)` 删除（disconnect 调用保留在 try/except 中无副作用）；清理 `continuation_panel.py` 未使用 import（`datetime`/`QLabel`/`QSplitter`/`QTextEdit`/`set_label_state`）；`_reasoning_group` 的 `addWidget(..., 1)` 伸缩因子删除后续写控制面板高度自然缩短
-  - **卷深度分析默认启用 token 切分**：`VolumePanel._analysis_chunk_tokens_combo` 默认选项从"不限制"（index 0，`analysis_chunk_tokens=0` 不切分）改为"100k"（index 2，100000 tokens/块）；切分逻辑早已实现（`_split_chapters_by_tokens` 按 lookback 章节边界累积 token 切分不跨章 + `_run_deep_analysis_single` 逐块调用携带 `existing_analysis` 增量 + `_merge_deep_analysis` 合并：字符串字段 base 空取 new、列表字段拼接去重），但原默认"不限制"导致用户不主动切换时全量发送未触发切分；改默认后前文超 100k 自动切分逐块分析，不足 100k 时 `chapter_chunks` 长度为 1 走单次调用无副作用；Tooltip 同步更新说明"默认 100k"
-  - **删除章节 reindex 内容丢失修复**：`ChapterService._reindex_after` 原用 `list_chapters`（只返回元数据，`content=""` 默认值）获取章节，再对 index 变化的章节调 `save_chapter`，而 `save_chapter` 会用空 content 原子覆盖正文文件（`atomic_write_file`），导致删除非末尾章节时其后所有章节正文被清空；同样 bug 影响 `split_chapter`/`merge_chapter_with_next`/`undo_operation`（均调用 `_reindex_after`/`_reindex_all`）；修复：新增 `Storage.update_chapter_index(chapter_id, new_index)` + `StorageService.update_chapter_index` 只执行 `UPDATE chapters SET "index"=? WHERE id=?` 不写文件，`_reindex_after` 改用此方法替代 `save_chapter`；新增测试 `test_delete_chapter_preserves_remaining_content` 验证删除后剩余章节正文完整保留
-  - **深度分析切分模式全文注入修复**：`_run_deep_analysis_single` 的 macros 原将 `{{full_chapters_text}}` 设为 `self._chapters_text`（完整全文）、`{{lookback_chapters_text}}` 设为 `self._lookback_chapters_text`（完整前文），即使切分模式下 `{{chapters_text}}` 被切分为块文本，模板中使用的全文占位符仍注入完整全文，导致每块提示词都包含全文（用户案例：选 250k 切分但发送 1169743 tokens 超过 1048565 限制）；修复：三个占位符 `{{chapters_text}}`/`{{full_chapters_text}}`/`{{lookback_chapters_text}}` 统一使用传入的 `chapters_text` 参数（不切分时为全文，切分时为块文本），确保切分模式下每块只含块文本不超长；测试 `test_deep_analysis_macros_include_full_and_lookback` 断言更新为每章内容出现 2 次（两个占位符都注入相同全文）
+- 一次产出 N 章正文，数据模型定义于 `models/volume.py`
+- **7 阶段流程**（VolumeOrchestrator）：deep_analysis → volume_outline → outline_audit（多轮）→ outline_final → 逐章循环（chapter_outline → writing → verify → rewrite）
+- **5 个暂停点**：after_deep_analysis/after_volume_outline/before_audit（默认开）/after_audit/after_chapter（默认关）
+- **深度分析 token 切分**：analysis_chunk_tokens>0 时按章节边界累积 token 切分，逐块增量合并；切分后追加 LLM 语义整合润色，失败降级
+- **动态前文窗口**：`_build_dynamic_lookback_text(window=10)` 基于 `_get_effective_chapters()`（插入点前章节 + 本卷已生成章节），取末尾 window 章拼接；从中间续写时不会误把插入点后原章节当前文
+- **强制修改流程**：enable_chapter_revise=True 时审计①即使通过也强制 1 轮修改；critical 问题忽略 max_revise_rounds_per_chapter 上限一直修正到通过
+- **审计后重写**：`_run_chapter_rewrite` 加载 phase_audit_rewrite.txt 模板，审计报告整体即修改意见（无 revision_guidance），强调重写完整正文严禁续写追加
+- **终稿大纲**：outline_final 阶段基于最后一轮审计+原大纲+前 10 章+深度分析+推进速度生成终稿 VolumeOutline
+- 卷模式默认启用 100k token 切分（_analysis_chunk_tokens_combo 默认选项）
+- 阶段提示词走 str.replace 宏替换（不用 MacroEngine/Jinja2）
+- 测试覆盖：`tests/test_volume_*.py`（orchestrator/prompts/e2e/ui/models/checkpoint_dialog/chapter_confirm_dialog/artifact_detail_dialog）
 
-### 10. 提示词变量与宏体系（自定义预设可调用）
+### 10. 提示词变量与宏体系
 
-自定义预设的任何 prompt 条目 `content` 中可使用三类变量，发送前由 `MacroEngine` + `TemplateEngine` 依次替换（顺序：注释 → setvar/getvar → `{{name}}` 简单宏 → Jinja2 `{{}}`/`{% %}`）。完整调用教程见 `README.md`「变量与宏调用教程」章节。**下列任一来源变化时必须同步更新本条目与 README 教程。**
+自定义预设 prompt 条目 `content` 中可使用三类变量，发送前由 MacroEngine + TemplateEngine 依次替换（注释 → setvar/getvar → `{{name}}` 简单宏 → Jinja2 `{{}}`/`{% %}`）。完整教程见 `README.md`「变量与宏调用教程」。
 
-- **内置宏 `{{name}}`**（`core/macros.py` `MacroContext` 字段 + BUILTIN_MACROS 集合，11 个）：`{{book}}`/`{{author}}`/`{{protagonist}}`/`{{synopsis}}`/`{{world_setting}}`/`{{writing_style}}`/`{{chapter_title}}`/`{{chapter_index}}`/`{{target_words}}`/`{{user}}`/`{{char}}`；未知宏保留原样不替换；`MacroContext.from_novel_profile` 从项目档案填充，`chapter_index` 从 1 开始（0=未设置返回空串），`target_words` 为 0 返回空串
-- **额外注入宏**（非 MacroContext 字段，由 `PromptAssembler._build_macro_context` 写入 `ctx.extra` dict）：`{{world_ontology}}`（WorldOntology 7 维度 JSON，来源 `OntologyExtractor` 提取固化到 `Project.world_ontology`）、`{{protagonist_profile}}`（ProtagonistProfile 8 维度心理学档案 JSON，来源 `ContextExtractor._extract_protagonist` 按章节缓存 `_protagonist_profile_by_chapter`）、`{{custom_audit_rules}}`（用户自定义设定/审计必查项文本，来源 `Project.custom_audit_rules` 列表经 `_format_custom_audit_rules` 格式化为 `[SEVERITY] title\n要求：...\n审计向：...` 多段文本，空列表注入"（无自定义设定）"）；world_ontology/protagonist_profile 序列化为 `json.dumps(..., ensure_ascii=False, indent=2)`，dict/pydantic 对象均兼容，失败记 DEBUG 跳过；卷续写各阶段模板（phase_*.txt）同样注入这三个宏，单章续写 main 提示词也注入
-- **ST 风格变量**（`core/macros.py` 正则 + `core/variable_store.py` `VariableStore`）：`{{setvar::name::value}}`（写，返回空串）、`{{getvar::name}}`（读，不存在返回空串）、`{{// comment}}`（注释）；setvar/getvar 经 `MacroContext.variable_funcs` 绑定到 VariableStore，默认 chapter 作用域；四作用域 global/project/chapter/cache（global/project 持久化 JSON，chapter 存 `chapter.metadata['variables']`，cache 内存）；含副作用宏不参与 LRU 缓存
-- **Jinja2 沙箱**（`core/template_engine.py` `TemplateEngine`）：`ImmutableSandboxedEnvironment` + 自定义 `is_safe_attribute`（拒绝 `_` 开头属性）+ 禁用 `attr` 过滤器 + `recursion_limit=50` + 5 秒超时；**双白名单函数**（防 SSTI 数据外泄，详见 §13）：
-  - `WHITELIST_FUNCTION_NAMES`（16 个，`render_pre_send` 用，用户预设受信任场景）：getvar/setvar/hasvar/delvar（支持 `scope=` 参数跨作用域）、get_chapter/get_chapters/get_current_chapter/get_chapter_count、get_book/get_protagonist/get_novel_profile/get_writing_style/get_context_entries、regex_apply/substitute_macros、now/word_count/truncate
-  - `POST_RECEIVE_WHITELIST`（9 个，`render_post_receive` 用，AI 输出不可信场景）：getvar/setvar/hasvar/delvar、regex_apply/substitute_macros、now/word_count/truncate（移除所有数据读取函数，防 AI 输出经模板渲染外泄其他章节/档案数据）
-  - 双阶段执行（`render_pre_send` 发送前用完整白名单 / `render_post_receive` 接收后用精简白名单，可 setvar 回写）；`_render` 方法 `post_receive: bool=False` 参数按 flag 分流上下文构建（`_build_default_context` vs `_build_post_receive_context`）；超时/语法错误/递归超限跳过渲染用原始文本记 ERROR；执行顺序：宏替换 → Jinja2 渲染 → 正则应用（不递归）
-- **调试**：MainWindow「调试」菜单「调试模式」勾选后，各 LLM 调用前 emit `prompt_debug_requested` 弹 `DebugPromptDialog` 预览组装后 messages（含宏替换+模板渲染最终文本）
+- **11 个内置宏**（`core/macros.py` MacroContext 字段）：`{{book}}`/`{{author}}`/`{{protagonist}}`/`{{synopsis}}`/`{{world_setting}}`/`{{writing_style}}`/`{{chapter_title}}`/`{{chapter_index}}`/`{{target_words}}`/`{{user}}`/`{{char}}`；未知宏保留原样
+- **额外注入宏**（PromptAssembler._build_macro_context 写入 ctx.extra）：`{{world_ontology}}`（WorldOntology 7 维度 JSON）、`{{protagonist_profile}}`（ProtagonistProfile 8 维度 JSON）、`{{custom_audit_rules}}`（自定义设定格式化文本）
+- **ST 风格变量**：`{{setvar::name::value}}`/`{{getvar::name}}`/`{{// comment}}`；四作用域 global/project/chapter/cache
+- **Jinja2 沙箱**：ImmutableSandboxedEnvironment + 双白名单函数（render_pre_send 完整 16 函数 / render_post_receive 精简 9 函数防 AI 输出外泄数据）；超时 5 秒；递归上限 50
+- **调试**：调试模式勾选后各 LLM 调用前弹 DebugPromptDialog 预览组装后 messages
 
-### 11. 单章续写审计与修正（AuditWorker + AuditDialog）
+### 11. 单章续写审计与修正
 
-- **精简审计模板** `resources/defaults/agent/phase_single_audit.txt`：8 维度（consistency/style/coherence/user_directive_compliance/protagonist_consistency/worldview_consistency/custom_rules_compliance/rigid_ai_text），维度 4 user_directive_compliance 为条件性必审项（存在用户指令时必审，无指令跳过），维度 5/6/8 为必审项（一票否决/严格给分），维度 7 为条件性必审项；5 占位符（`{{written_text}}`/`{{user_input}}`/`{{world_ontology}}`/`{{protagonist_profile}}`/`{{custom_audit_rules}}`），`{{user_input}}` 用 `<user_directive>...</user_directive>` XML 标签定界符包裹明确标记用户指令边界（解决 AI 评审员无法正确识别用户续写指令问题），不含 snapshot/outline/previous_chapters_text（卷续写专用）；输出严格 JSON（summary/issues/passed），summary 必含 `【用户指令遵从性审计】`/`【主角一致性审计】`/`【世界观一致性审计】`/`【自定义设定审计】`/`【刻板AI文本审计】` 五个标记段落
-- **AuditWorker**（`services/audit_worker.py`）：QThread+asyncio 流式 worker，与 ContinuationWorker 一致的停止机制（threading.Event + asyncio.Task.cancel）；**流式** stream_chat_completion（非 chat_completion）让用户实时看到审计报告；不做正则后处理（JSON 文本），finished 信号返回完整文本字符串而非 Continuation；temperature 0.2/max_tokens 3000 低温稳定
-- **AuditDialog**（`ui/audit_dialog.py`）：流式输出区（只读）→ finish_streaming 设为可编辑启用采纳按钮；accepted_text/cancelled 信号；Esc 键按取消处理触发 worker.stop
-- **流程**（`MainWindow._on_audit_continuation`）：加载模板 → `_format_world_ontology`/`_format_protagonist_profile` 静态方法 JSON 序列化（None→占位文本）→ str.replace 替换 4 占位符（与 VolumeOrchestrator 一致不用 MacroEngine）→ AuditWorker 流式 → AuditDialog → 用户编辑后采纳
-- **修正**（`MainWindow._on_audit_accepted`）：**新流程不复用正文生成的 `_continuation_prompt_messages` 快照**，改为加载 `phase_audit_rewrite.txt` 独立模板，str.replace 注入 9 占位符（`{{original_content}}`=原续写内容/`{{critique}}`=审计报告纯文本/`{{world_ontology}}`/`{{protagonist_profile}}`/`{{custom_audit_rules}}`/`{{previous_chapters_text}}`=""空/`{{chapter_plan}}`="（无卷大纲章节规划）"/`{{outline}}`="（无细纲）"/`{{pacing_speed}}`="（单章无推进速度约束）"/`{{target_words}}`），构造全新 messages `[{"role":"system","content":rendered},{"role":"user","content":"请基于审计结果与修改意见，重写完整正文。"}]` → 清空输出框 start_streaming → 新建 ContinuationWorker `created_by="audit_rewrite"` 流式重写 → `_on_continuation_finished` 保存为**新 swipe**（不删原 swipe，可并排对比）；审计报告以纯文本（非结构化 JSON）拼入 `{{critique}}` 占位符，即使原报告 JSON 不完整或用户改坏仍可发送；模板聚焦"修改任务"段强调逐条对照 issues 的 suggestion 落实修订
-- **模型解析**（`_on_audit_accepted`）：`model = self._continuation_model or endpoint.get("default_model", "")`，空则提示"请选择模型"并 return；与审计发起处（L3660）一致兜底 endpoint 默认模型，避免会话未运行过续写时 `_continuation_model=""` 导致 404 invalid_model
-- **数据来源**：written_text=current_swipe.content、user_input=continuation_panel.get_user_input()（空则占位）、world_ontology=project.world_ontology（None 占位）、protagonist_profile=优先 chapter.protagonist_profile 兜底 _protagonist_profile_by_chapter.get(chapter.id)（None 占位）、custom_audit_rules=project.custom_audit_rules（空列表注入"（无自定义设定）"）；original_content=原续写 swipe.content；审计报告=用户编辑后的 accepted_text 纯文本；model=`_continuation_model or endpoint.default_model`
+- **phase_single_audit.txt**：8 维度精简审计，5 占位符，`{{user_input}}` 用 `<user_directive>` XML 标签定界，输出严格 JSON
+- **AuditWorker**：流式 stream_chat_completion，低温稳定输出
+- **修正流程**（`_on_audit_accepted`）：加载 phase_audit_rewrite.txt 独立模板 str.replace 注入 9 占位符（无 revision_guidance，审计报告整体即修改意见）→ 新建 ContinuationWorker `created_by="audit_rewrite"` 流式重写为新 swipe（不删原 swipe，可并排对比）
 
 ### 12. 自定义设定/审计必查项（CustomAuditRule）
 
-- **需求背景**：用户希望输入自定义设定/要求（如"主角不得杀人""禁止穿越时空"），由 AI 结合世界观底层与上下文结构化为"要求 + 审计向"两字段，保存到项目全局，作为审计必查项注入续写生成与审计全链路；审计不通过则一票否决。参考世界观底层提取模式，在上下文预览面板按钮旁增加"新增自定义设定"和"查看自定义设定"按钮
-- **数据模型** `novelforge/models/custom_audit_rule.py`：`CustomAuditRule`（id/title/raw_input 原始输入/requirement 结构化要求/audit_criteria 审计向/severity 严重度 high|medium|low/created_at）；保存到 `Project.custom_audit_rules: list[Any]` 字段（项目全局共享）
-- **结构化解析** `novelforge/services/custom_audit_rule_service.py`：`CustomAuditRuleService.parse_rule_streaming` 异步协程加载 `phase_custom_rule_parse.txt` 模板，注入用户原始输入 raw_input + 世界观底层 world_ontology + 上下文 context_entries，AI 结合世界观与上下文结构化为 requirement + audit_criteria 两字段；2 次重试（温度 0.2/0.0）；协程内 `await self.storage_service.storage.save_project` 直连异步层持久化到 `Project.custom_audit_rules` 列表，避免重入死锁（镜像 OntologyExtractor 模式）
-- **UI 入口**（`context_preview_panel.py`）："新增自定义设定"按钮（`#primaryBtn`）+ `add_custom_rule_requested` 信号 + "查看自定义设定"按钮（`#secondaryBtn`）+ `view_custom_rules_requested` 信号，参考世界观底层提取模式，按钮位于"查看主角形象"按钮之后、"前文:"标签之前；4 个提取按钮的 setEnabled 与 ontology/protagonist 按钮同步联动
-- **对话框**（`ui/custom_rule_dialog.py`）：`CustomRuleInputDialog`（QPlainTextEdit 输入 raw_input + 确定/取消，确定后 emit submitted(str)）；`CustomRulesViewDialog`（列表展示已保存 CustomAuditRule 的 title/severity/requirement/audit_criteria + 删除按钮 on_delete 回调 + 关闭按钮）
-- **MainWindow 槽方法**（`main_window.py`）：`_format_custom_audit_rules`（静态格式化为 `[SEVERITY] title\n要求：...\n审计向：...` 多段文本，空列表返回"（无自定义设定）"）；`_on_add_custom_rule_requested`（弹 CustomRuleInputDialog → start_custom_rule_parsing 启动流式 UI → on_chunk 闭包 emit `_custom_rule_chunk_received` 信号 → `asyncio.run_coroutine_threadsafe` 提交 parse_rule_streaming（传 on_chunk=）→ on_done 闭包仅 emit `_custom_rule_done` 信号，不直接调 GUI 避免跨线程违规）；`_on_custom_rule_chunk_received`（Slot UI 线程，调 update_custom_rule_progress）；`_on_custom_rule_done`（Slot UI 线程，调 finish/fail_custom_rule_parsing + QMessageBox 提示成功/失败）；`_on_view_custom_rules_requested`（弹 CustomRulesViewDialog + on_delete=self._delete_custom_rule）；`_delete_custom_rule`（按 rule_id 过滤后 save_project 持久化）；2 个跨线程信号 `_custom_rule_chunk_received = Signal(str)` + `_custom_rule_done = Signal(object, str)` 在 __init__ 连接槽方法
-- **3 处注入**：①单章续写 `prompt_assembler.assemble` 调用传 `custom_audit_rules=project.custom_audit_rules`（注入 main 提示词 `{{custom_audit_rules}}` 宏，default_preset.json 已在【主角信息】段后追加【自定义设定/审计必查项】段）；②单章续写审计 `phase_single_audit.txt` 模板 `rendered.replace("{{custom_audit_rules}}", custom_rules_str)` 注入；③卷续写 `VolumeOrchestrator` 构造传 `custom_audit_rules=project.custom_audit_rules`，9 处 phase 方法注入 `{{custom_audit_rules}}` 宏（深度分析/深度分析汇总/卷大纲/大纲审计/终稿大纲/单章细纲/章节验证/章节修订/章节重写）
-- **审计维度** `custom_rules_compliance`（单一合并维度，一票否决）+ `rigid_ai_text`（刻板AI文本禁令，严格给分）：`agent.py` `VALID_CRITIQUE_CATEGORIES` 含 16 值（新增 custom_rules_compliance + rigid_ai_text）；`volume.py` `DEFAULT_AUDIT_DIMENSIONS` 含 13 维度（新增 custom_rules_compliance + rigid_ai_text）；`phase_verify.txt` 16 维度（新增 custom_rules_compliance 必审项 + rigid_ai_text 必审项，summary 强制含【自定义设定审计】与【刻板AI文本审计】标记段落）；`phase_outline_audit.txt` 13 维度；`phase_single_audit.txt` 7 维度（新增 custom_rules_compliance 必审项 + rigid_ai_text 必审项，summary 强制含【自定义设定审计】与【刻板AI文本审计】标记段落）；custom_rules_compliance 严格给分：未满足任一 high 严重度自定义规则判 critical（score ≤ 2），未满足 medium 严重度至少判 major，审计不通过一票否决（passed=false）；rigid_ai_text 严格给分：3 处以上典型 AI 痕迹判 major，5 处以上或整段 AI 套路文本判 critical score≤3 passed=false
-- **11 个 phase 模板**均已含 `{{custom_audit_rules}}` 占位符段（deep_analysis/deep_analysis_merge/volume_outline/outline_audit/outline_final/chapter_outline/chapter_verify/chapter_revise/chapter_rewrite/audit_rewrite/single_audit）
+- **数据模型**：CustomAuditRule（id/title/raw_input/requirement/audit_criteria/severity/created_at），保存到 Project.custom_audit_rules 全局共享
+- **结构化解析**：CustomAuditRuleService.parse_rule_streaming 加载 phase_custom_rule_parse.txt，AI 结合世界观+上下文结构化为 requirement+audit_criteria 两字段
+- **UI 入口**：context_preview_panel 的"新增自定义设定"/"查看自定义设定"按钮
+- **3 处注入**：①单章续写 assemble 传 custom_audit_rules ②单章审计 phase_single_audit.txt 注入 ③卷续写 VolumeOrchestrator 构造传，9 处 phase 方法注入
+- **审计维度** custom_rules_compliance（一票否决）+ rigid_ai_text（刻板 AI 文本禁令严格给分）：未满足 high 严重度规则判 critical；3 处以上 AI 痕迹判 major，5 处以上判 critical
 
-### 13. 安全加固（2026-07-02 安全审计修复）
+### 13. 安全加固
 
-完整审计报告见 `docs/SECURITY_AUDIT.md`。本次审计发现 4 HIGH + 7 MEDIUM + 6 LOW，修复范围 HIGH + MEDIUM 共 11 项，LOW 仅记录。新增 6 个安全测试文件（`tests/test_security_*.py`，68 用例），回归测试全绿（566 passed, 15 skipped）。
+完整审计报告见 `docs/SECURITY_AUDIT.md`。
 
-- **ID 路径穿越防护**（H-2，[ids.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/utils/ids.py) `validate_id`）：外部数据（导入 zip / ST JSON）流入文件路径的 ID 必须经 `validate_id` 校验，仅允许 `^[A-Za-z0-9_\-]+$`（字母数字下划线连字符），拒绝路径字符 `/` `\` `..` `\x00`。接入点：
-  - 路径构造函数入口：[storage.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/core/storage.py) `get_chapter_file_path`/`get_preset_file_path`
-  - 服务层入口：[worldbook_service.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/services/worldbook_service.py) load/save/delete 三处、[regex_service.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/services/regex_service.py) scoped/preset 分支
-  - 模型层纵深防御（pydantic `field_validator` `_validate_path_id`）：Project/Chapter/RegexScript/WritingPreset/WorldBook 五模型，拒绝含路径字符的 ID（模型层是导入数据入口 `model_validate`，在此拦截早于服务层）
-- **ZIP slip 防护**（H-1，[exporter.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/services/exporter.py) `import_project_backup`）：`zf.extractall` 前逐成员 `resolve()` 校验，确保每个成员解析后仍位于 `tmp_path` 之下，拦截 `../evil.txt` 等恶意成员名
-- **SSTI 白名单收紧**（M-1，[template_engine.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/core/template_engine.py)）：双白名单函数——`render_pre_send` 用完整 `WHITELIST_FUNCTION_NAMES`（16 函数，用户预设受信任场景），`render_post_receive` 用精简 `POST_RECEIVE_WHITELIST`（9 函数纯操作，AI 输出不可信场景，移除 `get_chapters`/`get_novel_profile`/`get_book` 等数据读取函数防外泄）；`_render` 方法 `post_receive: bool=False` 参数按 flag 分流上下文构建（`_build_default_context` vs `_build_post_receive_context`）；保留 setvar/getvar 满足变量回写需求
-- **ReDoS 超时保护**（M-2）：[regex_engine.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/core/regex_engine.py) `_finditer_with_timeout` + [importer.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/services/importer.py) `_finditer_chapters_with_timeout`，模块级共享 `ThreadPoolExecutor` + `future.result(timeout=5.0)`，超时返回部分结果或降级用默认正则；Python 线程无法强制终止，超时后工作线程仍后台运行，executor `max_workers` 取较大值容纳残留线程
-- **日志脱敏增强**（M-3，[logger.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/core/logger.py)）：三模式脱敏按 AUTH_HEADER → API_KEY → BEARER 顺序处理——`API_KEY_PATTERN` 覆盖 `sk-`/`sk-ant-`/`sk-or-` 前缀、`AUTH_HEADER_PATTERN` 覆盖 `Authorization: Bearer xxx`/`Authorization=Bearer xxx`/`Authorization:Bearer xxx` 三种分隔形式（保护自定义网关 token）、`BEARER_PATTERN` 覆盖裸 `Bearer xxx`
-- **敏感文件权限**（M-4 + M-5 纵深防御，[paths.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/utils/paths.py) `secure_file`）：`os.chmod(path, 0o600)` 收紧权限（Windows 为 no-op 不影响 ACL，Linux/macOS 实际收紧），5 处接入——[config.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/core/config.py) save 后、[crypto.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/core/crypto.py) `.machine_id`/导出密钥、[storage.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/core/storage.py) DB 文件、[logger.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/core/logger.py) 日志文件；M-5 passphrase 非密钥（机器 ID + 用户名），不引入主密码改 UX，仅以文件权限阻止同机其他用户读 config.json + salt 离线解密
-- **HTTP 明文警告**（M-6，[llm_client.py](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/novelforge/services/llm_client.py)）：保留 `http://` 支持兼容本地 LLM，但 `base_url` 为 `http://` 且 `api_key` 非空时 `logger.warning` 提示 MITM 风险（不阻断仅警告）
-- **依赖版本锁定**（M-7，[requirements.txt](file:///g:/_project/Python_UI_Novel_Continuation_Tool_PRD260627/GengBi/requirements.txt)）：floor 提升至已修复 CVE 版本——aiohttp>=3.9.5（CVE-2024-23334/30251）、jinja2>=3.1.4（CVE-2024-22195/34064）、cryptography>=42.0.4（CVE-2024-26130）、pydantic>=2.5.3（CVE-2024-3772）等；不引入 lockfile 保持简单
+- **ID 路径穿越防护**：`novelforge.utils.ids.validate_id` 校验仅允许 `^[A-Za-z0-9_\-]+$`，外部数据流入文件路径的 ID 必须经此校验（路径构造函数入口 + 服务层入口 + 模型层 field_validator 三重防御）
+- **ZIP slip 防护**：exporter.import_project_backup 逐成员 resolve() 校验位于 tmp_path 之下
+- **SSTI 白名单收紧**：template_engine 双白名单函数（render_pre_send 16 函数 / render_post_receive 9 函数移除数据读取）
+- **ReDoS 超时保护**：regex_engine/importer 共享 ThreadPoolExecutor + future.result(timeout=5.0)
+- **日志脱敏**：logger 三模式（AUTH_HEADER → API_KEY → BEARER）覆盖 sk-/sk-ant-/sk-or- 前缀与 Authorization 头
+- **敏感文件权限**：paths.secure_file `os.chmod(path, 0o600)` 5 处接入（config/crypto/storage/logger）
+- **HTTP 明文警告**：llm_client 保留 http:// 兼容本地 LLM，但 api_key 非空时 warning 提示 MITM 风险
+- **依赖版本锁定**：requirements.txt floor 提升至已修复 CVE 版本（aiohttp>=3.9.5/jinja2>=3.1.4/cryptography>=42.0.4/pydantic>=2.5.3）
 
-### 14. 当前章节重写模式（Rewrite Current Chapter）
+### 14. 重写当前章节模式（Rewrite Current Chapter）
 
-在「单章续写」与「卷续写」之外，新增第三种续写模式「重写当前章节」。该模式用两步流程重写当前章节正文：① 分析当前章节正文 + 用户输入需求，输出结构化的「新章节生成详细需求」；② 检查点暂停（AuditDialog）供用户审阅/编辑分析结果；③ 复用单章续写的 `prompt_assembler.assemble` + `ContinuationWorker` 生成新正文，存为 swipe（`created_by="rewrite_current"`），接受时用新内容**替换**当前章节正文（`replace_chapter_content`，不新建章节、不后移 index）。
+第三种续写模式，两步流程重写当前章节正文：①分析当前章节+用户需求输出结构化「新章节生成详细需求」②检查点暂停供用户审阅/编辑③复用单章续写 assemble+ContinuationWorker 生成新正文存为 swipe（created_by="rewrite_current"），接受时 replace_chapter_content 覆盖当前章节正文（不新建章节、不后移 index）。
 
-关键约束：重写模式下「前文提取」与「聊天历史构建」**不得包含当前章节**，因为当前章节正是待重写对象，不是「前文」。
+- **关键约束**：重写模式下「前文提取」与「聊天历史构建」**不得包含当前章节**（当前章节是待重写对象不是前文）
+- **exclude_current 参数**：贯穿 ContextExtractor.extract/extract_streaming/_get_lookback_chapters/_build_cache_key 与 PromptAssembler.assemble/_build_history；True 时 lookback 返回 `sorted_chapters[:current_idx]`，_build_history 遇当前章节 break 且不 append，缓存 key 带 `:rewrite` 后缀
+- **分析模板**：phase_rewrite_analysis.txt，6 占位符，输出 5 分节
+- **流程端点**：rewrite_analysis 独立流程（低温稳定），重写生成复用 single_continuation 端点
+- **接受逻辑**：`_on_accept_continuation` 检查 swipe.created_by=="rewrite_current" 则调 replace_chapter_content，否则走 promote_continuation_to_chapter
 
-- **模式枚举**：`ContinuationPanel._mode_combo` 第三项 `"rewrite_current"`，触发独立信号 `rewrite_current_analysis_requested`（与 `start_continuation` 并列，不走 `_on_start_continuation_routed` 路由避免双重发射）。
-- **exclude_current 参数**：贯穿 `ContextExtractor.extract/extract_streaming/_get_lookback_chapters/_build_cache_key/_extract_common` 与 `PromptAssembler.assemble/_build_history`。`True` 时：
-  - `_get_lookback_chapters` 返回 `sorted_chapters[:current_idx]`（不含当前章节），lookback 截断作用于排除后的列表。
-  - `_build_history` 遍历到 `ch_id == current_id` 即 `break` 且**不 append** 当前章节消息（历史止于前一章）。
-  - 缓存 key 带 `:rewrite` 后缀（`_build_cache_key` suffix），避免与续写模式（含当前章节）互相覆盖。
-- **分析模板**：`resources/defaults/agent/phase_rewrite_analysis.txt`，6 占位符（`{{current_chapter_text}}` / `{{user_input}}` / `{{world_ontology}}` / `{{protagonist_profile}}` / `{{custom_audit_rules}}` / `{{context_entries}}`），输出 5 个分节（当前章节分析 / 用户需求解读 / 重写要点 / 风格与基调 / 具体要求清单）。
-- **流程端点**：`rewrite_analysis`（独立流程，低温稳定输出，`AuditWorker` temperature=0.3 max_tokens=4000）；重写生成复用 `single_continuation` 端点（参数与单章续写一致，仅 `created_by="rewrite_current"` 区分）。
-- **两步流程**（`_on_start_rewrite_current` → `_on_rewrite_analysis_accepted`）：
-  1. **Step 1 分析**：加载 `phase_rewrite_analysis.txt` 模板 str.replace 注入 6 占位符 → `AuditWorker` 流式输出 → `AuditDialog`（标题「重写需求分析」）供用户审阅/编辑 → 用户「采纳」进入 Step 2。
-  2. **Step 2 生成**：`analysis_text` 作为 `user_input` 传入 `prompt_assembler.assemble`（`exclude_current=True`）→ `ContinuationWorker` 流式输出新正文 → 存为 swipe 到当前章节。
-- **接受逻辑**：`_on_accept_continuation` 检查 `swipe.created_by`，若为 `"rewrite_current"` 则弹确认对话框 → `ChapterService.replace_chapter_content`（覆盖当前章节正文 + 删除 swipe + 不后移后续章节 index），否则走原 `promote_continuation_to_chapter`（插入新章节到当前章节之后）。
-- **提取入口分发**：`_on_extract_requested` 按 `continuation_panel.get_mode()` 判断，`rewrite_current` 模式下调 `extract_streaming(..., exclude_current=True)`，其余模式不变。
-- **主角形象档案**：重写模式下 `protagonist_profile` 仍取当前章节的档案（作为目标参考，不排除当前章节提取——重写目标是让新章节符合主角形象档案）。
-- **用户切换模式时**：`_current_context_entries` 字段共享，切换模式后需重新点击「提取上下文」（提取范围按当前模式自动适配 `exclude_current`）。不做自动重提取以避免不必要的 LLM 调用。
+### 15. 流程破限配置
+
+- **正文流程**（single_continuation/volume_continuation）：破限由预设管理器勾选 `nf_jb_*` 模块控制（现有机制不变）；`default_preset.json` 的 `prompt_order` 中 5 个 `nf_jb_*` 已前置到 `main` 之前，使破限 system 消息在组装后位于「你是一位专业的小说续写助手」之前定调。`nf_jb_prefill` 虽移到 order 前列但它是 ABSOLUTE 注入（`injection_position=1, injection_depth=0`），仍按深度规则注入到末尾，行为不变
+- **非正文流程**（6 个：single_audit/rewrite_analysis/context_extraction/ontology_extraction/protagonist_extraction/custom_rule_parsing）：每个流程在 `resources/defaults/jailbreaks/jb_{flow}.txt` 有专用模板（含 `### LOW/MID/HIGH ###` 三档，按流程风格定制：提取类强调不拒绝敏感分析、审计类强调诚实批判不软化、重写分析强调不拒绝敏感重写需求、自定义设定解析强调接受任何黑暗设定）；运行时由 `JailbreakProvider.get_jailbreak(flow, level)` 返回文本，作为 `{"role":"system","content":jb_text}` 前置到 messages 开头（空文本不注入）；提取类流程的合并子调用复用同流程破限参数
+- **配置入口**：`FlowEndpointDialog` 在端点配置下方新增「破限配置（非正文流程）」分组，仅对 6 个非正文流程显示等级下拉（关闭/低/中/高/自定义）+「编辑自定义」按钮（仅 custom 时启用，弹 `JailbreakCustomDialog` 编辑）；正文流程不显示（由预设管理器控制）
+- **默认等级**：提取类三个流程（context/ontology/protagonist）默认 `low`（提取敏感小说内容不被拒绝），其余默认 `off`；自定义文本优先于等级模板
+- **配置层**：`config.py` `FLOW_DEFAULT_JAILBREAKS` 常量 + `flow_jailbreaks`/`flow_jailbreaks_custom` 两个 dict + 5 个 get/set 方法（镜像 `flow_endpoints` 模式）；`get_flow_jailbreak(flow)` 未配置回退默认等级
+- **降级策略**：`jb_{flow}.txt` 不存在或无对应等级段，`get_jailbreak` 返回空串，不阻塞流程
 
 ## 代码风格规范
 
-- 使用 `from __future__ import annotations` 启用延迟类型注解
-- 日志使用 `logging` 模块，logger 名称为模块路径
-- 异常处理：UI 层捕获并提示用户，服务层记录日志并返回错误状态
+- `from __future__ import annotations` 启用延迟类型注解
+- 日志用 logging 模块，logger 名为模块路径
+- 异常处理：UI 层捕获并提示，服务层记录日志返回错误状态
 - 中文注释和文档字符串，技术术语保留英文
 - 信号命名：过去式或名词（如 `chunk_received`、`entries_changed`）
-- **reindex 禁止用 `save_chapter`**：`list_chapters` 返回的 Chapter 对象 `content=""`（只含元数据），`save_chapter` 会用空 content 覆盖正文文件。reindex 操作必须使用 `update_chapter_index`（只更新 SQL index 列，不写文件）
-- **切分模式下所有文本占位符必须使用切分后的块文本**：不能注入完整全文，否则切分形同虚设。`_run_deep_analysis_single` 的 `{{chapters_text}}`/`{{full_chapters_text}}`/`{{lookback_chapters_text}}` 统一使用传入的 `chapters_text` 参数
-- **用户指令优先原则**：用户剧情输出需求（`user_directive_analysis.required_elements`/`emphasized_elements`）视为后续续写硬约束，优先级高于通用规划原则但低于主角 OOC 红线与世界观底层规则；审计 `user_directive_compliance` 维度严格给分（未满足 `required_elements` 任一项时 score ≤ 3），不可因其他维度优秀而豁免；`conflicts` 中的冲突需在大纲/正文中明确处理，不得自行忽略
-- **前文参考机制按模式分离**：单章模式用 `lookback_chapters`（回溯章节数，UI `_lookback_spin` 控制）截断 `prompt_assembler._build_history` 聊天历史到最近 N 章；卷模式用 `skip_history=True` 跳过聊天历史构建，前文仅由"最近 10 章正文参考（含本卷已生成）"系统消息（`_build_dynamic_lookback_text(window=10)`）提供，避免章节正文在 chat history 与系统消息中重复
-- **外部数据流入文件路径的 ID 必须经 `validate_id` 校验**（安全规范）：所有由外部数据（导入 zip / ST JSON / 用户输入）流入文件路径拼接的 ID 字段（`project_id`/`chapter_id`/`preset_id`/`worldbook_id` 等）必须经 `novelforge.utils.ids.validate_id` 校验，仅允许 `^[A-Za-z0-9_\-]+$`。校验应在路径构造函数入口（如 `get_chapter_file_path`）与服务层入口（如 `load_worldbook`）双重执行，模型层 `field_validator` 做纵深防御。新增类似 ID 字段时必须同步接入校验
+- **reindex 禁止用 `save_chapter`**：`list_chapters` 返回的 Chapter `content=""`，save_chapter 会用空 content 覆盖正文文件。reindex 必须用 `update_chapter_index`（只更新 SQL index 列不写文件）
+- **切分模式下所有文本占位符必须使用切分后的块文本**：不能注入完整全文，否则切分形同虚设
+- **用户指令优先原则**：user_directive_analysis.required_elements/emphasized_elements 是续写硬约束，优先级高于通用规划原则但低于主角 OOC 红线与世界观底层规则；审计严格给分不可因其他维度优秀而豁免
+- **前文参考机制按模式分离**：单章用 lookback_chapters 截断聊天历史；卷用 skip_history=True + 动态前文窗口系统消息，避免章节正文在 chat history 与系统消息重复
+- **外部数据流入文件路径的 ID 必须经 `validate_id` 校验**（路径构造函数入口 + 服务层入口 + 模型层 field_validator 三重防御）
 
 ## 测试要求
 
 - 测试文件位于 `tests/` 目录，命名 `test_*.py`
 - 使用 pytest 运行：`python -m pytest tests/ -q`
-- E2E 测试使用真实预设文件（如 `TGbreak😺V3.1.1.json`）和小说文件
-- UI 测试需排除环境缺失的组件：`--ignore=tests/test_m5_polish.py -k "not TestUIComponents"`
+- E2E 测试使用真实预设文件和小说文件
+- UI 测试需排除环境缺失组件：`--ignore=tests/test_m5_polish.py -k "not TestUIComponents"`
 
 ## 修改后必须更新
 
@@ -369,4 +250,4 @@ novelforge/
 3. **UI 布局规范**：修改面板布局时更新布局描述
 4. **技术栈**：新增依赖时更新
 
-**每次修改项目代码后，还必须同步更新 `update.md`**：在文件顶部（`---` 之后、上一条记录之前）按时间倒序追加新条目，格式含 `## YYYY-MM-DD：标题` / `### 背景` / `### 核心改动` / `### 测试` / `### 文档同步` 等小节，简要描述本次变更的背景、改动点、测试结果与文档同步情况。
+**每次修改项目代码后，还必须同步更新 `update.md`**：在文件顶部按时间倒序追加新条目，格式含 `## YYYY-MM-DD：标题` / `### 背景` / `### 核心改动` / `### 测试` / `### 文档同步` 等小节。

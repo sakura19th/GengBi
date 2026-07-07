@@ -22,6 +22,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -29,6 +30,8 @@ from PySide6.QtWidgets import (
     QMenu,
     QProgressBar,
     QPushButton,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -60,6 +63,7 @@ class ChapterTreeModel(QAbstractItemModel):
         self._chapters: list[Chapter] = []
         self._filtered_indices: list[int] = []
         self._filter_kw: str = ""
+        self._current_chapter_id: str | None = None
 
     # ===== 数据接口 =====
 
@@ -165,6 +169,62 @@ class ChapterTreeModel(QAbstractItemModel):
             | Qt.ItemFlag.ItemIsSelectable
             | Qt.ItemFlag.ItemIsDragEnabled
         )
+
+    # ===== 当前章节高亮 =====
+
+    def _row_of_chapter(self, chapter_id: str) -> int | None:
+        """查找章节 ID 在过滤后可见列表中的行号，不可见返回 None。"""
+        sorted_chs = self._sorted_chapters()
+        for row, idx in enumerate(self._filtered_indices):
+            if sorted_chs[idx].id == chapter_id:
+                return row
+        return None
+
+    def set_current_chapter(self, chapter_id: str | None) -> None:
+        """设置当前选中章节 ID，触发旧/新行 BackgroundRole 重绘。
+
+        持续高亮不依赖视图焦点：失焦时 BackgroundRole 仍显现，
+        避免长列表中找不到当前章节。
+        """
+        if chapter_id == self._current_chapter_id:
+            return
+        old_id = self._current_chapter_id
+        self._current_chapter_id = chapter_id
+        for cid in (old_id, chapter_id):
+            if not cid:
+                continue
+            row = self._row_of_chapter(cid)
+            if row is None:
+                continue
+            idx = self.index(row, 0)
+            self.dataChanged.emit(idx, idx, [Qt.ItemDataRole.BackgroundRole])
+
+
+class ChapterHighlightDelegate(QStyledItemDelegate):
+    """章节列表项委托：为当前选中章节绘制持续高亮背景。
+
+    绕开 QSS ``::item:selected`` 对 BackgroundRole 的覆盖问题：
+    在 ``paint()`` 中先填充高亮背景，再调用父类绘制选中/hover 态，
+    确保失焦时高亮仍可见。
+    """
+
+    HIGHLIGHT_COLOR = QColor(0, 122, 255, 51)  # System Blue alpha≈0.2
+
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> None:
+        """绘制项：当前章节先填高亮背景，再走父类绘制。"""
+        chapter = index.data(Qt.ItemDataRole.UserRole)
+        model = index.model()
+        current_id = getattr(model, "_current_chapter_id", None)
+        if chapter is not None and current_id and chapter.id == current_id:
+            painter.save()
+            painter.fillRect(option.rect, self.HIGHLIGHT_COLOR)
+            painter.restore()
+        super().paint(painter, option, index)
 
 
 class FullTextSearchWorker(QThread):
@@ -299,6 +359,8 @@ class ChapterListWidget(QWidget):
 
         self._model = ChapterTreeModel()
         self._tree.setModel(self._model)
+        # 安装自定义委托：绘制当前选中章节持续高亮（绕开 QSS 选中态覆盖）
+        self._tree.setItemDelegate(ChapterHighlightDelegate(self._tree))
         layout.addWidget(self._tree)
 
         # 提示标签
@@ -340,7 +402,16 @@ class ChapterListWidget(QWidget):
             if ch.id == chapter_id:
                 idx = self._model.index(i, 0)
                 self._tree.setCurrentIndex(idx)
+                self._model.set_current_chapter(chapter_id)
                 return
+
+    def set_current_chapter(self, chapter_id: str | None) -> None:
+        """设置当前选中章节高亮（持续高亮，失焦不失色）。
+
+        三路径同步：用户点击 ``_on_tree_clicked`` / 程序化 ``select_chapter``
+        / MainWindow ``_on_chapter_selected`` 直接调用。
+        """
+        self._model.set_current_chapter(chapter_id)
 
     # ===== 搜索 =====
 
@@ -398,6 +469,7 @@ class ChapterListWidget(QWidget):
             return
         chapter = index.data(Qt.ItemDataRole.UserRole)
         if chapter:
+            self._model.set_current_chapter(chapter.id)
             self.chapter_selected.emit(chapter.id)
 
     # ===== 右键菜单 =====

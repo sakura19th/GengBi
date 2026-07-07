@@ -1,5 +1,38 @@
 # 更新日志
 
+## 2026-07-07：流程破限配置（正文前置 + 非正文流程按等级注入）
+
+把正文流程的 5 个 `nf_jb_*` 破限模块在 `default_preset.json` 的 `prompt_order` 中从末尾移到 `main` 之前，使破限 system 消息在组装后位于「你是一位专业的小说续写助手」之前定调；为 6 个非正文流程（single_audit/rewrite_analysis/context_extraction/ontology_extraction/protagonist_extraction/custom_rule_parsing）每个创建专用破限模板（含 LOW/MID/HIGH 三档，按流程风格定制），运行时按配置作为 system 消息前置到 messages 开头；在【端点流程配置】对话框为 6 个非正文流程增加破限等级下拉（关闭/低/中/高/自定义）+ 自定义文本编辑入口。
+
+### 背景
+
+原架构中正文流程的破限模块排在 `prompt_order` 末尾，削弱了「前置定调」效果；6 个非正文流程（不走预设 prompt_order，用 str.replace 拼 .txt 模板）完全无破限支持，提取含暴力/敏感内容的小说时易被模型拒绝。
+
+### 核心改动
+
+#### 新增
+- `novelforge/resources/defaults/jailbreaks/`：6 个流程专用破限模板（jb_context_extraction.txt / jb_ontology_extraction.txt / jb_protagonist_extraction.txt / jb_single_audit.txt / jb_rewrite_analysis.txt / jb_custom_rule_parsing.txt），每文件含 `### LOW/MID/HIGH ###` 三档
+- `novelforge/services/jailbreak_provider.py`：`JailbreakProvider` 类，加载 `jb_{flow}.txt` 按 `### LEVEL ###` 标记分段返回文本，文件缓存
+- `novelforge/ui/jailbreak_custom_dialog.py`：自定义破限文本编辑对话框（QPlainTextEdit + 确定/取消）
+
+#### 修改
+- `novelforge/resources/defaults/default_preset.json`：`prompt_order` 中 5 个 `nf_jb_*` 条目从末尾移到 `main` 之前（`nf_jb_prefill` 行为不变，ABSOLUTE 注入仍按深度注入末尾）
+- `novelforge/core/config.py`：新增 `FLOW_DEFAULT_JAILBREAKS` 常量（提取类 low 其余 off）+ `flow_jailbreaks`/`flow_jailbreaks_custom` 两个 dict 字段 + 5 个 get/set 方法
+- `novelforge/ui/flow_endpoint_dialog.py`：新增「破限配置（非正文流程）」QGroupBox + 6 行等级下拉 + 自定义编辑按钮
+- `novelforge/ui/main_window.py`：新增 `_get_flow_jailbreak_text`/`_inject_jailbreak` 辅助方法 + `self._jailbreak_provider`；6 个非正文流程调用点注入破限（single_audit/rewrite_analysis 直接注入 messages；context/ontology/protagonist/custom_rule 通过 `jailbreak_text` 参数透传到服务层）
+- `novelforge/services/context_extractor.py`：`extract`/`extract_streaming`/`_extract_common`/`_run_merge_entries`/`_extract_protagonist`/`_run_protagonist_merge`/`extract_protagonist_streaming` 签名增加 `jailbreak_text` 参数 + 3 处注入点
+- `novelforge/services/ontology_extractor.py`：`extract_ontology_streaming`/`_run_ontology_merge` 签名增加 `jailbreak_text` 参数 + 2 处注入点
+- `novelforge/services/custom_audit_rule_service.py`：`parse_rule_streaming` 签名增加 `jailbreak_text` 参数 + 1 处注入点
+- `agent.md`：新增 §15「流程破限配置」小节；架构分层目录树同步新增 `jailbreak_provider.py`/`jailbreaks/`/`jailbreak_custom_dialog.py`
+
+### 测试
+- `python -m pytest tests/ -q` 全绿（591 passed, 15 skipped, 12 deselected）
+- `tests/test_flow_endpoint_config.py` 同步：`_combos` → `_endpoint_combos`（适配变更 5 对话框重构）；`test_flow_endpoint_dialog_has_7_flows` → `test_flow_endpoint_dialog_has_8_flows`（适配 FLOW_DEFINITIONS 从 7 项扩至 8 项）
+
+### 文档同步
+- agent.md 架构分层 + §15 关键设计决策
+- update.md 顶部追加本条目
+
 ## 2026-07-06（更新）：优化重写分析提示词，强调不推进剧情
 
 优化 [phase_rewrite_analysis.txt](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/feat-rewrite-current-chapter-SRsOzk/novelforge/resources/defaults/agent/phase_rewrite_analysis.txt) 提示词模板，明确强化「不推进剧情」「仅针对当前章节改写」的硬约束。原模板缺少明确的「重写边界」声明，且 L48「需新增的内容：列出用户需求中要求新增的剧情/场景/描写」易引导 LLM 推进剧情或续写下一章。

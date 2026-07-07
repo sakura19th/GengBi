@@ -195,6 +195,7 @@ class CustomAuditRuleService:
         context_entries: list[Any] | None = None,
         on_chunk: Callable[[str], None] | None = None,
         stop_event: threading.Event | None = None,
+        jailbreak_text: str = "",
     ) -> tuple[CustomAuditRule | None, str]:
         """流式解析用户输入为 CustomAuditRule。
 
@@ -228,7 +229,10 @@ class CustomAuditRuleService:
             prompt = self._build_prompt(
                 raw_input, project.world_ontology, context_entries
             )
-            messages = [{"role": "user", "content": prompt}]
+            messages = []
+            if jailbreak_text:
+                messages.append({"role": "system", "content": jailbreak_text})
+            messages.append({"role": "user", "content": prompt})
 
             temperatures = [
                 CUSTOM_RULE_PARSE_TEMPERATURE,

@@ -3,7 +3,7 @@
 覆盖：
 - ConfigManager.get_flow_endpoint：已配置/端点被删/未配置→回退默认端点
 - ConfigManager.set_flow_endpoints 持久化 roundtrip
-- FlowEndpointDialog 加载/保存 roundtrip（7 行下拉）
+- FlowEndpointDialog 加载/保存 roundtrip（8 行下拉）
 """
 from __future__ import annotations
 
@@ -112,13 +112,13 @@ def qapp() -> QApplication:
     return app
 
 
-def test_flow_endpoint_dialog_has_7_flows(qapp, tmp_path: Path) -> None:
-    """对话框包含 7 个流程下拉框。"""
+def test_flow_endpoint_dialog_has_8_flows(qapp, tmp_path: Path) -> None:
+    """对话框包含 8 个流程下拉框。"""
     cm = _make_config_manager(tmp_path)
     dialog = FlowEndpointDialog(cm)
-    assert len(dialog._combos) == 7
+    assert len(dialog._endpoint_combos) == 8
     for flow_key, _ in FLOW_DEFINITIONS:
-        assert flow_key in dialog._combos
+        assert flow_key in dialog._endpoint_combos
 
 
 def test_flow_endpoint_dialog_load_save_roundtrip(qapp, tmp_path: Path) -> None:
@@ -135,12 +135,12 @@ def test_flow_endpoint_dialog_load_save_roundtrip(qapp, tmp_path: Path) -> None:
 
     # 打开对话框验证加载
     dialog1 = FlowEndpointDialog(cm)
-    assert dialog1._combos["single_continuation"].currentData() == ep_b_id
-    assert dialog1._combos["context_extraction"].currentData() == ep_b_id
-    assert dialog1._combos["volume_continuation"].currentData() == ""  # 未配置=默认
+    assert dialog1._endpoint_combos["single_continuation"].currentData() == ep_b_id
+    assert dialog1._endpoint_combos["context_extraction"].currentData() == ep_b_id
+    assert dialog1._endpoint_combos["volume_continuation"].currentData() == ""  # 未配置=默认
 
     # 修改并保存
-    dialog1._combos["volume_continuation"].setCurrentIndex(2)  # 选端点B
+    dialog1._endpoint_combos["volume_continuation"].setCurrentIndex(2)  # 选端点B
     dialog1._on_accept()
 
     # 验证保存
@@ -151,9 +151,9 @@ def test_flow_endpoint_dialog_load_save_roundtrip(qapp, tmp_path: Path) -> None:
 
     # 重新打开对话框验证加载一致
     dialog2 = FlowEndpointDialog(cm)
-    assert dialog2._combos["single_continuation"].currentData() == ep_b_id
-    assert dialog2._combos["volume_continuation"].currentData() == ep_b_id
-    assert dialog2._combos["context_extraction"].currentData() == ep_b_id
+    assert dialog2._endpoint_combos["single_continuation"].currentData() == ep_b_id
+    assert dialog2._endpoint_combos["volume_continuation"].currentData() == ep_b_id
+    assert dialog2._endpoint_combos["context_extraction"].currentData() == ep_b_id
 
 
 def test_flow_endpoint_dialog_default_selected(qapp, tmp_path: Path) -> None:
@@ -161,5 +161,5 @@ def test_flow_endpoint_dialog_default_selected(qapp, tmp_path: Path) -> None:
     cm = _make_config_manager(tmp_path)
     dialog = FlowEndpointDialog(cm)
     for flow_key, _ in FLOW_DEFINITIONS:
-        combo = dialog._combos[flow_key]
+        combo = dialog._endpoint_combos[flow_key]
         assert combo.currentData() == "", f"{flow_key} 应默认选中首项（默认端点）"

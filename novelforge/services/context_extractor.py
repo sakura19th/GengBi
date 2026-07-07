@@ -594,6 +594,7 @@ class ContextExtractor:
         batch_count: int,
         total_token_usage: dict[str, Any],
         log_prefix: str = "",
+        jailbreak_text: str = "",
     ) -> list[ContextEntry] | None:
         """【信息汇总】环节：LLM 合并多批次提取结果为最终 ContextEntry 列表。
 
@@ -624,7 +625,10 @@ class ContextExtractor:
         template = self._load_merge_prompt_template()
         entries_blocks = self._build_entries_blocks(batch_results)
         prompt = template.replace("{{entries_blocks}}", entries_blocks)
-        messages = [{"role": "user", "content": prompt}]
+        messages = []
+        if jailbreak_text:
+            messages.append({"role": "system", "content": jailbreak_text})
+        messages.append({"role": "user", "content": prompt})
 
         # 流式模式：插入汇总分隔标记
         if stream and on_chunk is not None:
@@ -964,6 +968,7 @@ class ContextExtractor:
         batch_count: int,
         total_token_usage: dict[str, Any],
         batch_ranges: list[tuple[int, int]] | None = None,
+        jailbreak_text: str = "",
     ) -> dict | None:
         """合并多批次 ProtagonistProfile 结果（主角形象汇总环节）。
 
@@ -1003,7 +1008,10 @@ class ContextExtractor:
         template = self._load_protagonist_merge_prompt_template()
         entries_blocks = self._build_protagonist_blocks(merge_results, merge_ranges)
         prompt = template.replace("{{entries_blocks}}", entries_blocks)
-        messages = [{"role": "user", "content": prompt}]
+        messages = []
+        if jailbreak_text:
+            messages.append({"role": "system", "content": jailbreak_text})
+        messages.append({"role": "user", "content": prompt})
 
         # 流式分隔标记
         if stream and on_chunk is not None:
@@ -1128,6 +1136,7 @@ class ContextExtractor:
         stream: bool,
         on_chunk: Callable[[str], None] | None,
         on_batch_complete: Callable[[list, int, int], None] | None,
+        jailbreak_text: str = "",
     ) -> tuple[ProtagonistProfile | None, int, bool]:
         """主角形象提取（完整支持 token 拆分 + 增量更新 + 合并）。
 
@@ -1205,7 +1214,10 @@ class ContextExtractor:
                 return None, batch_count, False
 
             # 调用 LLM（2 次尝试：温度 0.2 / 0.0，仅 2 次均失败才中止整体提取）
-            messages = [{"role": "user", "content": prompt}]
+            messages = []
+            if jailbreak_text:
+                messages.append({"role": "system", "content": jailbreak_text})
+            messages.append({"role": "user", "content": prompt})
             extract_temperatures = [
                 PROTAGONIST_EXTRACT_TEMPERATURE,
                 PROTAGONIST_EXTRACT_TEMPERATURE_RETRY,
@@ -1338,6 +1350,7 @@ class ContextExtractor:
                 batch_count=batch_count,
                 total_token_usage={},  # 主角形象 token_usage 不累加到 8 维度
                 batch_ranges=batch_ranges,
+                jailbreak_text=jailbreak_text,
             )
             if merged_protagonist is not None:
                 accumulated_protagonist = merged_protagonist
@@ -1754,6 +1767,7 @@ class ContextExtractor:
         on_chunk: Callable[[str], None] | None = None,
         on_batch_complete: Callable[[list, int, int], None] | None = None,
         exclude_current: bool = False,
+        jailbreak_text: str = "",
     ) -> ExtractResult:
         """统一的上下文提取实现（流式与非流式共享）。
 
@@ -1957,7 +1971,10 @@ class ContextExtractor:
                 )
 
             # 调用 LLM（2 次尝试：温度 0.2 / 0.0，仅 2 次均失败才中止整体提取）
-            messages = [{"role": "user", "content": prompt}]
+            messages = []
+            if jailbreak_text:
+                messages.append({"role": "system", "content": jailbreak_text})
+            messages.append({"role": "user", "content": prompt})
             extract_temperatures = [
                 EXTRACT_TEMPERATURE,
                 EXTRACT_TEMPERATURE_RETRY,
@@ -2166,6 +2183,7 @@ class ContextExtractor:
                 batch_count=batch_count,
                 total_token_usage=total_token_usage,
                 log_prefix=log_prefix,
+                jailbreak_text=jailbreak_text,
             )
             if merged_entries is not None:
                 final_entries = merged_entries
@@ -2230,6 +2248,7 @@ class ContextExtractor:
         lookback_override: int | None = None,
         token_limit_override: int | None = None,
         exclude_current: bool = False,
+        jailbreak_text: str = "",
     ) -> ExtractResult:
         """提取上下文条目（非流式）。
 
@@ -2254,6 +2273,7 @@ class ContextExtractor:
             token_limit_override=token_limit_override,
             stream=False,
             exclude_current=exclude_current,
+            jailbreak_text=jailbreak_text,
         )
 
     async def extract_streaming(
@@ -2267,6 +2287,7 @@ class ContextExtractor:
         token_limit_override: int | None = None,
         on_batch_complete: Callable[[list, int, int], None] | None = None,
         exclude_current: bool = False,
+        jailbreak_text: str = "",
     ) -> ExtractResult:
         """流式提取上下文（不阻塞，通过 on_chunk 回调推送进度）。
 
@@ -2300,6 +2321,7 @@ class ContextExtractor:
             on_chunk=on_chunk,
             on_batch_complete=on_batch_complete,
             exclude_current=exclude_current,
+            jailbreak_text=jailbreak_text,
         )
 
     async def extract_protagonist_streaming(
@@ -2311,6 +2333,7 @@ class ContextExtractor:
         lookback: int = 0,
         on_chunk: Callable[[str], None] | None = None,
         on_batch_complete: Callable[[int, int], None] | None = None,
+        jailbreak_text: str = "",
     ) -> tuple[ProtagonistProfile | None, str]:
         """独立流式提取主角形象（镜像 OntologyExtractor.extract_ontology_streaming）。
 
@@ -2410,6 +2433,7 @@ class ContextExtractor:
                     stream=True,
                     on_chunk=on_chunk,
                     on_batch_complete=adapted_batch_cb,
+                    jailbreak_text=jailbreak_text,
                 )
             )
         except asyncio.CancelledError:
