@@ -75,18 +75,18 @@ novelforge/
 │   └── ...
 └── resources/       # 资源文件
     ├── defaults/
-    │   ├── default_preset.json     # 默认写作预设（20 条分层模块：main/抗八股/抗重复/字数/文风互斥/推进互斥/思维链/破限层 4 套互斥+助手预填充/Marker；破限默认全关；nf_jb_* 已前置到 main 之前定调；nf_jb_high 含 NSFW 指引覆盖原 nf_nsfw）
+    │   ├── default_preset.json     # 默认写作预设（20 条分层模块：main/抗八股/抗重复/字数/文风互斥/推进互斥/思维链/破限层 4 套互斥+助手预填充/Marker；破限默认全关；nf_jb_* 已前置到 main 之前定调；nf_jb_high 含 NSFW 指引覆盖原 nf_nsfw；防全知硬约束贯穿 core_rules/anti_bagua/cot/main）
     │   ├── jailbreaks/                # 非正文流程破限模板（6 个 jb_*.txt，每文件含 ### LOW/MID/HIGH ### 三档）
     │   ├── default_regex_scripts.json  # 4 条默认正则（思维链隐藏/八股抹除/破折号规范/空行清理）
     │   ├── extract_prompt.txt / extract_merge_prompt.txt  # 上下文提取 + 汇总环节
     │   └── agent/                   # 续写阶段提示词模板（phase_*.txt）
-    │       ├── phase_verify.txt          # 16 维度验证（含 4 个一票否决 + rigid_ai_text 严格给分）
+    │       ├── phase_verify.txt          # 16 维度验证（含 4 个一票否决 + rigid_ai_text 严格给分；认知越界检查 7 条含信息传递路径/元词汇/剧情奴隶化）
     │       ├── phase_custom_rule_parse.txt # 自定义设定结构化解析
     │       ├── phase_revise.txt / phase_chapter_rewrite.txt / phase_audit_rewrite.txt  # 修订/重写（audit_rewrite 为统一模板取代 chapter_rewrite）
     │       ├── phase_deep_analysis.txt / phase_deep_analysis_merge.txt  # 深度分析 + 切分汇总
     │       ├── phase_volume_outline.txt / phase_outline_audit.txt / phase_outline_final.txt  # 卷大纲/审计/终稿
     │       ├── phase_chapter_outline.txt  # 单章细纲
-    │       ├── phase_single_audit.txt     # 单章审计（8 维度）
+    │       ├── phase_single_audit.txt     # 单章审计（8 维度；认知越界检查 7 条含信息传递路径/元词汇/剧情奴隶化）
     │       └── phase_rewrite_analysis.txt # 重写当前章节需求分析
     └── themes/          # QSS 主题（light/dark，Apple HIG 风格）
 ```

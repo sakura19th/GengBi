@@ -1,5 +1,34 @@
 # 更新日志
 
+## 2026-07-07：加强默认预设防全知设定
+
+参考【预设参考】中 5 个预设（梦鲸思客/夏瑾/百家饭/Femiris/TGbreak）的反全知模式，在默认预设的"要求"（nf_core_rules/nf_anti_bagua）、"思维链要求"（nf_cot/main）以及审计相关流程（phase_single_audit/phase_verify/phase_outline_audit/phase_audit_rewrite）中提出严格的防全知要求。纯内容增强，不新增/删除预设模块、不改变审计维度结构与 category 取值。
+
+### 背景
+
+原默认预设的反全知设定偏弱：nf_core_rules 无反全知硬约束；nf_anti_bagua 第六节仅 6 条简略规则；nf_cot 思维链无认知边界核查专项；phase_single_audit/phase_verify 的"认知越界检查"仅 3 条且嵌套于 rigid_ai_text 下；phase_outline_audit 仅顺带提及"认知越界"；phase_audit_rewrite 无反全知约束。参考预设普遍设有独立的反全知/信息差模块，需将这些要点融入默认预设的现有模块。
+
+### 核心改动
+
+#### 修改
+- `novelforge/resources/defaults/default_preset.json`：
+  - `nf_core_rules` 新增第 7 条反全知硬约束（角色认知边界/信息差/信息传递路径/剧情奴隶化）
+  - `nf_anti_bagua` 第六节"认知边界要求（反全知）"由 6 条扩充至 10 条：第 6 条改写加入认知隔离；新增第 7 条信息传递路径（源自夏瑾）、第 8 条 POV 边界界定（源自百家饭/Femiris）、第 9 条元词汇禁令（源自夏瑾）、第 10 条信息差叙事价值（源自梦鲸思客）
+  - `nf_cot` 思维链新增第 6 项"认知边界与信息差核查"分析
+  - `main` 主提示思维链新增第 5 项"认知边界与信息差核查"
+- `novelforge/resources/defaults/agent/phase_single_audit.txt`：8.6 认知越界检查由 3 条扩至 7 条（新增信息传递路径/视角认知隔离/元词汇/剧情奴隶化）；严格给分补充严重全知越界判 major；【刻板AI文本审计】标记段落补强须陈述认知越界结果
+- `novelforge/resources/defaults/agent/phase_verify.txt`：16.6 认知越界检查镜像扩至 7 条；严格给分补充；【刻板AI文本审计】标记段落补强
+- `novelforge/resources/defaults/agent/phase_outline_audit.txt`：rigid_ai_text 维度"认知越界"显式化（含大纲情节信息传递路径/视角越界/元词汇/剧情奴隶化）
+- `novelforge/resources/defaults/agent/phase_audit_rewrite.txt`：核心要求新增"认知边界一致性"约束
+- `agent.md`：default_preset.json/phase_single_audit.txt/phase_verify.txt 描述补充防全知要点
+
+### 测试
+- `python -m pytest tests/test_preset_models.py tests/test_e2e_workflow.py tests/test_m2_prompt_assembly.py tests/test_tgbreak_e2e.py tests/test_single_audit.py tests/test_volume_prompts.py -q` 全绿，确认预设可加载、结构合法、审计模板未被破坏
+- `python -c "import json; json.load(open('novelforge/resources/defaults/default_preset.json', encoding='utf-8'))"` 确认 JSON 合法
+
+### 文档同步
+- `agent.md`：架构分层目录树中 default_preset.json/phase_single_audit.txt/phase_verify.txt 注释同步更新
+
 ## 2026-07-07：流程破限配置（正文前置 + 非正文流程按等级注入）
 
 把正文流程的 5 个 `nf_jb_*` 破限模块在 `default_preset.json` 的 `prompt_order` 中从末尾移到 `main` 之前，使破限 system 消息在组装后位于「你是一位专业的小说续写助手」之前定调；为 6 个非正文流程（single_audit/rewrite_analysis/context_extraction/ontology_extraction/protagonist_extraction/custom_rule_parsing）每个创建专用破限模板（含 LOW/MID/HIGH 三档，按流程风格定制），运行时按配置作为 system 消息前置到 messages 开头；在【端点流程配置】对话框为 6 个非正文流程增加破限等级下拉（关闭/低/中/高/自定义）+ 自定义文本编辑入口。
