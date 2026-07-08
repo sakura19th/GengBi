@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QVBoxLayout,
@@ -126,6 +127,8 @@ class ContinuationPanel(QWidget):
         self._current_swipe: Continuation | None = None
         self._all_swipes: list[Continuation] = []
         self._chunk_buffer: list[str] = []  # 待刷新的 chunk 缓冲
+        # 端点→上次手动选择的模型（会话记忆，不持久化；切换端点时恢复）
+        self._last_model_per_endpoint: dict[str, str] = {}
 
         # Volume 面板（卷续写，由 show_volume_panel 控制显隐）
         self._volume_panel = VolumePanel()
@@ -174,11 +177,15 @@ class ContinuationPanel(QWidget):
 
         # 端点选择
         self._endpoint_combo = QComboBox()
+        self._endpoint_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._endpoint_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         config_form.addRow("API 端点:", self._endpoint_combo)
 
         # 模型选择（不可编辑，自动从端点填充）
         self._model_combo = QComboBox()
         self._model_combo.setEditable(False)
+        self._model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._model_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         config_form.addRow("模型:", self._model_combo)
 
         # 温度
@@ -328,6 +335,8 @@ class ContinuationPanel(QWidget):
         self._compare_btn.clicked.connect(self.compare_swipes.emit)
         # 端点切换时自动更新模型
         self._endpoint_combo.currentIndexChanged.connect(self._on_endpoint_changed)
+        # 用户手动切换模型时记录会话记忆（程序化填充用 blockSignals 屏蔽）
+        self._model_combo.currentIndexChanged.connect(self._on_model_user_changed)
         # 模式切换
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
 
@@ -348,28 +357,53 @@ class ContinuationPanel(QWidget):
                 self._endpoint_combo.setCurrentIndex(self._endpoint_combo.count() - 1)
 
     def set_models(self, models: list[str]) -> None:
-        """设置模型列表。"""
-        current = self._model_combo.currentText()
+        """填充模型下拉框（按名称排序）。
+
+        仅负责清空 + 填充，不处理选中；选中由调用方（``_on_endpoint_changed``）决定。
+        填充期间 ``blockSignals`` 防止触发 ``_on_model_user_changed`` 误记录会话记忆。
+        """
+        self._model_combo.blockSignals(True)
         self._model_combo.clear()
-        for m in models:
+        for m in sorted(models):
             self._model_combo.addItem(m)
-        if current:
-            idx = self._model_combo.findText(current)
-            if idx >= 0:
-                self._model_combo.setCurrentIndex(idx)
+        self._model_combo.blockSignals(False)
 
     def _on_endpoint_changed(self, index: int) -> None:
-        """端点切换时自动更新模型列表。"""
+        """端点切换时自动更新模型列表（仅显示该端点已启用模型）。"""
         if index < 0:
             return
         endpoint = self._endpoint_combo.itemData(index)
         if not endpoint:
             return
+        enabled = endpoint.get("enabled_models") or []
+        all_models = endpoint.get("models") or []
         default_model = endpoint.get("default_model", "")
-        if default_model:
-            self.set_models([default_model])
-        else:
+        # 回退链：enabled_models → models → [default_model]（旧端点兼容）
+        models_to_show = enabled or all_models or ([default_model] if default_model else [])
+        if not models_to_show:
+            self._model_combo.blockSignals(True)
             self._model_combo.clear()
+            self._model_combo.blockSignals(False)
+            return
+        self.set_models(models_to_show)
+        # 选中：该端点上次手动选择的模型 → 否则首个
+        ep_id = endpoint.get("id", "")
+        last = self._last_model_per_endpoint.get(ep_id, "")
+        idx = self._model_combo.findText(last) if last else -1
+        if idx < 0:
+            idx = 0
+        self._model_combo.blockSignals(True)
+        self._model_combo.setCurrentIndex(idx)
+        self._model_combo.blockSignals(False)
+
+    def _on_model_user_changed(self, _index: int) -> None:
+        """用户手动切换模型时记录会话记忆（每端点记住上次选择）。"""
+        ep = self.get_selected_endpoint()
+        if not ep:
+            return
+        text = self._model_combo.currentText()
+        if text:
+            self._last_model_per_endpoint[ep.get("id", "")] = text
 
     # ===== 模式管理 =====
 

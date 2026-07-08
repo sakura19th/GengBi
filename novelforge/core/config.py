@@ -10,6 +10,8 @@
         "api_endpoints": [
             {"id": str, "name": str, "base_url": str,
              "api_key_encrypted": str, "default_model": str,
+             "models": list[str],  # 全部已获取模型列表
+             "enabled_models": list[str],  # 续写面板可选模型子集；default_model 为后台流程回退（自动取首个已启用）
              "reasoning_effort": str}
         ],
         "default_endpoint_id": str,
@@ -307,6 +309,8 @@ class ConfigManager:
             endpoint.setdefault("base_url", "")
             endpoint.setdefault("api_key_encrypted", "")
             endpoint.setdefault("default_model", "")
+            endpoint.setdefault("models", [])
+            endpoint.setdefault("enabled_models", [])
             endpoint.setdefault("reasoning_effort", "")
 
             self.config.setdefault("api_endpoints", []).append(endpoint)

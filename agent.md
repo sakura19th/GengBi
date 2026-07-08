@@ -35,7 +35,7 @@ novelforge/
 │   ├── macros.py            # ST 宏引擎（{{user}}、{{char}} 等 11 内置宏 + setvar/getvar 四作用域）
 │   ├── variable_store.py    # 变量存储（global/project/chapter/cache 四作用域）
 │   ├── json_utils.py        # JSON 解析工具
-│   ├── config.py            # 配置管理（API 端点、密钥加密、flow_endpoints 流程端点映射）
+│   ├── config.py            # 配置管理（API 端点含 models 全部列表 + enabled_models 启用子集 + default_model 后台流程回退、密钥加密、flow_endpoints 流程端点映射）
 │   └── storage.py           # SQLite 异步存储层（外键 CASCADE；列迁移函数；list_chapters 检测 DB 缺章自动从磁盘重建）
 ├── services/        # 业务服务
 │   ├── context_extractor.py     # 上下文提取（多批次 token 拆分 + 【信息汇总】合并；主角形象独立链路 extract_protagonist_streaming，独立缓存 key 前缀 protagonist:）
@@ -44,7 +44,7 @@ novelforge/
 │   ├── audit_worker.py          # 单章续写审计 worker（流式 stream_chat_completion，低温稳定输出）
 │   ├── custom_audit_rule_service.py  # 自定义设定结构化解析（parse_rule_streaming，AI 结合世界观+上下文结构化为 requirement+audit_criteria）
 │   ├── volume_orchestrator.py   # 卷级多章节续写编排器（QThread+asyncio，7 阶段流程 + 暂停点 + 调试模式）
-│   ├── llm_client.py            # LLM 客户端（流式 + 非流式）
+│   ├── llm_client.py            # LLM 客户端（流式 + 非流式；reasoning_effort 按模型映射——Gemini 仅支持 low/medium/high，auto 不发送、minimal→low、max→high）
 │   ├── preset_service.py        # 预设管理（reset_default_preset 同步内置最新版）
 │   ├── regex_service.py         # 正则脚本管理（global/scoped/preset）
 │   ├── importer.py              # TXT 导入与章节拆分
@@ -54,7 +54,7 @@ novelforge/
 │   └── storage_service.py       # 存储服务（项目/章节/续写 CRUD；update_chapter_index 仅更新 index 列不写文件）
 ├── ui/              # UI 组件（PySide6）
 │   ├── main_window.py           # 主窗口（5 栏 QSplitter + 主题管理 + 调试菜单；ont/protagonist/custom_rule 提取信号处理；续写/审计/重写三模式接线；章节切换状态保留 7 缓冲字段）
-│   ├── continuation_panel.py    # 续写控制面板（三模式下拉；输出框右键 4 色高亮 + 备注；highlights_changed 信号持久化）
+│   ├── continuation_panel.py    # 续写控制面板（三模式下拉；端点/模型下拉框 AdjustToContents 自适应宽度；端点切换按 enabled_models 填充模型下拉并按名称排序，会话记忆每端点上次手动选择模型；输出框右键 4 色高亮 + 备注；highlights_changed 信号持久化）
 │   ├── volume_panel.py          # 卷续写控制面板（配置/两层进度/五 Tab 产物查看/流式区）
 │   ├── context_preview_panel.py # 上下文提取预览面板（ontology/protagonist/custom_rule 三类提取按钮互斥 + 流式展示）
 │   ├── chapter_list.py          # 章节列表（虚拟滚动/搜索/右键菜单；当前选中章节持续高亮——ChapterHighlightDelegate 自定义 QStyledItemDelegate 在 paint() 中 fillRect 绕开 QSS 选中态覆盖）
@@ -68,18 +68,18 @@ novelforge/
 │   ├── preset_manager.py        # 预设管理器（7 按钮；6 生成参数含 reasoning_effort 5 档）
 │   ├── regex_manager.py         # 正则管理器（内联勾选即时持久化）
 │   ├── worldbook_manager.py     # 世界书管理器（条目级 enabled 开关）
-│   ├── settings_dialog.py       # 设置对话框（API 端点管理；reasoning_effort 7 档）
+│   ├── settings_dialog.py       # 设置对话框（API 端点管理含 models 全部列表 + enabled_models 可勾选多选 QListWidget + 全选/全不选/自定义模型录入、复制端点；default_model 自动取首个已启用供后台流程；reasoning_effort 7 档；ModelFetchWorker finished→deleteLater 自清理 + closeEvent 防御式 isRunning 访问避免 wrapper 失效 RuntimeError）
 │   ├── flow_endpoint_dialog.py  # 流程端点配置（8 流程端点映射 + 6 非正文流程破限等级下拉 off/low/mid/high/custom + 自定义文本编辑入口）
 │   ├── jailbreak_custom_dialog.py # 自定义破限文本编辑对话框（QPlainTextEdit + 确定/取消）
 │   ├── font_settings.py / history_panel.py / project_panel.py / template_editor.py / worldbook_panel.py / dialogs.py / flow_layout.py / wheel_filter.py
 │   └── ...
 └── resources/       # 资源文件
     ├── defaults/
-    │   ├── default_preset.json     # 默认写作预设（20 条分层模块：main/抗八股/抗重复/字数/文风互斥/推进互斥/思维链/破限层 4 套互斥+助手预填充/Marker；破限默认全关；nf_jb_* 已前置到 main 之前定调；nf_jb_high 含 NSFW 指引覆盖原 nf_nsfw；防全知硬约束贯穿 core_rules/anti_bagua/cot/main）
-    │   ├── jailbreaks/                # 非正文流程破限模板（6 个 jb_*.txt，每文件含 ### LOW/MID/HIGH ### 三档）
+    │   ├── default_preset.json     # 默认写作预设（20 条分层模块：main/抗八股/抗重复/字数/文风互斥/推进互斥/思维链/破限层 4 套互斥+助手预填充/Marker；破限默认全关；nf_jb_* 已前置到 main 之前定调；nf_jb_high 含 NSFW 指引覆盖原 nf_nsfw；防全知硬约束贯穿 core_rules/anti_bagua/cot/main；nf_core_rules 集成基线轻度破限【创作自由基准】+ 第 8 条用户指令遵从/不引入意外内容；nf_cot 第 7 项用户指令遵从检查；main 含【续写约束】段）
+    │   ├── jailbreaks/                # 非正文流程破限模板（6 个 jb_*.txt，每文件含 ### LOW/MID/HIGH ### 三档；已全面深化：LOW=认知修正、MID=授权自由、HIGH=沙盒解放，含内部审查对抗锚点）
     │   ├── default_regex_scripts.json  # 4 条默认正则（思维链隐藏/八股抹除/破折号规范/空行清理）
     │   ├── extract_prompt.txt / extract_merge_prompt.txt  # 上下文提取 + 汇总环节
-    │   └── agent/                   # 续写阶段提示词模板（phase_*.txt）
+    │   └── agent/                   # 续写阶段提示词模板（phase_*.txt；已加入严格遵循用户指令/不引入意外内容约束）
     │       ├── phase_verify.txt          # 16 维度验证（含 4 个一票否决 + rigid_ai_text 严格给分；认知越界检查 7 条含信息传递路径/元词汇/剧情奴隶化）
     │       ├── phase_custom_rule_parse.txt # 自定义设定结构化解析
     │       ├── phase_revise.txt / phase_chapter_rewrite.txt / phase_audit_rewrite.txt  # 修订/重写（audit_rewrite 为统一模板取代 chapter_rewrite）
@@ -109,6 +109,7 @@ novelforge/
 ### 3. 提取与续写解耦
 
 - 上下文提取是独立步骤：用户先提取，确认结果后再续写；提取用流式不阻塞 UI
+- **提取非强制**：续写/重写前检查上下文条目/世界观底层/主角形象三项未提取状态，弹合并提示对话框询问「是否继续不提取生成？」；用户选「继续」则放行（entries=[]、ontology=None、protagonist=None 照常透传，降级为空串或占位文字），选「取消」则 return
 - **多批次【信息汇总】**：前文超 token_limit 按章节边界拆批，每批独立全量提取；batch_count>1 触发 LLM 合并去重，失败降级 best-effort
 - **批次级自动重试**：每批次失败立即重试 1 次（温度归零），2 次均失败才中止；CancelledError 不重试
 - **世界观底层提取**（OntologyExtractor）：全文提取 WorldOntology 7 大维度固化到 Project.world_ontology（全文一次不随章节变）；镜像 ContextExtractor 三大机制
@@ -215,7 +216,7 @@ novelforge/
 
 ### 15. 流程破限配置
 
-- **正文流程**（single_continuation/volume_continuation）：破限由预设管理器勾选 `nf_jb_*` 模块控制（现有机制不变）；`default_preset.json` 的 `prompt_order` 中 5 个 `nf_jb_*` 已前置到 `main` 之前，使破限 system 消息在组装后位于「你是一位专业的小说续写助手」之前定调。`nf_jb_prefill` 虽移到 order 前列但它是 ABSOLUTE 注入（`injection_position=1, injection_depth=0`），仍按深度规则注入到末尾，行为不变
+- **正文流程**（single_continuation/volume_continuation）：破限由预设管理器勾选 `nf_jb_*` 模块控制（现有机制不变）；`default_preset.json` 的 `prompt_order` 中 5 个 `nf_jb_*` 已前置到 `main` 之前，使破限 system 消息在组装后位于「你是一位专业的小说续写助手」之前定调。`nf_jb_prefill` 虽移到 order 前列但它是 ABSOLUTE 注入（`injection_position=1, injection_depth=0`），仍按深度规则注入到末尾，行为不变。`nf_core_rules` 续写核心准则之首集成基线轻度破限【创作自由基准】（常开：用户至上+创作无禁区+拒绝即失职+非评判+不回避），作为始终生效的底色；`nf_jb_*` 为用户可选的更强增强档位（LOW=认知修正、MID=授权自由、HIGH=沙盒解放，含内部审查对抗）
 - **非正文流程**（6 个：single_audit/rewrite_analysis/context_extraction/ontology_extraction/protagonist_extraction/custom_rule_parsing）：每个流程在 `resources/defaults/jailbreaks/jb_{flow}.txt` 有专用模板（含 `### LOW/MID/HIGH ###` 三档，按流程风格定制：提取类强调不拒绝敏感分析、审计类强调诚实批判不软化、重写分析强调不拒绝敏感重写需求、自定义设定解析强调接受任何黑暗设定）；运行时由 `JailbreakProvider.get_jailbreak(flow, level)` 返回文本，作为 `{"role":"system","content":jb_text}` 前置到 messages 开头（空文本不注入）；提取类流程的合并子调用复用同流程破限参数
 - **配置入口**：`FlowEndpointDialog` 在端点配置下方新增「破限配置（非正文流程）」分组，仅对 6 个非正文流程显示等级下拉（关闭/低/中/高/自定义）+「编辑自定义」按钮（仅 custom 时启用，弹 `JailbreakCustomDialog` 编辑）；正文流程不显示（由预设管理器控制）
 - **默认等级**：提取类三个流程（context/ontology/protagonist）默认 `low`（提取敏感小说内容不被拒绝），其余默认 `off`；自定义文本优先于等级模板

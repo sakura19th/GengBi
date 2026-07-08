@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -183,18 +184,44 @@ class EndpointEditDialog(QDialog):
 
         form.addRow("API Key:", key_layout)
 
-        # 模型选择区
-        model_layout = QHBoxLayout()
-        self._model_combo = QComboBox()
-        self._model_combo.setEditable(True)
-        self._model_combo.setMinimumWidth(200)
-        model_layout.addWidget(self._model_combo)
+        # 模型选择区：可勾选列表（多选启用模型）+ 获取/全选/全不选 + 自定义录入
+        model_group = QGroupBox("可用模型")
+        model_layout = QVBoxLayout(model_group)
+        model_layout.setContentsMargins(2, 2, 2, 2)
+        model_layout.setSpacing(2)
 
+        self._model_list = QListWidget()
+        self._model_list.setMinimumHeight(120)
+        self._model_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        model_layout.addWidget(self._model_list)
+
+        # 按钮行：获取模型列表 / 全选 / 全不选
+        btn_row = QHBoxLayout()
         self._fetch_models_btn = QPushButton("获取模型列表")
         self._fetch_models_btn.clicked.connect(self._on_fetch_models)
-        model_layout.addWidget(self._fetch_models_btn)
+        btn_row.addWidget(self._fetch_models_btn)
 
-        form.addRow("默认模型:", model_layout)
+        self._select_all_btn = QPushButton("全选")
+        self._select_all_btn.clicked.connect(self._on_select_all_models)
+        btn_row.addWidget(self._select_all_btn)
+
+        self._deselect_all_btn = QPushButton("全不选")
+        self._deselect_all_btn.clicked.connect(self._on_deselect_all_models)
+        btn_row.addWidget(self._deselect_all_btn)
+        btn_row.addStretch()
+        model_layout.addLayout(btn_row)
+
+        # 自定义模型录入（保留手动添加能力，避免回归）
+        custom_row = QHBoxLayout()
+        self._custom_model_edit = QLineEdit()
+        self._custom_model_edit.setPlaceholderText("手动添加模型名（如自定义端点无 /models）")
+        custom_row.addWidget(self._custom_model_edit)
+        self._add_custom_btn = QPushButton("添加")
+        self._add_custom_btn.clicked.connect(self._on_add_custom_model)
+        custom_row.addWidget(self._add_custom_btn)
+        model_layout.addLayout(custom_row)
+
+        form.addRow("可用模型:", model_group)
 
         # 思考强度（reasoning_effort）：OpenAI o 系列/DeepSeek V4 等兼容网关支持
         self._reasoning_effort_combo = QComboBox()
@@ -227,7 +254,16 @@ class EndpointEditDialog(QDialog):
             return
         self._name_edit.setText(self._endpoint.get("name", ""))
         self._url_edit.setText(self._endpoint.get("base_url", ""))
-        self._model_combo.addItem(self._endpoint.get("default_model", ""))
+        # 模型列表：全部已获取 models（回退到 default_model）；勾选状态由 enabled_models 决定
+        saved_models = self._endpoint.get("models") or []
+        default_model = self._endpoint.get("default_model", "")
+        enabled_models = self._endpoint.get("enabled_models") or []
+        if not saved_models and default_model:
+            saved_models = [default_model]
+        # 勾选规则：enabled_models 非空→勾选其中的；为空→全部勾选（旧端点兼容）
+        checked_set = set(enabled_models) if enabled_models else set(saved_models)
+        for m in sorted(saved_models):
+            self._add_model_list_item(m, checked=m in checked_set)
         # 解密 API Key（用于显示和获取模型列表）
         endpoint_id = self._endpoint.get("id", "")
         if endpoint_id:
@@ -245,13 +281,20 @@ class EndpointEditDialog(QDialog):
 
     def closeEvent(self, event) -> None:
         """关闭对话框时清理模型获取线程，避免回调到已销毁的 UI。"""
-        if self._model_fetch_worker and self._model_fetch_worker.isRunning():
+        worker = self._model_fetch_worker
+        if worker is not None:
             try:
-                self._model_fetch_worker.models_fetched.disconnect()
-                self._model_fetch_worker.error.disconnect()
-            except (RuntimeError, TypeError):
-                pass  # 信号可能已断开
-            # worker parent=None + finished→deleteLater，可安全在后台完成并自清理
+                still_running = worker.isRunning()
+            except RuntimeError:
+                # finished→deleteLater 已删除 C++ 对象，Python wrapper 失效
+                still_running = False
+            if still_running:
+                try:
+                    worker.models_fetched.disconnect()
+                    worker.error.disconnect()
+                except (RuntimeError, TypeError):
+                    pass  # 信号可能已断开
+                # worker parent=None + finished→deleteLater，可安全在后台完成并自清理
         super().closeEvent(event)
 
     def _on_toggle_key_visible(self, checked: bool) -> None:
@@ -303,20 +346,57 @@ class EndpointEditDialog(QDialog):
         self._fetch_models_btn.setEnabled(True)
         self._fetch_models_btn.setText("获取模型列表")
 
-        current = self._model_combo.currentText()
-        self._model_combo.clear()
-        for m in models:
-            self._model_combo.addItem(m)
-        if current:
-            idx = self._model_combo.findText(current)
-            if idx >= 0:
-                self._model_combo.setCurrentIndex(idx)
-            else:
-                self._model_combo.insertItem(0, current)
-                self._model_combo.setCurrentIndex(0)
+        # 记录现有勾选状态（拉取前已勾选的模型保留勾选）
+        checked_set = {
+            self._model_list.item(i).text()
+            for i in range(self._model_list.count())
+            if self._model_list.item(i).checkState() == Qt.CheckState.Checked
+        }
+        self._model_list.clear()
+        for m in sorted(models):
+            # 已勾选的保留勾选；新模型默认勾选（拉取即可用）
+            self._add_model_list_item(m, checked=True)
+        # 恢复旧勾选状态（取消之前未勾选的）
+        if checked_set:
+            for i in range(self._model_list.count()):
+                it = self._model_list.item(i)
+                if it.text() not in checked_set:
+                    it.setCheckState(Qt.CheckState.Unchecked)
 
         if not models:
             QMessageBox.information(self, "提示", "未获取到模型列表")
+
+    def _add_model_list_item(self, name: str, checked: bool = True) -> None:
+        """向模型列表追加一个可勾选项。"""
+        name = (name or "").strip()
+        if not name:
+            return
+        # 去重
+        for i in range(self._model_list.count()):
+            if self._model_list.item(i).text() == name:
+                return
+        item = QListWidgetItem(name)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked)
+        self._model_list.addItem(item)
+
+    def _on_select_all_models(self) -> None:
+        """全选模型。"""
+        for i in range(self._model_list.count()):
+            self._model_list.item(i).setCheckState(Qt.CheckState.Checked)
+
+    def _on_deselect_all_models(self) -> None:
+        """全不选模型。"""
+        for i in range(self._model_list.count()):
+            self._model_list.item(i).setCheckState(Qt.CheckState.Unchecked)
+
+    def _on_add_custom_model(self) -> None:
+        """手动添加自定义模型名（默认勾选）。"""
+        name = self._custom_model_edit.text().strip()
+        if not name:
+            return
+        self._add_model_list_item(name, checked=True)
+        self._custom_model_edit.clear()
 
     def _on_fetch_error(self, error: str) -> None:
         """模型列表获取失败。"""
@@ -347,12 +427,26 @@ class EndpointEditDialog(QDialog):
         elif self._decrypted_key:
             api_key = self._decrypted_key
 
+        # 收集模型列表：全部 item = models；勾选项 = enabled_models
+        # default_model 自动取首个已启用（sorted），供后台流程回退
+        models: list[str] = []
+        enabled_models: list[str] = []
+        for i in range(self._model_list.count()):
+            m = self._model_list.item(i).text().strip()
+            if m and m not in models:
+                models.append(m)
+            if self._model_list.item(i).checkState() == Qt.CheckState.Checked and m and m not in enabled_models:
+                enabled_models.append(m)
+        default_model = sorted(enabled_models)[0] if enabled_models else ""
+
         self._result = {
             "id": self._endpoint.get("id", f"ep_{os.urandom(4).hex()}"),
             "name": name,
             "base_url": base_url,
             "api_key": api_key,  # 明文，由 ConfigManager 加密
-            "default_model": self._model_combo.currentText().strip(),
+            "default_model": default_model,
+            "models": models,
+            "enabled_models": enabled_models,
             "reasoning_effort": self._reasoning_effort_combo.currentData(),
             "is_default": self._default_check.isChecked(),
         }
@@ -412,18 +506,20 @@ class SettingsDialog(QDialog):
 
         # 端点列表
         self._endpoint_list = QListWidget()
-        api_layout.addWidget(self._endpoint_list, 0, 0, 4, 1)
+        api_layout.addWidget(self._endpoint_list, 0, 0, 5, 1)
 
         # 按钮栏
         self._add_btn = QPushButton("新建")
         self._edit_btn = QPushButton("编辑")
         self._delete_btn = QPushButton("删除")
         self._set_default_btn = QPushButton("设为默认")
+        self._duplicate_btn = QPushButton("复制")
 
         api_layout.addWidget(self._add_btn, 0, 1)
         api_layout.addWidget(self._edit_btn, 1, 1)
         api_layout.addWidget(self._delete_btn, 2, 1)
         api_layout.addWidget(self._set_default_btn, 3, 1)
+        api_layout.addWidget(self._duplicate_btn, 4, 1)
 
         layout.addWidget(api_group)
 
@@ -519,6 +615,7 @@ class SettingsDialog(QDialog):
         self._edit_btn.clicked.connect(lambda: self._on_edit_endpoint())
         self._delete_btn.clicked.connect(self._on_delete_endpoint)
         self._set_default_btn.clicked.connect(self._on_set_default)
+        self._duplicate_btn.clicked.connect(self._on_duplicate_endpoint)
         self._endpoint_list.itemDoubleClicked.connect(self._on_edit_endpoint)
 
     def _load_endpoints(self) -> None:
@@ -535,7 +632,8 @@ class SettingsDialog(QDialog):
                 f"名称: {name}\n"
                 f"URL: {ep.get('base_url', '')}\n"
                 f"API Key: {mask_api_key(ep.get('api_key_encrypted', ''))}\n"
-                f"默认模型: {ep.get('default_model', '未设置')}\n"
+                f"已启用模型: {len(ep.get('enabled_models', []) or [])} 个"
+                f"（默认: {ep.get('default_model', '未设置')}）\n"
                 f"思考强度: {ep.get('reasoning_effort', '') or '不发送'}"
             )
             self._endpoint_list.addItem(item)
@@ -591,6 +689,49 @@ class SettingsDialog(QDialog):
         ep = item.data(Qt.ItemDataRole.UserRole)
         self._config_manager.set_default_endpoint(ep.get("id"))
         self._load_endpoints()
+
+    def _on_duplicate_endpoint(self) -> None:
+        """复制当前选中的端点配置。"""
+        item = self._endpoint_list.currentItem()
+        if item is None:
+            QMessageBox.information(self, "提示", "请先选择一个端点。")
+            return
+        ep = item.data(Qt.ItemDataRole.UserRole)
+        if not ep:
+            return
+
+        from PySide6.QtWidgets import QInputDialog
+
+        default_name = f"{ep.get('name', '')} 副本"
+        name, ok = QInputDialog.getText(
+            self, "复制端点", "新端点名称:", text=default_name,
+        )
+        if not ok or not name.strip():
+            return
+
+        # 深拷贝端点数据，生成新 ID，复用 api_key_encrypted 密文
+        new_ep = {
+            "id": f"ep_{os.urandom(4).hex()}",
+            "name": name.strip(),
+            "base_url": ep.get("base_url", ""),
+            "api_key_encrypted": ep.get("api_key_encrypted", ""),
+            "default_model": ep.get("default_model", ""),
+            "models": list(ep.get("models", [])),
+            "enabled_models": list(ep.get("enabled_models", [])),
+            "reasoning_effort": ep.get("reasoning_effort", ""),
+            "is_default": False,
+        }
+        try:
+            self._config_manager.add_endpoint(new_ep)
+            self._load_endpoints()
+            # 选中新复制的端点
+            for i in range(self._endpoint_list.count()):
+                it = self._endpoint_list.item(i)
+                if it.data(Qt.ItemDataRole.UserRole).get("id") == new_ep["id"]:
+                    self._endpoint_list.setCurrentRow(i)
+                    break
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"复制端点失败: {e}")
 
     def _on_open_font_settings(self) -> None:
         """打开字体设置对话框。"""

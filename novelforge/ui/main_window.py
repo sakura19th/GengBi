@@ -1051,6 +1051,38 @@ class MainWindow(QMainWindow):
             merged.append(e)
         return merged
 
+    def _prompt_continue_without_extraction(
+        self,
+        entries: list,
+        world_ontology,
+        protagonist_profile,
+    ) -> bool:
+        """检查上下文/世界观/主角是否未提取，弹合并提示对话框。
+
+        返回 True 表示用户选择继续不提取生成，False 表示取消。
+        """
+        missing = []
+        if not entries:
+            missing.append("上下文条目")
+        if world_ontology is None:
+            missing.append("世界观底层")
+        if protagonist_profile is None:
+            missing.append("主角形象")
+
+        if not missing:
+            return True  # 全部已提取，直接放行
+
+        missing_text = "、".join(missing)
+        reply = QMessageBox.question(
+            self, "提取提示",
+            f"以下内容尚未提取：{missing_text}\n\n"
+            f"未提取的内容将以空值或占位文字参与生成，可能影响续写质量。\n"
+            f"是否继续不提取生成？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
     def _apply_continuation_defaults(self) -> None:
         """从 config 加载上次的续写参数（温度/回溯章节数）到面板。"""
         try:
@@ -1588,24 +1620,19 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请选择模型")
             return
 
-        # ===== M4: 上下文提取（已解耦：用户需先点击"提取上下文"按钮）=====
+        # ===== M4: 上下文提取（已解耦：用户可先点击"提取上下文"按钮）=====
         context_panel = self.continuation_panel.context_preview_panel
         raw_entries = getattr(self, "_current_context_entries", None)
         # 合并全局世界书条目（uid 冲突时世界书优先）
         entries = self._merge_worldbook_entries(raw_entries)
-        if not entries:
-            # 用户未提取且未启用世界书，提示先提取
-            QMessageBox.information(
-                self, "提示",
-                "请先在上下文提取预览区点击\"提取上下文\"按钮，\n"
-                "或启用一个全局世界书后再开始续写。",
-            )
-            return
-
-        # 加载项目对象
+        # 加载项目对象（用于检查世界观/主角是否已提取）
         project = None
         if self._current_project_id:
             project = self.storage_service.load_project(self._current_project_id)
+        wo_for_check = project.world_ontology if project else None
+        pp_for_check = self._protagonist_profile_by_chapter.get(self._current_chapter.id) if self._current_chapter else None
+        if not self._prompt_continue_without_extraction(entries, wo_for_check, pp_for_check):
+            return
 
         # 确保章节正文已加载（list_chapters 只加载元数据）
         self._ensure_chapter_contents()
@@ -1865,22 +1892,18 @@ class MainWindow(QMainWindow):
         # 获取 VolumeRunConfig
         config = self.continuation_panel.get_volume_config()
 
-        # 上下文条目（与 agent 模式一致，提示用户先提取）
+        # 上下文条目（与 agent 模式一致，提示用户可先提取）
         raw_entries = getattr(self, "_current_context_entries", None)
         # 合并全局世界书条目（uid 冲突时世界书优先）
         entries = self._merge_worldbook_entries(raw_entries)
-        if not entries:
-            QMessageBox.information(
-                self, "提示",
-                "请先在上下文提取预览区点击\"提取上下文\"按钮，\n"
-                "或启用一个全局世界书后再开始卷续写。",
-            )
-            return
-
-        # 加载项目对象
+        # 加载项目对象（用于检查世界观/主角是否已提取）
         project = None
         if self._current_project_id:
             project = self.storage_service.load_project(self._current_project_id)
+        wo_for_check = project.world_ontology if project else None
+        pp_for_check = self._protagonist_profile_by_chapter.get(self._current_chapter.id) if self._current_chapter else None
+        if not self._prompt_continue_without_extraction(entries, wo_for_check, pp_for_check):
+            return
 
         # 确保章节正文已加载（list_chapters 只加载元数据）
         self._ensure_chapter_contents()
@@ -4188,18 +4211,14 @@ class MainWindow(QMainWindow):
         # 上下文条目（重写模式下用户已用 exclude_current=True 提取，不含当前章节）
         raw_entries = getattr(self, "_current_context_entries", None)
         entries = self._merge_worldbook_entries(raw_entries)
-        if not entries:
-            QMessageBox.information(
-                self, "提示",
-                "请先在上下文提取预览区点击\"提取上下文\"按钮，\n"
-                "或启用一个全局世界书后再开始重写。",
-            )
-            return
-
-        # 加载项目对象
+        # 加载项目对象（用于检查世界观/主角是否已提取）
         project = None
         if self._current_project_id:
             project = self.storage_service.load_project(self._current_project_id)
+        wo_for_check = project.world_ontology if project else None
+        pp_for_check = self._protagonist_profile_by_chapter.get(self._current_chapter.id) if self._current_chapter else None
+        if not self._prompt_continue_without_extraction(entries, wo_for_check, pp_for_check):
+            return
 
         # 确保章节正文已加载
         self._ensure_chapter_contents()
@@ -4379,11 +4398,9 @@ class MainWindow(QMainWindow):
         # 重新合并 entries（避免中途变化）
         raw_entries = getattr(self, "_current_context_entries", None)
         entries = self._merge_worldbook_entries(raw_entries)
-        if not entries:
-            QMessageBox.information(
-                self, "提示",
-                "上下文条目为空，无法生成。请先提取上下文或启用世界书。",
-            )
+        wo_for_check = project.world_ontology if project else None
+        pp_for_check = self._protagonist_profile_by_chapter.get(rewrite_cid) if rewrite_cid else None
+        if not self._prompt_continue_without_extraction(entries, wo_for_check, pp_for_check):
             self._rewrite_current_chapter_id = None
             return
 

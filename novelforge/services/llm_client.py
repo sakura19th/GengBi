@@ -141,6 +141,39 @@ class LLMClient:
         # 复用的 aiohttp.ClientSession（懒加载，绑定到首次使用的事件循环）
         self._session: aiohttp.ClientSession | None = None
 
+    @staticmethod
+    def _is_gemini_model(model: str) -> bool:
+        """检测是否为 Gemini 模型（通过模型名判断）。"""
+        return "gemini" in model.lower()
+
+    def _resolve_reasoning_effort_for_payload(self, model: str) -> str | None:
+        """解析适用于当前模型的 reasoning_effort 值。
+
+        Gemini 模型的 thinking_level 仅支持 low/medium/high，
+        其他值（auto/minimal/max）需映射或不发送。
+
+        Returns:
+            映射后的值，或 None 表示不写入 payload
+        """
+        if not self.reasoning_effort or self.reasoning_effort.lower() in {"", "none", "off"}:
+            return None
+
+        effort = self.reasoning_effort.lower()
+
+        if self._is_gemini_model(model):
+            # Gemini thinking_level 仅支持 low/medium/high
+            gemini_map: dict[str, str | None] = {
+                "low": "low",
+                "medium": "medium",
+                "high": "high",
+                "minimal": "low",   # 降级到 low
+                "max": "high",      # 降级到 high
+                "auto": None,       # 不发送，让 Gemini 用默认
+            }
+            return gemini_map.get(effort)
+
+        return effort
+
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取复用的 aiohttp.ClientSession（懒加载）。
 
@@ -202,9 +235,10 @@ class LLMClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
-        # 思考强度：非空且不属于禁用集合时写入 payload
-        if self.reasoning_effort and self.reasoning_effort.lower() not in {"", "none", "off"}:
-            payload["reasoning_effort"] = self.reasoning_effort
+        # 思考强度：根据模型类型解析（Gemini 等模型需映射不支持的值）
+        effort = self._resolve_reasoning_effort_for_payload(model)
+        if effort:
+            payload["reasoning_effort"] = effort
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -428,9 +462,10 @@ class LLMClient:
             "top_p": top_p,
             "max_tokens": max_tokens,
         }
-        # 思考强度：非空且不属于禁用集合时写入 payload
-        if self.reasoning_effort and self.reasoning_effort.lower() not in {"", "none", "off"}:
-            payload["reasoning_effort"] = self.reasoning_effort
+        # 思考强度：根据模型类型解析（Gemini 等模型需映射不支持的值）
+        effort = self._resolve_reasoning_effort_for_payload(model)
+        if effort:
+            payload["reasoning_effort"] = effort
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
