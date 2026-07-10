@@ -85,6 +85,7 @@ def get_default_config() -> dict[str, Any]:
         "api_endpoints": [],
         "default_endpoint_id": "",
         "flow_endpoints": {},  # {flow_key: endpoint_id}，未配置的流程回退默认端点
+        "flow_models": {},  # {flow_key: model_str}，未配置或空串回退端点 default_model
         "flow_jailbreaks": {},  # {flow_key: level_str}，未配置回退 FLOW_DEFAULT_JAILBREAKS
         "flow_jailbreaks_custom": {},  # {flow_key: custom_text}，空串=用等级模板
         "appearance": {
@@ -385,6 +386,46 @@ class ConfigManager:
         """
         with self._lock:
             self.config["flow_endpoints"] = mapping
+            self.save()
+
+    # ===== 流程模型配置 =====
+
+    def get_flow_models(self) -> dict[str, str]:
+        """获取流程模型映射 ``{flow_key: model_str}``，未配置返回 ``{}``。"""
+        return self.config.get("flow_models", {})
+
+    def get_flow_model(self, flow_key: str) -> str:
+        """解析流程使用的模型。
+
+        优先读 ``flow_models[flow_key]``，非空则返回；否则回退到
+        ``get_flow_endpoint(flow_key)`` 的 ``default_model``；端点也无则返回空串。
+
+        Args:
+            flow_key: 流程标识（如 ``single_continuation``/``context_extraction``）；
+                空串则用默认端点的 default_model
+
+        Returns:
+            模型名字符串，空串表示无可用模型
+        """
+        mapping = self.config.get("flow_models", {})
+        model = mapping.get(flow_key, "")
+        if model:
+            return model
+        ep = (
+            self.get_flow_endpoint(flow_key)
+            if flow_key
+            else self.get_default_endpoint()
+        )
+        return ep.get("default_model", "") if ep else ""
+
+    def set_flow_models(self, mapping: dict[str, str]) -> None:
+        """保存流程模型映射并持久化。
+
+        Args:
+            mapping: ``{flow_key: model_str}``，model_str 为空串表示用端点 default_model
+        """
+        with self._lock:
+            self.config["flow_models"] = mapping
             self.save()
 
     # ===== 流程破限配置 =====

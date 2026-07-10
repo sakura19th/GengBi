@@ -519,6 +519,27 @@ class ContinuationPanel(QWidget):
                 self._endpoint_combo.setCurrentIndex(i)
                 return
 
+    def select_model_by_name(self, model: str) -> None:
+        """按模型名选中模型下拉项，未找到则保持当前选中。
+
+        供 ``_refresh_endpoints`` 同步流程配置模型到面板。用 ``blockSignals``
+        屏蔽 ``_on_model_user_changed``，避免同步操作被误记为会话记忆。
+
+        Args:
+            model: 目标模型名
+        """
+        if not model:
+            return
+        idx = self._model_combo.findText(model)
+        if idx >= 0:
+            self._model_combo.blockSignals(True)
+            self._model_combo.setCurrentIndex(idx)
+            self._model_combo.blockSignals(False)
+
+    def get_selected_model(self) -> str:
+        """获取模型下拉当前选中的模型名（空串表示未选）。"""
+        return self._model_combo.currentText()
+
     def get_parameters(self) -> dict[str, Any]:
         """获取续写参数。"""
         return {

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -86,10 +87,13 @@ class FlowEndpointDialog(QDialog):
         super().__init__(parent)
         self._config_manager = config_manager
         self._endpoint_combos: dict[str, QComboBox] = {}
+        self._model_combos: dict[str, QComboBox] = {}
         self._jb_combos: dict[str, QComboBox] = {}
         self._jb_buttons: dict[str, QPushButton] = {}
         # 暂存自定义文本（未保存前在内存，确认时一并写盘）
         self._custom_texts: dict[str, str] = {}
+        # 已保存的流程模型映射（加载时填充，供 _populate_model_combo 选中）
+        self._saved_model_ids: dict[str, str] = {}
 
         self.setWindowTitle("流程端点配置")
         self.setMinimumWidth(520)
@@ -115,18 +119,35 @@ class FlowEndpointDialog(QDialog):
         default_name = default_ep.get("name", default_ep.get("id", "未配置")) if default_ep else "未配置"
         default_label = f"默认端点（{default_name}）"
 
-        # 端点配置表单
+        # 端点配置表单（每行：端点下拉 + 模型下拉横排）
         endpoint_form = QFormLayout()
         for flow_key, flow_name in FLOW_DEFINITIONS:
-            combo = QComboBox()
+            ep_combo = QComboBox()
             # 首项：默认端点（itemData="" 表示回退默认）
-            combo.addItem(default_label, "")
+            ep_combo.addItem(default_label, "")
             # 其余项：所有端点
             for ep in endpoints:
                 name = ep.get("name", ep.get("id", ""))
-                combo.addItem(name, ep.get("id", ""))
-            self._endpoint_combos[flow_key] = combo
-            endpoint_form.addRow(f"{flow_name}:", combo)
+                ep_combo.addItem(name, ep.get("id", ""))
+            self._endpoint_combos[flow_key] = ep_combo
+
+            # 模型下拉：首项「默认模型」itemData=""，端点切换时动态填充
+            model_combo = QComboBox()
+            model_combo.setMinimumWidth(180)
+            model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+            model_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            model_combo.addItem("默认模型", "")
+            self._model_combos[flow_key] = model_combo
+
+            # 端点切换时重新填充模型下拉
+            ep_combo.currentIndexChanged.connect(
+                lambda _idx, k=flow_key: self._on_flow_endpoint_changed(k)
+            )
+
+            row = QHBoxLayout()
+            row.addWidget(ep_combo, 1)
+            row.addWidget(model_combo, 1)
+            endpoint_form.addRow(f"{flow_name}:", row)
         layout.addLayout(endpoint_form)
 
         # 破限配置分组（仅非正文流程）
@@ -177,12 +198,20 @@ class FlowEndpointDialog(QDialog):
         layout.addWidget(button_box)
 
     def _load_data(self) -> None:
-        """加载已保存的流程端点映射与破限配置并选中对应项。"""
+        """加载已保存的流程端点/模型映射与破限配置并选中对应项。"""
         # 端点
         mapping = self._config_manager.get_flow_endpoints()
         for flow_key, combo in self._endpoint_combos.items():
             saved_id = mapping.get(flow_key, "")
             select_combo_by_id(combo, saved_id)
+
+        # 模型映射（暂存供 _populate_model_combo 选中）
+        self._saved_model_ids = dict(self._config_manager.get_flow_models())
+        # 对每个流程根据当前选中端点填充模型下拉并选中已保存模型
+        for flow_key, model_combo in self._model_combos.items():
+            ep_combo = self._endpoint_combos[flow_key]
+            ep_id = ep_combo.currentData() if ep_combo.count() else ""
+            self._populate_model_combo(flow_key, ep_id)
 
         # 破限等级与自定义文本
         jb_mapping = self._config_manager.get_flow_jailbreaks()
@@ -192,6 +221,58 @@ class FlowEndpointDialog(QDialog):
             # 预载自定义文本到暂存
             self._custom_texts[flow_key] = self._config_manager.get_flow_jailbreak_custom(flow_key)
             self._on_jb_level_changed(flow_key)
+
+    def _on_flow_endpoint_changed(self, flow_key: str) -> None:
+        """流程端点切换时重新填充对应模型下拉。
+
+        保留已保存模型选中状态（若新端点中存在），否则回退默认项。
+        """
+        ep_combo = self._endpoint_combos[flow_key]
+        ep_id = ep_combo.currentData() if ep_combo.count() else ""
+        self._populate_model_combo(flow_key, ep_id)
+
+    def _populate_model_combo(self, flow_key: str, endpoint_id: str) -> None:
+        """根据端点 ID 填充流程的模型下拉。
+
+        取端点（空 id 用默认端点），用回退链 enabled_models → models → [default_model]
+        填充模型项；首项「默认模型（{default_model}）」itemData="" 表示回退端点默认模型。
+        选中已保存模型（``_saved_model_ids[flow_key]``），找不到则选默认项。
+
+        Args:
+            flow_key: 流程标识
+            endpoint_id: 端点 ID，空串表示默认端点
+        """
+        model_combo = self._model_combos[flow_key]
+        ep = (
+            self._config_manager.get_endpoint(endpoint_id)
+            if endpoint_id
+            else self._config_manager.get_default_endpoint()
+        )
+        default_model = ep.get("default_model", "") if ep else ""
+        enabled = ep.get("enabled_models") or [] if ep else []
+        all_models = ep.get("models") or [] if ep else []
+        # 回退链：enabled_models → models → [default_model]（旧端点兼容）
+        models_to_show = enabled or all_models or ([default_model] if default_model else [])
+
+        model_combo.blockSignals(True)
+        model_combo.clear()
+        # 首项：默认模型（itemData="" 表示回退端点 default_model）
+        default_label = f"默认模型（{default_model}）" if default_model else "默认模型"
+        model_combo.addItem(default_label, "")
+        # 其余项：模型列表按名称排序
+        for m in sorted(models_to_show):
+            if m and m != default_model:
+                model_combo.addItem(m, m)
+        # 选中已保存模型，找不到则选默认项
+        saved_model = self._saved_model_ids.get(flow_key, "")
+        target_idx = 0
+        if saved_model:
+            for i in range(model_combo.count()):
+                if model_combo.itemData(i) == saved_model:
+                    target_idx = i
+                    break
+        model_combo.setCurrentIndex(target_idx)
+        model_combo.blockSignals(False)
 
     def _on_jb_level_changed(self, flow_key: str) -> None:
         """破限等级变化时启/禁用自定义编辑按钮。"""
@@ -215,6 +296,13 @@ class FlowEndpointDialog(QDialog):
             data = combo.currentData()
             endpoint_mapping[flow_key] = data if isinstance(data, str) else ""
         self._config_manager.set_flow_endpoints(endpoint_mapping)
+
+        # 模型映射（空串=用端点 default_model）
+        model_mapping: dict[str, str] = {}
+        for flow_key, combo in self._model_combos.items():
+            data = combo.currentData()
+            model_mapping[flow_key] = data if isinstance(data, str) else ""
+        self._config_manager.set_flow_models(model_mapping)
 
         # 破限等级映射
         jb_mapping: dict[str, str] = {}

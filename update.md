@@ -1,5 +1,57 @@
 # 更新日志
 
+## 2026-07-09：流程端点配置新增模型选择
+
+在「流程端点配置」对话框中，为每个流程的端点下拉旁新增模型下拉，让用户为每个流程独立指定模型（而非只能用端点的 default_model）。模型下拉可选项来自该端点的 enabled_models（回退链 `enabled_models → models → [default_model]`），与续写面板一致。
+
+### 背景
+
+原架构中流程端点配置仅存 `{flow_key: endpoint_id}`，消费时用 `endpoint.get("default_model")` 作为模型。用户希望为每个流程独立指定模型（如审计用稳定模型、续写用强模型），需在对话框加模型下拉。
+
+### 核心改动
+
+#### 修改
+- `novelforge/core/config.py`：默认配置新增 `flow_models: {}`（`{flow_key: model_str}`，空串=用端点 default_model）；新增 `get_flow_models()`/`get_flow_model(flow_key)`（回退端点 default_model）/`set_flow_models(mapping)` 三方法；不升 config_version（缺失时全回退原行为）
+- `novelforge/ui/flow_endpoint_dialog.py`：每个 flow 行由单端点下拉改为 `[端点下拉][模型下拉]` 横排；新增 `_on_flow_endpoint_changed`/`_populate_model_combo` 方法（端点切换时用回退链填充模型下拉，首项「默认模型」itemData=""）；`_load_data` 加载 flow_models 并选中；`_on_accept` 保存 flow_models
+- `novelforge/ui/continuation_panel.py`：新增 `select_model_by_name(model)`（blockSignals 屏蔽会话记忆）供 `_refresh_endpoints` 同步流程配置模型；新增 `get_selected_model()` 供调试预览取面板当前模型
+- `novelforge/ui/main_window.py`：消费层 7 处 `endpoint.get("default_model")` 改为 `get_flow_model(flow_key)`（单章续写/卷续写/单章审计/审计后重写/重写分析/重写生成 + 调试预览）；`_refresh_endpoints` 增加同步流程配置模型到面板
+- `novelforge/services/context_extractor.py`/`ontology_extractor.py`/`custom_audit_rule_service.py`：`_get_llm_client(flow_key)` 改用 `get_flow_model(flow_key)` 取模型
+- `agent.md`：config.py/flow_endpoint_dialog.py/continuation_panel.py 注释同步；新增设计决策 15「流程端点与模型配置」
+
+### 设计决策
+- **配置字段**：`flow_models`（与 `flow_endpoints`/`flow_jailbreaks` 平行），空串=回退端点 default_model
+- **回退链**：`enabled_models → models → [default_model]`（与续写面板一致，旧端点兼容）
+- **不升 config_version**：`flow_models` 缺失时全回退原行为，向后兼容
+- **正文流程同步**：对话框关闭后 `_refresh_endpoints` 同步面板端点+模型；面板模型下拉仍可临时覆盖（会话记忆），不写回 `flow_models`
+- **消费层优先级**：正文流程 `params.get("model")`（面板下拉）→ `get_flow_model(flow_key)`（流程配置）→ 端点 default_model；非正文流程直接 `get_flow_model(flow_key)`
+- **审计后重写**：复用 `single_audit` flow_key（审计重写是审计流程延续）
+- **重写生成**：复用 `single_continuation` flow_key（重写生成复用 single_continuation 端点）
+
+### 测试
+- `python -m pytest tests/ -q` 全绿（663 passed, 15 skipped）
+
+### 文档同步
+- agent.md 已更新
+
+## 2026-07-09：思维链三层次预设更新
+
+### 背景
+分析五套参考预设（TGbreak/Femiris/lunareclipse/夏瑾/梦鲸）的思维链设计，将项目默认预设的单层次思维链升级为低/中/高三个层次，采用变量注入法实现。
+
+### 核心改动
+- `default_preset.json`：新增 nf_cot_low/mid/high 三个互斥模块，通过 {{setvar::COT-items::}} 注入不同深度的分析项；nf_cot 改为 {{getvar::COT-items}} 模板；main 模块输出格式描述泛化
+- 低层次 4 项（前文衔接/人物分析/情节规划/用户指令遵从）
+- 中层次 7 项（现有行为，默认启用）
+- 高层次 10 项（全维度：核心七项 + 文风抗八股检查 + 防全知深度审查 + 格式输出检查）
+- `agent.md`：更新 default_preset.json 描述
+
+### 测试
+- 现有测试无回归（无测试直接引用 nf_cot 内容）
+- 变量注入依赖 template_engine + variable_store，生产环境已配置
+
+### 文档同步
+- agent.md 已更新
+
 ## 2026-07-08：版本号升级至 v0.2.8
 
 将 `novelforge/__init__.py` 的 `__version__` 由 `0.2.7` 升级至 `0.2.8`；同步更新 `README.md` 顶部「当前版本」标注与「更新记录」章节（新增 v0.2.8 小节，汇总自 v0.2.7 以来的 9 项改动：端点启用模型多选、复制端点、Gemini reasoning_effort 修复、取消强制提取、用户指令约束、破限前置与深化等），同步更新 `agent.md` 当前版本标注。

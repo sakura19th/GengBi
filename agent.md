@@ -35,7 +35,7 @@ novelforge/
 │   ├── macros.py            # ST 宏引擎（{{user}}、{{char}} 等 11 内置宏 + setvar/getvar 四作用域）
 │   ├── variable_store.py    # 变量存储（global/project/chapter/cache 四作用域）
 │   ├── json_utils.py        # JSON 解析工具
-│   ├── config.py            # 配置管理（API 端点含 models 全部列表 + enabled_models 启用子集 + default_model 后台流程回退、密钥加密、flow_endpoints 流程端点映射）
+│   ├── config.py            # 配置管理（API 端点含 models 全部列表 + enabled_models 启用子集 + default_model 后台流程回退、密钥加密、flow_endpoints 流程端点映射 + flow_models 流程模型映射）
 │   └── storage.py           # SQLite 异步存储层（外键 CASCADE；列迁移函数；list_chapters 检测 DB 缺章自动从磁盘重建）
 ├── services/        # 业务服务
 │   ├── context_extractor.py     # 上下文提取（多批次 token 拆分 + 【信息汇总】合并；主角形象独立链路 extract_protagonist_streaming，独立缓存 key 前缀 protagonist:）
@@ -54,7 +54,7 @@ novelforge/
 │   └── storage_service.py       # 存储服务（项目/章节/续写 CRUD；update_chapter_index 仅更新 index 列不写文件）
 ├── ui/              # UI 组件（PySide6）
 │   ├── main_window.py           # 主窗口（5 栏 QSplitter + 主题管理 + 调试菜单；ont/protagonist/custom_rule 提取信号处理；续写/审计/重写三模式接线；章节切换状态保留 7 缓冲字段）
-│   ├── continuation_panel.py    # 续写控制面板（三模式下拉；端点/模型下拉框 AdjustToContents 自适应宽度；端点切换按 enabled_models 填充模型下拉并按名称排序，会话记忆每端点上次手动选择模型；输出框右键 4 色高亮 + 备注；highlights_changed 信号持久化）
+│   ├── continuation_panel.py    # 续写控制面板（三模式下拉；端点/模型下拉框 AdjustToContents 自适应宽度；端点切换按 enabled_models 填充模型下拉并按名称排序，会话记忆每端点上次手动选择模型；select_model_by_name 供 _refresh_endpoints 同步流程配置模型；get_selected_model 供调试预览取面板当前模型；输出框右键 4 色高亮 + 备注；highlights_changed 信号持久化）
 │   ├── volume_panel.py          # 卷续写控制面板（配置/两层进度/五 Tab 产物查看/流式区）
 │   ├── context_preview_panel.py # 上下文提取预览面板（ontology/protagonist/custom_rule 三类提取按钮互斥 + 流式展示）
 │   ├── chapter_list.py          # 章节列表（虚拟滚动/搜索/右键菜单；当前选中章节持续高亮——ChapterHighlightDelegate 自定义 QStyledItemDelegate 在 paint() 中 fillRect 绕开 QSS 选中态覆盖）
@@ -69,13 +69,13 @@ novelforge/
 │   ├── regex_manager.py         # 正则管理器（内联勾选即时持久化）
 │   ├── worldbook_manager.py     # 世界书管理器（条目级 enabled 开关）
 │   ├── settings_dialog.py       # 设置对话框（API 端点管理含 models 全部列表 + enabled_models 可勾选多选 QListWidget + 全选/全不选/自定义模型录入、复制端点；default_model 自动取首个已启用供后台流程；reasoning_effort 7 档；ModelFetchWorker finished→deleteLater 自清理 + closeEvent 防御式 isRunning 访问避免 wrapper 失效 RuntimeError）
-│   ├── flow_endpoint_dialog.py  # 流程端点配置（8 流程端点映射 + 6 非正文流程破限等级下拉 off/low/mid/high/custom + 自定义文本编辑入口）
+│   ├── flow_endpoint_dialog.py  # 流程端点配置（8 流程端点映射 + 每流程模型下拉 enabled_models 回退链 + 6 非正文流程破限等级下拉 off/low/mid/high/custom + 自定义文本编辑入口）
 │   ├── jailbreak_custom_dialog.py # 自定义破限文本编辑对话框（QPlainTextEdit + 确定/取消）
 │   ├── font_settings.py / history_panel.py / project_panel.py / template_editor.py / worldbook_panel.py / dialogs.py / flow_layout.py / wheel_filter.py
 │   └── ...
 └── resources/       # 资源文件
     ├── defaults/
-    │   ├── default_preset.json     # 默认写作预设（20 条分层模块：main/抗八股/抗重复/字数/文风互斥/推进互斥/思维链/破限层 4 套互斥+助手预填充/Marker；破限默认全关；nf_jb_* 已前置到 main 之前定调；nf_jb_high 含 NSFW 指引覆盖原 nf_nsfw；防全知硬约束贯穿 core_rules/anti_bagua/cot/main；nf_core_rules 集成基线轻度破限【创作自由基准】+ 第 8 条用户指令遵从/不引入意外内容；nf_cot 第 7 项用户指令遵从检查；main 含【续写约束】段）
+    │   ├── default_preset.json     # 默认写作预设（23 条分层模块：main/抗八股/抗重复/字数/文风互斥/推进互斥/思维链三层次互斥/破限层 4 套互斥+助手预填充/Marker；破限默认全关；nf_jb_* 已前置到 main 之前定调；nf_jb_high 含 NSFW 指引覆盖原 nf_nsfw；防全知硬约束贯穿 core_rules/anti_bagua/cot/main；nf_core_rules 集成基线轻度破限【创作自由基准】+ 第 8 条用户指令遵从/不引入意外内容；nf_cot 改为变量注入模板 {{getvar::COT-items}}；新增 nf_cot_low/mid/high 三层次互斥模块通过 setvar 注入思维链分析项（低 4 项/中 7 项/高 10 项全维度），默认启用 mid；main 输出格式描述泛化不再列举具体项；main 含【续写约束】段）
     │   ├── jailbreaks/                # 非正文流程破限模板（6 个 jb_*.txt，每文件含 ### LOW/MID/HIGH ### 三档；已全面深化：LOW=认知修正、MID=授权自由、HIGH=沙盒解放，含内部审查对抗锚点）
     │   ├── default_regex_scripts.json  # 4 条默认正则（思维链隐藏/八股抹除/破折号规范/空行清理）
     │   ├── extract_prompt.txt / extract_merge_prompt.txt  # 上下文提取 + 汇总环节
@@ -214,7 +214,17 @@ novelforge/
 - **流程端点**：rewrite_analysis 独立流程（低温稳定），重写生成复用 single_continuation 端点
 - **接受逻辑**：`_on_accept_continuation` 检查 swipe.created_by=="rewrite_current" 则调 replace_chapter_content，否则走 promote_continuation_to_chapter
 
-### 15. 流程破限配置
+### 15. 流程端点与模型配置
+
+- **流程端点映射**：`config["flow_endpoints"] = {flow_key: endpoint_id}`，未配置或端点被删回退默认端点；`get_flow_endpoint(flow_key)` 解析
+- **流程模型映射**：`config["flow_models"] = {flow_key: model_str}`，空串或未配置回退该流程端点的 `default_model`；`get_flow_model(flow_key)` 解析（flow_key 空串则用默认端点 default_model）
+- **不升 config_version**：`flow_models` 缺失时全回退原行为（端点 default_model），旧配置兼容
+- **配置入口**：`FlowEndpointDialog` 每个 flow 行横排 [端点下拉][模型下拉]；模型下拉用回退链 `enabled_models → models → [default_model]` 填充（与续写面板一致），首项「默认模型（{default_model}）」itemData="" 表示回退端点默认模型；端点切换时 `_populate_model_combo` 重新填充并保留已保存模型选中
+- **消费层优先级**：正文流程 `params.get("model")`（面板下拉）→ `get_flow_model(flow_key)`（流程配置）→ 端点 default_model（get_flow_model 内部回退）；非正文流程直接 `get_flow_model(flow_key)`；审计后重写复用 `single_audit` flow_key，重写生成复用 `single_continuation` flow_key
+- **正文流程同步**：`_refresh_endpoints` 关闭对话框后同步面板端点 + 模型选中（`select_model_by_name`，blockSignals 屏蔽会话记忆）；面板模型下拉仍可临时覆盖（会话记忆），不写回 `flow_models`
+- **三个 service**：context_extractor/ontology_extractor/custom_audit_rule_service 的 `_get_llm_client(flow_key)` 改用 `get_flow_model(flow_key)` 取模型，替代原 `ep.get("default_model")`
+
+### 16. 流程破限配置
 
 - **正文流程**（single_continuation/volume_continuation）：破限由预设管理器勾选 `nf_jb_*` 模块控制（现有机制不变）；`default_preset.json` 的 `prompt_order` 中 5 个 `nf_jb_*` 已前置到 `main` 之前，使破限 system 消息在组装后位于「你是一位专业的小说续写助手」之前定调。`nf_jb_prefill` 虽移到 order 前列但它是 ABSOLUTE 注入（`injection_position=1, injection_depth=0`），仍按深度规则注入到末尾，行为不变。`nf_core_rules` 续写核心准则之首集成基线轻度破限【创作自由基准】（常开：用户至上+创作无禁区+拒绝即失职+非评判+不回避），作为始终生效的底色；`nf_jb_*` 为用户可选的更强增强档位（LOW=认知修正、MID=授权自由、HIGH=沙盒解放，含内部审查对抗）
 - **非正文流程**（6 个：single_audit/rewrite_analysis/context_extraction/ontology_extraction/protagonist_extraction/custom_rule_parsing）：每个流程在 `resources/defaults/jailbreaks/jb_{flow}.txt` 有专用模板（含 `### LOW/MID/HIGH ###` 三档，按流程风格定制：提取类强调不拒绝敏感分析、审计类强调诚实批判不软化、重写分析强调不拒绝敏感重写需求、自定义设定解析强调接受任何黑暗设定）；运行时由 `JailbreakProvider.get_jailbreak(flow, level)` 返回文本，作为 `{"role":"system","content":jb_text}` 前置到 messages 开头（空文本不注入）；提取类流程的合并子调用复用同流程破限参数

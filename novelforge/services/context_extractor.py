@@ -1752,7 +1752,7 @@ class ContextExtractor:
             timeout=300,
             reasoning_effort=reasoning_effort,
         )
-        model = ep.get("default_model", "") or DEFAULT_EXTRACTOR_MODEL
+        model = self.config_manager.get_flow_model(flow_key) or DEFAULT_EXTRACTOR_MODEL
         return client, model
 
     async def _extract_common(

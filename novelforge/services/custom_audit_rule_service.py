@@ -116,7 +116,7 @@ class CustomAuditRuleService:
             timeout=120,
             reasoning_effort=reasoning_effort,
         )
-        model = ep.get("default_model", "")
+        model = self.config_manager.get_flow_model(flow_key)
         return (client, model)
 
     # ===== 占位符格式化 =====

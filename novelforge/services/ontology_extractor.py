@@ -421,7 +421,7 @@ class OntologyExtractor:
             timeout=300,
             reasoning_effort=reasoning_effort,
         )
-        model = ep.get("default_model", "")
+        model = self.config_manager.get_flow_model(flow_key)
         return (client, model)
 
     # ===== 字段级合并（增量更新核心） =====

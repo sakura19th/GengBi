@@ -919,6 +919,10 @@ class MainWindow(QMainWindow):
         flow_ep = self.config_manager.get_flow_endpoint(flow_key)
         if flow_ep:
             self.continuation_panel.select_endpoint_by_id(flow_ep.get("id", ""))
+        # 同步流程配置的模型到面板（若该流程配置了模型且在当前端点 enabled_models 中）
+        flow_model = self.config_manager.get_flow_model(flow_key)
+        if flow_model:
+            self.continuation_panel.select_model_by_name(flow_model)
 
     def _resolve_reasoning_effort(
         self, endpoint: dict, preset: WritingPreset | None = None
@@ -1615,7 +1619,7 @@ class MainWindow(QMainWindow):
             self._on_open_settings()
             return
 
-        model = params.get("model") or endpoint.get("default_model", "")
+        model = params.get("model") or self.config_manager.get_flow_model("single_continuation")
         if not model:
             QMessageBox.warning(self, "提示", "请选择模型")
             return
@@ -1884,7 +1888,7 @@ class MainWindow(QMainWindow):
             self._on_open_settings()
             return
 
-        model = params.get("model") or endpoint.get("default_model", "")
+        model = params.get("model") or self.config_manager.get_flow_model("volume_continuation")
         if not model:
             QMessageBox.warning(self, "提示", "请选择模型")
             return
@@ -2757,11 +2761,15 @@ class MainWindow(QMainWindow):
         if preset is None:
             preset = self.preset_service.load_default_preset()
 
-        # 从端点获取 model（与 _on_start_continuation 一致）
+        # 从端点获取 model（与 _on_start_continuation 一致：面板下拉优先，流程配置回退）
         endpoint = self.continuation_panel.get_selected_endpoint()
+        mode = self.continuation_panel.get_mode()
+        flow_key = "volume_continuation" if mode == "volume" else "single_continuation"
         model = ""
         if endpoint:
-            model = endpoint.get("default_model", "")
+            # 面板模型下拉当前文本优先
+            sel_model = self.continuation_panel.get_selected_model()
+            model = sel_model or self.config_manager.get_flow_model(flow_key)
 
         # 获取生成参数
         gen_params = preset.generation_params
@@ -3814,7 +3822,7 @@ class MainWindow(QMainWindow):
             self._on_open_settings()
             return
 
-        model = self._continuation_model or endpoint.get("default_model", "")
+        model = self._continuation_model or self.config_manager.get_flow_model("single_audit")
         if not model:
             QMessageBox.warning(self, "提示", "请选择模型")
             return
@@ -3979,8 +3987,8 @@ class MainWindow(QMainWindow):
             self._on_open_settings()
             return
 
-        # 解析模型（与审计发起处一致，兜底 endpoint 默认模型）
-        model = self._continuation_model or endpoint.get("default_model", "")
+        # 解析模型（与审计发起处一致，兜底流程配置模型→端点默认模型）
+        model = self._continuation_model or self.config_manager.get_flow_model("single_audit")
         if not model:
             QMessageBox.warning(self, "提示", "请选择模型")
             return
@@ -4203,7 +4211,7 @@ class MainWindow(QMainWindow):
             self._on_open_settings()
             return
 
-        model = params.get("model") or endpoint.get("default_model", "")
+        model = params.get("model") or self.config_manager.get_flow_model("rewrite_analysis")
         if not model:
             QMessageBox.warning(self, "提示", "请选择模型")
             return
@@ -4380,7 +4388,7 @@ class MainWindow(QMainWindow):
             self._rewrite_current_chapter_id = None
             return
 
-        model = params.get("model") or endpoint.get("default_model", "")
+        model = params.get("model") or self.config_manager.get_flow_model("single_continuation")
         if not model:
             QMessageBox.warning(self, "提示", "请选择模型")
             self._rewrite_current_chapter_id = None
