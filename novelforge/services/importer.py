@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import atexit
 import concurrent.futures
 import logging
 import re
@@ -354,3 +355,7 @@ class TxtImporter:
         )
 
         return front, back
+
+
+# 进程退出时清理模块级线程池
+atexit.register(_CHAPTER_MATCH_EXECUTOR.shutdown, wait=False, cancel_futures=True)

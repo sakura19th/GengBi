@@ -22,7 +22,8 @@ import tempfile
 from pathlib import Path
 
 # 确保使用项目根目录
-sys.path.insert(0, str(Path(__file__).parent))
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from novelforge.core.regex_engine import (
     RegexEngine,

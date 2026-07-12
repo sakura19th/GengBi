@@ -166,9 +166,9 @@ class DebugPromptDialog(QDialog):
         self.confirmed = True
         self.selected_endpoint = self._endpoint_combo.currentData()
         self.selected_model = self._model_combo.currentText()
-        self.close()
+        self.accept()
 
     def _on_cancel(self) -> None:
         """取消按钮：confirmed 保持 False 并关闭对话框。"""
         self.confirmed = False
-        self.close()
+        self.reject()

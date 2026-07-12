@@ -6,7 +6,7 @@
 
 赓笔 (GengBi) 是一个 SillyTavern (ST) 兼容的小说续写工具，提供从 TXT 导入、章节管理、上下文提取、提示词组装到 LLM 流式续写的完整工作流。
 
-**当前版本：v0.2.9**（定义于 `novelforge/__init__.py` 的 `__version__`，由"关于"对话框引用，README 顶部同步标注）
+**当前版本：v0.2.10**（定义于 `novelforge/__init__.py` 的 `__version__`，由"关于"对话框引用，README 顶部同步标注）
 
 **版本更新记录**：维护在 `README.md` 的"更新记录"章节，按版本倒序排列，每次发版须追加新版本小节。
 
@@ -37,9 +37,9 @@ novelforge/
 │   ├── variable_store.py    # 变量存储（global/project/chapter/cache 四作用域）
 │   ├── json_utils.py        # JSON 解析工具
 │   ├── config.py            # 配置管理（API 端点含 models 全部列表 + enabled_models 启用子集 + default_model 后台流程回退、密钥加密、flow_endpoints 流程端点映射 + flow_models 流程模型映射）
-│   └── storage.py           # SQLite 异步存储层（外键 CASCADE；列迁移函数；list_chapters 检测 DB 缺章自动从磁盘重建；update_chapter_index/update_chapter_title 单列更新不写正文文件）
+│   └── storage.py           # SQLite 异步存储层（外键 CASCADE；row_factory=aiosqlite.Row 按列名访问；列迁移函数；list_chapters 检测 DB 缺章自动从磁盘重建；update_chapter_index/update_chapter_title 单列更新不写正文文件；delete_project validate_id 防路径穿越；is_network_filesystem Windows UNC/网络驱动器 + Linux /proc/mounts 检测）
 ├── services/        # 业务服务
-│   ├── context_extractor.py     # 上下文提取（多批次 token 拆分 + 【信息汇总】合并；主角形象独立链路 extract_protagonist_streaming，独立缓存 key 前缀 protagonist:；模型统一由 flow_models 控制，不再读 extractor_model）
+│   ├── context_extractor.py     # 上下文提取（多批次 token 拆分 + 【信息汇总】合并；主角形象独立链路 extract_protagonist_streaming，独立缓存 key 前缀 protagonist:；模型统一由 flow_models 控制，不再读 extractor_model；_extract_common/extract_protagonist_streaming try/finally 关闭 LLMClient 释放 aiohttp session，body 抽到 _extract_common_body/_extract_protagonist_body 辅助方法）
 │   ├── ontology_extractor.py    # 世界观底层提取（WorldOntology 7 大维度；镜像 ContextExtractor 三大机制：拆批/增量合并/语义整合）
 │   ├── continuation_worker.py   # QThread + asyncio 续写 worker（单次续写/重写生成/审计后修正；调试模式支持运行时端点/模型覆盖 _effective_model/_effective_client + endpoint_id 缓存 LLMClient；phase_name 按 created_by 映射 续写/重写生成/修正；run() finally 关闭主+调试缓存 LLMClient 释放 aiohttp session）
 │   ├── audit_worker.py          # 单章续写审计 worker（流式 stream_chat_completion，低温稳定输出；调试模式镜像 ContinuationWorker，phase_name 参数化 单章审计/重写需求分析）
@@ -50,17 +50,17 @@ novelforge/
 │   ├── regex_service.py         # 正则脚本管理（global/scoped/preset）
 │   ├── importer.py              # TXT 导入与章节拆分
 │   ├── exporter.py              # 导出（TXT/Markdown/备份 zip，含 ZIP slip 防护）
-│   ├── async_runner.py          # 后台事件循环运行器（单例）
+│   ├── async_runner.py          # 后台事件循环运行器（单例；`run` 超时后 `future.cancel()` 取消协程避免泄漏；`_run_loop` finally 清理异常 logger.warning 而非静默吞掉）
 │   ├── jailbreak_provider.py     # 流程破限文本提供器（加载 jb_{flow}.txt 按 ### LOW/MID/HIGH ### 分段，4 等级 off/low/mid/high 返回文本；文件缓存）
 │   ├── flow_plugin_service.py  # 流程控制插件 CRUD（继承 BaseJsonService[FlowPlugin]；首启复制 3 内置插件 + 版本升级（builtin 插件资源版本高于已安装时覆盖）；导入强制 builtin=False，ID 冲突追加 _imported；内置不可删除）
-│   ├── flow_executor.py        # 流程执行引擎（按 FlowPlugin.stages 有序执行；5 agent handler 回调机制；挂起-恢复模式处理多阶段用户交互；cancel 清理）
+│   ├── flow_executor.py        # 流程执行引擎（按 FlowPlugin.stages 有序执行；5 agent handler 回调机制；挂起-恢复模式处理多阶段用户交互；cancel 清理；`_execute_current_stage` 用 while 迭代循环推进阶段而非递归，避免阶段数多时触及 Python 递归上限）
 │   └── storage_service.py       # 存储服务（项目/章节/续写 CRUD；update_chapter_index/update_chapter_title 单列更新不写文件）
 ├── ui/              # UI 组件（PySide6）
-│   ├── main_window.py           # 主窗口（5 栏 QSplitter + 主题管理 + 调试菜单；ont/protagonist/custom_rule 提取信号处理；FlowPluginService+FlowExecutor 流程插件系统接线；start_flow 统一入口 + 5 agent handler + accept_mode 适配；volume_phase 多阶段流程：_prepare_volume_run→_start_volume_phase→phase_output→resume；卷续写暂存节点持久化 ~/.novelforge/volume_states/{chapter_id}.json + 选中章节恢复入口 _check_volume_resume→_resume_volume_state + 阶段失败重试对话框 + 停止/完成/出错清理；逐章子步骤进度 _on_volume_chapter_step_started 累积 _volume_chapter_steps_seen 驱动面板 4 步标签（细纲/写作/验证/修订）+ 状态栏；章节切换状态保留 7 缓冲字段）
+│   ├── main_window.py           # 主窗口（5 栏 QSplitter + 主题管理 + 调试菜单；ont/protagonist/custom_rule 提取信号处理；FlowPluginService+FlowExecutor 流程插件系统接线；start_flow 统一入口 + 5 agent handler + accept_mode 适配；volume_phase 多阶段流程：_prepare_volume_run→_start_volume_phase→phase_output→resume；卷续写暂存节点持久化 ~/.novelforge/volume_states/{chapter_id}.json + 选中章节恢复入口 _check_volume_resume→_resume_volume_state + 阶段失败重试对话框 + 停止/完成/出错清理；逐章子步骤进度 _on_volume_chapter_step_started 累积 _volume_chapter_steps_seen 驱动面板 4 步标签（细纲/写作/验证/修订）+ 状态栏；章节切换状态保留 7 缓冲字段；closeEvent 停止 _continuation_worker/_audit_worker/_volume_orchestrator 三 worker；_on_start_continuation 温度（0.0-2.0）+目标字数（100-50000）范围校验；审计 chunk_received 经 _on_audit_chunk_received 中转槽转发到 AuditDialog 防对话框已删除 RuntimeError 崩溃 + _on_audit_cancelled 取消前 disconnect）
 │   ├── continuation_panel.py    # 续写控制面板（动态插件下拉由 set_flow_plugins 填充；start_flow 统一信号替代原 start_continuation/rewrite_current_analysis_requested；端点/模型下拉框 AdjustToContents 自适应宽度；端点切换按 enabled_models 填充模型下拉并按名称排序，会话记忆每端点上次手动选择模型；select_model_by_name 供 _refresh_endpoints 同步流程配置模型；get_selected_model 供调试预览取面板当前模型；输出框右键 4 色高亮 + 备注；highlights_changed 信号持久化）
 │   ├── volume_panel.py          # 卷续写控制面板（配置/两层进度/五 Tab 产物查看/流式区）
 │   ├── context_preview_panel.py # 上下文提取预览面板（ontology/protagonist/custom_rule 三类提取按钮互斥 + 流式展示）
-│   ├── chapter_list.py          # 章节列表（虚拟滚动/搜索/右键菜单；当前选中章节持续高亮——ChapterHighlightDelegate 自定义 QStyledItemDelegate 在 paint() 中 fillRect 绕开 QSS 选中态覆盖）
+│   ├── chapter_list.py          # 章节列表（虚拟滚动/搜索/右键菜单；当前选中章节持续高亮——ChapterHighlightDelegate 自定义 QStyledItemDelegate 在 paint() 中 fillRect 绕开 QSS 选中态覆盖；FullTextSearchWorker.run 通过 read_chapter_content 文件系统直读章节正文不访问 SQLite 跨线程安全；_stop_fulltext_search 非阻塞——worker finished 信号触发 _on_search_worker_finished 自清理替代 wait(3000)，sender() 校验防新搜索误清）
 │   ├── chapter_editor.py        # 章节预览/编辑（自动保存/undo/拆分；流式锁定；QLineEdit 标题编辑 + title_changed 信号，编辑模式下可修改章节标题）
 │   ├── audit_dialog.py          # 单章审计对话框（流式→可编辑→采纳）
 │   ├── custom_rule_dialog.py    # 自定义设定对话框（输入/查看+删除）
@@ -72,7 +72,7 @@ novelforge/
 │   ├── flow_plugin_manager.py   # 流程插件管理器（列表/详情/导入导出/删除；继承 PersistentDialog 非模态；plugin_changed 信号通知 MainWindow 刷新面板下拉）
 │   ├── regex_manager.py         # 正则管理器（内联勾选即时持久化）
 │   ├── worldbook_manager.py     # 世界书管理器（条目级 enabled 开关）
-│   ├── settings_dialog.py       # 设置对话框（API 端点管理含 models 全部列表 + enabled_models 可勾选多选 QListWidget + 全选/全不选/自定义模型录入、复制端点；default_model 自动取首个已启用供后台流程；reasoning_effort 7 档；ModelFetchWorker finished→deleteLater 自清理 + closeEvent 防御式 isRunning 访问避免 wrapper 失效 RuntimeError；不含上下文提取配置——已统一由流程端点配置+预览面板管理）
+│   ├── settings_dialog.py       # 设置对话框（API 端点管理含 models 全部列表 + enabled_models 可勾选多选 QListWidget + 全选/全不选/自定义模型录入、复制端点；default_model 自动取首个已启用供后台流程；reasoning_effort 7 档；EndpointEditDialog._on_accept base_url 校验 http/https scheme + rstrip("/")；ModelFetchWorker 增加 stop() best-effort 标志位 + finished→deleteLater 自清理 + closeEvent/_on_fetch_models 停止前一个 worker wait(2000) + 防御式 isRunning 访问避免 wrapper 失效 RuntimeError；不含上下文提取配置——已统一由流程端点配置+预览面板管理）
 │   ├── flow_endpoint_dialog.py  # 流程端点配置（8 流程端点映射 + 每流程模型下拉 enabled_models 回退链 + 6 非正文流程破限等级下拉 off/low/mid/high/custom + 自定义文本编辑入口）
 │   ├── jailbreak_custom_dialog.py # 自定义破限文本编辑对话框（QPlainTextEdit + 确定/取消）
 │   ├── font_settings.py / history_panel.py / project_panel.py / template_editor.py / worldbook_panel.py / dialogs.py / flow_layout.py / wheel_filter.py
@@ -165,7 +165,7 @@ novelforge/
 - **5 个暂停点**：after_deep_analysis/after_volume_outline/before_audit（默认开）/after_audit/after_chapter（默认关）
 - **深度分析 token 切分**：analysis_chunk_tokens>0 时按章节边界累积 token 切分，逐块增量合并；切分后追加 LLM 语义整合润色，失败降级
 - **动态前文窗口**：`_build_dynamic_lookback_text(window=10)` 基于 `_get_effective_chapters()`（插入点前章节 + 本卷已生成章节），取末尾 window 章拼接；从中间续写时不会误把插入点后原章节当前文
-- **强制修改流程**：enable_chapter_revise=True 时审计①即使通过也强制 1 轮修改；critical 问题忽略 max_revise_rounds_per_chapter 上限一直修正到通过
+- **强制修改流程**：enable_chapter_revise=True 时审计①即使通过也强制 1 轮修改；critical 问题忽略 max_revise_rounds_per_chapter 上限一直修正到通过，但受模块级常量 `MAX_CRITICAL_REVISE_ROUNDS=20` 硬上限保护，超过后 logger.error 并 break 跳出（避免 LLM 持续产生 critical 问题导致无限循环）
 - **审计后重写**：`_run_chapter_rewrite` 加载 phase_audit_rewrite.txt 模板，审计报告整体即修改意见（无 revision_guidance），强调重写完整正文严禁续写追加
 - **终稿大纲**：outline_final 阶段基于最后一轮审计+原大纲+前 10 章+深度分析+推进速度生成终稿 VolumeOutline
 - **逐章错误隔离**：`_run_chapter_loop` 的 for 循环体内 try/except 包裹全部章节生成逻辑（chapter_plan → dynamic_lookback → outline → writing → verify → rewrite → checkpoint → artifacts）；单章抛 `asyncio.CancelledError` 向上传播（用户取消），其他 `Exception` 记录日志 + emit error 信号 + `continue` 跳过该章继续下一章；for 循环结束后空产物保护（`if not artifacts.chapter_artifacts: return`）避免所有章节失败时构建空 Continuation
@@ -206,7 +206,7 @@ novelforge/
 
 完整审计报告见 `docs/SECURITY_AUDIT.md`。
 
-- **ID 路径穿越防护**：`novelforge.utils.ids.validate_id` 校验仅允许 `^[A-Za-z0-9_\-]+$`，外部数据流入文件路径的 ID 必须经此校验（路径构造函数入口 + 服务层入口 + 模型层 field_validator 三重防御）
+- **ID 路径穿越防护**：`novelforge.utils.ids.validate_id` 校验仅允许 `^[A-Za-z0-9_\-]+$`，外部数据流入文件路径的 ID 必须经此校验（路径构造函数入口 + 服务层入口 + 模型层 field_validator + 存储层 delete_project 入口四重防御）
 - **ZIP slip 防护**：exporter.import_project_backup 逐成员 resolve() 校验位于 tmp_path 之下
 - **SSTI 白名单收紧**：template_engine 双白名单函数（render_pre_send 16 函数 / render_post_receive 9 函数移除数据读取）
 - **ReDoS 超时保护**：regex_engine/importer 共享 ThreadPoolExecutor + future.result(timeout=5.0)
@@ -293,3 +293,30 @@ novelforge/
 4. **技术栈**：新增依赖时更新
 
 **每次修改项目代码后，还必须同步更新 `update.md`**：在文件顶部按时间倒序追加新条目，格式含 `## YYYY-MM-DD：标题` / `### 背景` / `### 核心改动` / `### 测试` / `### 文档同步` 等小节。
+
+**修改流程插件系统相关代码后，还必须同步更新 [`FLOW_PLUGIN_GUIDE.md`](FLOW_PLUGIN_GUIDE.md)**（项目根目录，开发者向文档）。以下任一情况发生时必须更新对应章节：
+
+1. **数据模型变更**（更新第 3 节 JSON 格式规范 + 第 4 节合法取值速查）：
+   - `FlowPlugin`/`FlowStage` 新增/删除/重命名字段、类型变更、校验规则变更
+   - `models/flow_plugin.py` 的 `field_validator`/`model_config` 调整
+2. **agent 类型变更**（更新第 4.1 节五种 agent 类型）：
+   - 新增/删除 agent 类型（当前 5 种：continuation/audit/checkpoint/volume_pipeline/volume_phase）
+   - agent handler 的注册机制或返回值契约变化（pending/resume/cancel）
+3. **ui_mode / accept_mode 变更**（更新第 4.2/4.3 节）：
+   - 新增/删除 `ui_mode`（当前 2 种：standard/volume）
+   - 新增/删除 `accept_mode`（当前 3 种：promote/replace/volume_insert）
+4. **flow_key 变更**（更新第 4.4 节八个标准 flow_key）：
+   - 新增/删除/重命名标准 `flow_key`（当前 8 个）
+   - `flow_endpoints`/`flow_models`/`flow_jailbreaks` 配置项结构变化
+5. **执行引擎逻辑变更**（更新第 5 节写插件的 6 大规律 + 第 6 节 volume_phase 阶段顺序）：
+   - `FlowExecutor` 阶段推进机制变化（递归→迭代等）、params 合并优先级变化、`input_from` 链式传递规则变化
+   - 挂起-恢复机制（pending/resume）或 cancel 清理逻辑变化
+6. **服务层行为变更**（更新第 2 节快速开始 + 第 9 节调试与验证）：
+   - `FlowPluginService` 导入规则变化（`builtin=False` 强制、ID 冲突后缀）、版本升级逻辑、内置不可删除保护
+   - 存储路径变化（`~/.novelforge/flow_plugins/`）
+7. **内置插件变更**（更新第 7 节三个内置插件完整 JSON + 第 2 节内置插件表）：
+   - `resources/defaults/flow_plugins/` 下 `single.json`/`volume.json`/`rewrite_current.json` 结构或内容变化
+   - 新增/删除内置插件
+8. **MainWindow 接线变更**（更新第 5 节规律 + 第 9 节调试验证）：
+   - `start_flow` 信号入口、5 个 agent handler 分发逻辑、`accept_mode` 适配逻辑（`_on_accept_continuation`）变化
+   - `FlowPluginManager` UI 变化（导入/导出/删除按钮、`plugin_changed` 信号）

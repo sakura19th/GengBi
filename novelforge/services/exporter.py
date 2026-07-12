@@ -276,7 +276,7 @@ def export_project_backup(
                 # 章节元数据
                 chapter_meta = {
                     "id": chapter.id,
-                    "project_id": chapter.id and project_id,
+                    "project_id": project_id,
                     "index": chapter.index,
                     "title": chapter.title,
                     "word_count": chapter.word_count,

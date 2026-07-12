@@ -78,6 +78,10 @@ _ANALYSIS_MAX_TOKENS: dict[str, int] = {
     "exhaustive": 200000,
 }
 
+# critical 问题修正的硬上限：超过此轮数后强制跳出，避免 LLM 持续产生 critical
+# 问题导致 max_revise_rounds_per_chapter 上限被忽略而陷入无限循环
+MAX_CRITICAL_REVISE_ROUNDS = 20
+
 
 class VolumeOrchestrator(QThread):
     """卷级多章节续写编排器。
@@ -777,6 +781,14 @@ class VolumeOrchestrator(QThread):
                                     and rounds >= self.config.max_revise_rounds_per_chapter
                                 ):
                                     break  # 无 critical 且达到上限，退出
+                                # critical 问题硬上限保护：避免 LLM 持续产生 critical
+                                # 问题导致 max_revise_rounds_per_chapter 上限被忽略而陷入无限循环
+                                if has_critical and rounds >= MAX_CRITICAL_REVISE_ROUNDS:
+                                    logger.error(
+                                        "章节 %d critical 问题修正超过 %d 轮上限，跳过该章",
+                                        i, MAX_CRITICAL_REVISE_ROUNDS,
+                                    )
+                                    break
 
                             rounds += 1
                             self.chapter_step_started.emit(i, "revise")
@@ -866,6 +878,14 @@ class VolumeOrchestrator(QThread):
                                         and rounds >= self.config.max_revise_rounds_per_chapter
                                     ):
                                         break  # 无 critical 且达到上限，退出
+                                    # critical 问题硬上限保护：避免 LLM 持续产生 critical
+                                    # 问题导致 max_revise_rounds_per_chapter 上限被忽略而陷入无限循环
+                                    if has_critical and rounds >= MAX_CRITICAL_REVISE_ROUNDS:
+                                        logger.error(
+                                            "章节 %d critical 问题修正超过 %d 轮上限，跳过该章",
+                                            i, MAX_CRITICAL_REVISE_ROUNDS,
+                                        )
+                                        break
 
                                     rounds += 1
                                     self.chapter_step_started.emit(i, "revise")

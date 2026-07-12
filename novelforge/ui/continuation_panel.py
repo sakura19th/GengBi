@@ -679,9 +679,8 @@ class ContinuationPanel(QWidget):
         text = last_block.text()
 
         if text.endswith("█"):
-            # 移除光标
-            cursor.setPosition(doc.characterCount() - 2)
-            cursor.deleteChar()
+            # 移除光标：用 deletePreviousChar 避免位置计算边界问题
+            cursor.deletePreviousChar()
         elif self._cursor_visible:
             cursor.insertText("█")
 
@@ -695,8 +694,8 @@ class ContinuationPanel(QWidget):
         text = last_block.text()
         if text.endswith("█"):
             cursor = self._output_edit.textCursor()
-            cursor.setPosition(doc.characterCount() - 2)
-            cursor.deleteChar()
+            cursor.movePosition(cursor.MoveOperation.End)
+            cursor.deletePreviousChar()
 
     # ===== 按钮事件 =====
 
@@ -783,6 +782,10 @@ class ContinuationPanel(QWidget):
         self._current_swipe = swipe
         if all_swipes is not None:
             self._all_swipes = all_swipes
+
+        # 清理流式缓冲区与定时器，防止切换 swipe 时旧 chunk 污染新显示
+        self._chunk_buffer.clear()
+        self._flush_timer.stop()
 
         if swipe:
             # 显示 swipe 内容（若有生成的标题，在内容前显示）
@@ -892,15 +895,22 @@ class ContinuationPanel(QWidget):
         from PySide6.QtWidgets import QTextEdit
 
         selections = []
+        doc_char_count = self._output_edit.document().characterCount()
         for h in self._current_highlights:
             sel = QTextEdit.ExtraSelection()
             sel.format.setBackground(QColor(h.get("color", "#FFFACD")))
             cursor = self._output_edit.textCursor()
             try:
-                cursor.setPosition(int(h.get("start", 0)))
-                cursor.setPosition(int(h.get("end", 0)), QTextCursor.MoveMode.KeepAnchor)
-            except Exception:
+                start = int(h.get("start", 0))
+                end = int(h.get("end", 0))
+            except (TypeError, ValueError) as e:
+                logger.warning("跳过格式错误的高亮: %s", e)
                 continue
+            if start < 0 or end < 0 or start > end or end > doc_char_count:
+                logger.warning("跳过无效高亮范围: start=%d end=%d (doc=%d)", start, end, doc_char_count)
+                continue
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
             sel.cursor = cursor
             selections.append(sel)
         self._output_edit.setExtraSelections(selections)

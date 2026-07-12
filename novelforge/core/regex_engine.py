@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import atexit
 import concurrent.futures
 import logging
 from typing import Any
@@ -631,3 +632,7 @@ def strip_html_tags(text: str) -> str:
     result = re.sub(r"\n{3,}", "\n\n", result)
 
     return result.strip()
+
+
+# 进程退出时清理模块级线程池
+atexit.register(_REGEX_EXECUTOR.shutdown, wait=False, cancel_futures=True)

@@ -1320,7 +1320,8 @@ class ContextExtractor:
 
             # 记录本批次独立结果（供汇总环节使用）
             # 循环仅 break（成功）或 return（失败）退出，此处 batch_protagonist 必非 None
-            assert batch_protagonist is not None
+            if batch_protagonist is None:
+                raise RuntimeError("提取循环异常退出：batch_protagonist 为 None（应有 break/return 保证）")
             batch_results.append(batch_protagonist)
 
             # 增量合并到 accumulated_protagonist（核心：增量更新）
@@ -1905,6 +1906,55 @@ class ContextExtractor:
                 elapsed_seconds=time.time() - start_time,
             )
         client, default_model = client_info
+        try:
+            return await self._extract_common_body(
+                client=client,
+                default_model=default_model,
+                project=project,
+                config=config,
+                target_chapters=target_chapters,
+                token_limit=token_limit,
+                stream=stream,
+                on_chunk=on_chunk,
+                on_batch_complete=on_batch_complete,
+                jailbreak_text=jailbreak_text,
+                start_time=start_time,
+                extracted_at=extracted_at,
+                cache_enabled=cache_enabled,
+                cache_key=cache_key,
+                chapters_hash=chapters_hash,
+                cache_ttl_hours=cache_ttl_hours,
+                lookback=lookback,
+                log_prefix=log_prefix,
+            )
+        finally:
+            # 释放 aiohttp session，避免 Unclosed client session 警告
+            try:
+                await client.close()
+            except Exception as e:
+                logger.warning("关闭 LLMClient 失败: %s", e)
+
+    async def _extract_common_body(
+        self,
+        client: LLMClient,
+        default_model: str,
+        project: Project | None,
+        config: dict[str, Any],
+        target_chapters: list[Chapter],
+        token_limit: int,
+        stream: bool,
+        on_chunk: Callable[[str], None] | None,
+        on_batch_complete: Callable[[list, int, int], None] | None,
+        jailbreak_text: str,
+        start_time: float,
+        extracted_at: datetime,
+        cache_enabled: bool,
+        cache_key: str,
+        chapters_hash: str,
+        cache_ttl_hours: int,
+        lookback: int,
+        log_prefix: str,
+    ) -> ExtractResult:
         # 模型由流程端点配置 flow_models["context_extraction"] 控制
         # （_get_llm_client 已解析 get_flow_model → 端点 default_model → DEFAULT_EXTRACTOR_MODEL）
         model = default_model
@@ -2129,7 +2179,8 @@ class ContextExtractor:
 
             # 校验并规范化，收集本批独立结果（uid 替换合并仅用于 UI best-effort 显示）
             # 循环仅 break（成功）或 return（失败）退出，此处 raw_entries 必非 None
-            assert raw_entries is not None
+            if raw_entries is None:
+                raise RuntimeError("提取循环异常退出：raw_entries 为 None（应有 break/return 保证）")
             batch_entries: list[ContextEntry] = []
             for raw in raw_entries:
                 entry = _validate_and_normalize_entry(
@@ -2391,6 +2442,45 @@ class ContextExtractor:
         if client_info is None:
             return None, "未配置 API 端点或 API Key 无效"
         client, default_model = client_info
+        try:
+            return await self._extract_protagonist_body(
+                client=client,
+                default_model=default_model,
+                project=project,
+                current_chapter=current_chapter,
+                target_chapters=target_chapters,
+                token_limit=token_limit,
+                on_chunk=on_chunk,
+                on_batch_complete=on_batch_complete,
+                jailbreak_text=jailbreak_text,
+                config=config,
+                cache_enabled=cache_enabled,
+                cache_ttl_hours=cache_ttl_hours,
+                start_time=start_time,
+            )
+        finally:
+            # 释放 aiohttp session，避免 Unclosed client session 警告
+            try:
+                await client.close()
+            except Exception as e:
+                logger.warning("关闭 LLMClient 失败: %s", e)
+
+    async def _extract_protagonist_body(
+        self,
+        client: LLMClient,
+        default_model: str,
+        project: Project,
+        current_chapter: Chapter,
+        target_chapters: list[Chapter],
+        token_limit: int,
+        on_chunk: Callable[[str], None] | None,
+        on_batch_complete: Callable[[int, int], None] | None,
+        jailbreak_text: str,
+        config: dict[str, Any],
+        cache_enabled: bool,
+        cache_ttl_hours: int,
+        start_time: float,
+    ) -> tuple[ProtagonistProfile | None, str]:
         # 模型由流程端点配置 flow_models["protagonist_extraction"] 控制
         model = default_model
 

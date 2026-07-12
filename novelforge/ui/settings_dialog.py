@@ -80,6 +80,17 @@ class ModelFetchWorker(QThread):
         super().__init__(parent)
         self._base_url = base_url
         self._api_key = api_key
+        self._stop = False
+
+    def stop(self) -> None:
+        """请求停止（非阻塞）。
+
+        设置 ``_stop`` 标志。由于 ``run()`` 使用
+        ``loop.run_until_complete`` 阻塞等待 HTTP 响应，此标志不会立即
+        中断进行中的请求；线程会在请求完成后自行退出，并通过
+        ``finished`` 信号触发 ``deleteLater`` 自清理。
+        """
+        self._stop = True
 
     def run(self) -> None:
         """在独立事件循环中获取模型列表。"""
@@ -294,6 +305,11 @@ class EndpointEditDialog(QDialog):
                     worker.error.disconnect()
                 except (RuntimeError, TypeError):
                     pass  # 信号可能已断开
+                try:
+                    worker.stop()
+                    worker.wait(2000)
+                except (RuntimeError, AttributeError):
+                    pass
                 # worker parent=None + finished→deleteLater，可安全在后台完成并自清理
         super().closeEvent(event)
 
@@ -329,6 +345,16 @@ class EndpointEditDialog(QDialog):
         if not api_key:
             QMessageBox.warning(self, "提示", "请先输入 API Key")
             return
+
+        # 停止前一个 worker（若仍在运行）
+        prev = self._model_fetch_worker
+        if prev is not None:
+            try:
+                if prev.isRunning():
+                    prev.stop()
+                    prev.wait(2000)
+            except (RuntimeError, AttributeError):
+                pass
 
         self._fetch_models_btn.setEnabled(False)
         self._fetch_models_btn.setText("获取中...")
@@ -418,6 +444,18 @@ class EndpointEditDialog(QDialog):
         if not base_url:
             QMessageBox.warning(self, "提示", "请输入 Base URL")
             return
+
+        # 校验 Base URL 格式：必须是 http:// 或 https:// 开头
+        from urllib.parse import urlparse
+        parsed = urlparse(base_url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            QMessageBox.warning(
+                self,
+                "提示",
+                "Base URL 必须以 http:// 或 https:// 开头\n例: https://api.openai.com/v1",
+            )
+            return
+        base_url = base_url.rstrip("/")
 
         # API Key：如果用户修改了输入框（不是占位符），则用新值
         key_text = self._key_edit.text().strip()

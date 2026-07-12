@@ -486,13 +486,29 @@ class TestPhaseRewriteAnalysisTemplate:
 
 
 class TestContinuationPanelRewriteCurrentMode:
-    """ContinuationPanel 三模式与 rewrite_current_analysis_requested 信号测试。"""
+    """ContinuationPanel 三模式与 start_flow 信号测试。"""
+
+    @staticmethod
+    def _make_flow_plugins() -> list:
+        """创建 3 个内置流程插件的 mock（模拟 FlowPluginService 注册表）。"""
+        plugins = []
+        for plugin_id, name in [
+            ("single", "单章续写"),
+            ("volume", "卷续写"),
+            ("rewrite_current", "重写当前章节"),
+        ]:
+            plugin = MagicMock()
+            plugin.id = plugin_id
+            plugin.name = name
+            plugins.append(plugin)
+        return plugins
 
     def test_mode_combo_has_three_items(self, qapp) -> None:
         """模式 combo 含三个选项（single/volume/rewrite_current）。"""
         from novelforge.ui.continuation_panel import ContinuationPanel
 
         panel = ContinuationPanel()
+        panel.set_flow_plugins(self._make_flow_plugins())
         assert panel._mode_combo.count() == 3
         # 验证 itemData
         modes = [
@@ -508,6 +524,7 @@ class TestContinuationPanelRewriteCurrentMode:
         from novelforge.ui.continuation_panel import ContinuationPanel
 
         panel = ContinuationPanel()
+        panel.set_flow_plugins(self._make_flow_plugins())
         panel.set_mode("rewrite_current")
         assert panel.get_mode() == "rewrite_current"
 
@@ -519,42 +536,43 @@ class TestContinuationPanelRewriteCurrentMode:
         assert hasattr(panel, "rewrite_current_analysis_requested")
 
     def test_start_clicked_emits_rewrite_signal_in_rewrite_mode(self, qapp) -> None:
-        """rewrite_current 模式下点击开始 → 发射 rewrite_current_analysis_requested。"""
+        """rewrite_current 模式下点击开始 → 发射 start_flow(plugin_id='rewrite_current')。"""
         from novelforge.ui.continuation_panel import ContinuationPanel
 
         panel = ContinuationPanel()
+        panel.set_flow_plugins(self._make_flow_plugins())
         panel.set_mode("rewrite_current")
 
-        received: list[dict] = []
-        panel.rewrite_current_analysis_requested.connect(
-            lambda params: received.append(params)
+        received: list[tuple] = []
+        panel.start_flow.connect(
+            lambda plugin_id, params: received.append((plugin_id, params))
         )
 
         panel._on_start_clicked()
 
         assert len(received) == 1, (
-            "rewrite_current 模式下点击开始应发射 rewrite_current_analysis_requested 信号"
+            "rewrite_current 模式下点击开始应发射 start_flow 信号"
         )
-        assert "model" in received[0]
+        assert received[0][0] == "rewrite_current"
+        assert "model" in received[0][1]
 
     def test_start_clicked_emits_start_continuation_in_single_mode(self, qapp) -> None:
-        """single 模式下点击开始 → 仍发射 start_continuation（不破坏现有行为）。"""
+        """single 模式下点击开始 → 发射 start_flow(plugin_id='single')。"""
         from novelforge.ui.continuation_panel import ContinuationPanel
 
         panel = ContinuationPanel()
+        panel.set_flow_plugins(self._make_flow_plugins())
         panel.set_mode("single")
 
-        start_received: list[dict] = []
-        rewrite_received: list[dict] = []
-        panel.start_continuation.connect(lambda p: start_received.append(p))
-        panel.rewrite_current_analysis_requested.connect(
-            lambda p: rewrite_received.append(p)
+        received: list[tuple] = []
+        panel.start_flow.connect(
+            lambda plugin_id, params: received.append((plugin_id, params))
         )
 
         panel._on_start_clicked()
 
-        assert len(start_received) == 1
-        assert len(rewrite_received) == 0
+        assert len(received) == 1
+        assert received[0][0] == "single"
 
 
 # ===== 8. FlowEndpointDialog FLOW_DEFINITIONS 含 rewrite_analysis =====

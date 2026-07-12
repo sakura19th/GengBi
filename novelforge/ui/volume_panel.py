@@ -23,6 +23,8 @@ import logging
 import re
 from typing import Any
 
+from pydantic import ValidationError
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QTextCursor
 from PySide6.QtWidgets import (
@@ -285,8 +287,8 @@ def parse_deep_analysis(text: str) -> DeepAnalysis | None:
             recurring_elements=_parse_json_list(_extract_field(text, "复现元素")),
             key_phrases=_parse_json_list(_extract_field(text, "关键短语")),
         )
-    except Exception:
-        logger.debug("解析 DeepAnalysis 失败", exc_info=True)
+    except (ValidationError, ValueError, TypeError):
+        logger.warning("解析 DeepAnalysis 失败", exc_info=True)
         return None
 
 
@@ -362,7 +364,8 @@ def _parse_chapter_plan_block(block: str) -> ChapterPlan | None:
             chapter_hook=_extract_field(block, "章节钩子"),
             target_words=_parse_int(_extract_field(block, "目标字数"), 2000),
         )
-    except Exception:
+    except (ValidationError, ValueError, TypeError):
+        logger.warning("解析 ChapterPlan 失败", exc_info=True)
         return None
 
 

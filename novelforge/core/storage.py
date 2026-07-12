@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -153,14 +154,26 @@ def get_preset_file_path(storage_path: Path, preset_id: str) -> Path:
 
 
 def is_network_filesystem(path: Path) -> bool:
-    """检测路径是否位于网络文件系统。
-
-    网络文件系统（NFS/SMB/CIFS 等）不支持 SQLite WAL 模式的共享内存文件，
-    需降级为 DELETE 日志模式。通过检查 /proc/mounts 判断挂载类型。
-    """
+    """检测路径是否位于网络文件系统（可能影响 SQLite 性能）。"""
     try:
         resolved = path.resolve()
-        # 收集所有挂载点及其文件系统类型
+        # Windows: 检测 UNC 路径和网络驱动器
+        if sys.platform == "win32":
+            resolved_str = str(resolved)
+            # UNC 路径（如 \\server\share）
+            if resolved_str.startswith("\\\\"):
+                return True
+            # 检测网络驱动器（如 Z:\）
+            try:
+                import ctypes
+                drive = ctypes.windll.kernel32.GetDriveTypeW(f"{resolved_str[:3]}")
+                # 1 = DRIVE_REMOVABLE, 2 = DRIVE_FIXED, 3 = DRIVE_REMOTE
+                if drive == 3:  # DRIVE_REMOTE
+                    return True
+            except (OSError, AttributeError, IndexError):
+                pass
+            return False
+        # Linux: 读取 /proc/mounts
         mount_points: list[tuple[str, str]] = []
         with open("/proc/mounts", "r", encoding="utf-8") as f:
             for line in f:
@@ -335,6 +348,8 @@ class Storage:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self._conn = await aiosqlite.connect(str(self._db_path))
+        # 启用 Row 工厂，支持按列名访问（row["id"]），避免依赖列顺序
+        self._conn.row_factory = aiosqlite.Row
 
         # 收紧 DB 文件权限：含完整提示词与续写历史（敏感小说内容），仅所有者可读写
         from novelforge.utils.paths import secure_file
@@ -554,6 +569,8 @@ class Storage:
 
         同时删除文件系统中的章节文件目录。
         """
+        # 校验 project_id 防止路径穿越（避免 shutil.rmtree 删除任意目录）
+        validate_id(project_id, "project_id")
         # 删除 SQLite 记录（级联删除章节和续写）
         await self.conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         await self.conn.execute("DELETE FROM chapters WHERE project_id = ?", (project_id,))
@@ -571,19 +588,19 @@ class Storage:
     def _row_to_project(row: aiosqlite.Row) -> dict[str, Any]:
         """将数据库行转换为项目字典。"""
         return {
-            "id": row[0],
-            "name": row[1],
-            "created_at": row[2],
-            "updated_at": row[3],
-            "source_file": row[4],
-            "novel_profile": json.loads(row[5]) if row[5] else {},
-            "preset_id": row[6],
-            "regex_script_ids": json.loads(row[7]) if row[7] else [],
-            "extract_config": json.loads(row[8]) if row[8] else None,
-            "chapter_split_rule": json.loads(row[9]) if row[9] else {},
-            "world_ontology": json.loads(row[10]) if len(row) > 10 and row[10] else None,
-            "worldbook_id": row[11] if len(row) > 11 and row[11] else "",
-            "custom_audit_rules": json.loads(row[12]) if len(row) > 12 and row[12] else [],
+            "id": row["id"],
+            "name": row["name"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "source_file": row["source_file"],
+            "novel_profile": json.loads(row["novel_profile"]) if row["novel_profile"] else {},
+            "preset_id": row["preset_id"],
+            "regex_script_ids": json.loads(row["regex_script_ids"]) if row["regex_script_ids"] else [],
+            "extract_config": json.loads(row["extract_config"]) if row["extract_config"] else None,
+            "chapter_split_rule": json.loads(row["chapter_split_rule"]) if row["chapter_split_rule"] else {},
+            "world_ontology": json.loads(row["world_ontology"]) if row["world_ontology"] else None,
+            "worldbook_id": row["worldbook_id"] if row["worldbook_id"] else "",
+            "custom_audit_rules": json.loads(row["custom_audit_rules"]) if row["custom_audit_rules"] else [],
         }
 
     # ===== 章节操作 =====
@@ -946,15 +963,15 @@ class Storage:
     def _row_to_chapter(row: aiosqlite.Row) -> dict[str, Any]:
         """将数据库行转换为章节字典（不含正文）。"""
         return {
-            "id": row[0],
-            "project_id": row[1],
-            "index": row[2],
-            "title": row[3],
-            "word_count": row[4],
-            "metadata": json.loads(row[5]) if row[5] else {},
-            "created_at": row[6],
-            "updated_at": row[7],
-            "protagonist_profile": json.loads(row[8]) if len(row) > 8 and row[8] else None,
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "index": row["index"],
+            "title": row["title"],
+            "word_count": row["word_count"],
+            "metadata": json.loads(row["metadata"]) if row["metadata"] else {},
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "protagonist_profile": json.loads(row["protagonist_profile"]) if row["protagonist_profile"] else None,
         }
 
     # ===== 续写版本操作 =====
@@ -1033,26 +1050,26 @@ class Storage:
     def _row_to_continuation(row: aiosqlite.Row) -> dict[str, Any]:
         """将数据库行转换为续写字典。"""
         return {
-            "id": row[0],
-            "chapter_id": row[1],
-            "created_at": row[2],
-            "content": row[3],
-            "model": row[4],
-            "is_accepted": bool(row[5]),
-            "parent_id": row[6] if len(row) > 6 else None,
-            "status": row[7] if len(row) > 7 else "completed",
-            "created_by": row[8] if len(row) > 8 else "continuation",
-            "parameters_snapshot": json.loads(row[9]) if len(row) > 9 and row[9] else {},
-            "preset_id": row[10] if len(row) > 10 else "",
-            "preset_snapshot": json.loads(row[11]) if len(row) > 11 and row[11] else {},
-            "regex_script_ids_snapshot": json.loads(row[12]) if len(row) > 12 and row[12] else [],
-            "extracted_context_snapshot": json.loads(row[13]) if len(row) > 13 and row[13] else [],
-            "prompt_snapshot": json.loads(row[14]) if len(row) > 14 and row[14] else [],
-            "reasoning_content": row[15] if len(row) > 15 else None,
-            "generated_title": row[16] if len(row) > 16 else "",
-            "agent_artifacts": json.loads(row[17]) if len(row) > 17 and row[17] else None,
-            "volume_artifacts": json.loads(row[18]) if len(row) > 18 and row[18] else None,
-            "highlights": json.loads(row[19]) if len(row) > 19 and row[19] else [],
+            "id": row["id"],
+            "chapter_id": row["chapter_id"],
+            "created_at": row["created_at"],
+            "content": row["content"],
+            "model": row["model"],
+            "is_accepted": bool(row["is_accepted"]),
+            "parent_id": row["parent_id"],
+            "status": row["status"],
+            "created_by": row["created_by"],
+            "parameters_snapshot": json.loads(row["parameters_snapshot"]) if row["parameters_snapshot"] else {},
+            "preset_id": row["preset_id"],
+            "preset_snapshot": json.loads(row["preset_snapshot"]) if row["preset_snapshot"] else {},
+            "regex_script_ids_snapshot": json.loads(row["regex_script_ids_snapshot"]) if row["regex_script_ids_snapshot"] else [],
+            "extracted_context_snapshot": json.loads(row["extracted_context_snapshot"]) if row["extracted_context_snapshot"] else [],
+            "prompt_snapshot": json.loads(row["prompt_snapshot"]) if row["prompt_snapshot"] else [],
+            "reasoning_content": row["reasoning_content"],
+            "generated_title": row["generated_title"],
+            "agent_artifacts": json.loads(row["agent_artifacts"]) if row["agent_artifacts"] else None,
+            "volume_artifacts": json.loads(row["volume_artifacts"]) if row["volume_artifacts"] else None,
+            "highlights": json.loads(row["highlights"]) if row["highlights"] else [],
         }
 
     # ===== 历史日志操作 =====
@@ -1206,18 +1223,18 @@ class Storage:
     def _row_to_history_log(row: aiosqlite.Row) -> dict[str, Any]:
         """将数据库行转换为历史日志字典。"""
         return {
-            "id": row[0],
-            "project_id": row[1],
-            "chapter_id": row[2],
-            "swipe_id": row[3],
-            "started_at": row[4],
-            "finished_at": row[5],
-            "status": row[6],
-            "model": row[7],
-            "parameters": json.loads(row[8]) if row[8] else {},
-            "prompt_messages": json.loads(row[9]) if row[9] else [],
-            "output_text": row[10] if row[10] is not None else "",
-            "error_message": row[11],
+            "id": row["id"],
+            "project_id": row["project_id"],
+            "chapter_id": row["chapter_id"],
+            "swipe_id": row["swipe_id"],
+            "started_at": row["started_at"],
+            "finished_at": row["finished_at"],
+            "status": row["status"],
+            "model": row["model"],
+            "parameters": json.loads(row["parameters_json"]) if row["parameters_json"] else {},
+            "prompt_messages": json.loads(row["prompt_messages_json"]) if row["prompt_messages_json"] else [],
+            "output_text": row["output_text"] if row["output_text"] is not None else "",
+            "error_message": row["error_message"],
         }
 
     # ===== 缓存操作 =====

@@ -1,5 +1,139 @@
 # 更新日志
 
+## 2026-07-12：发布 v0.2.10 版本——完整代码审查与修复 + 文档同步规则完善
+
+### 背景
+
+前一次会话对整个赓笔项目进行了完整代码审查，发现 40+ 问题分布在前端 UI、核心服务、数据模型与测试四个层面，覆盖严重 Bug 与安全、代码正确性、输入校验与 UX、测试质量四类。所有修复已完成并通过测试套件验证（663 passed, 15 skipped, 12 deselected）。本次发版将版本号从 v0.2.9 提升到 v0.2.10，并完善 agent.md 中关于 FLOW_PLUGIN_GUIDE.md 的更新触发规则。
+
+### 核心改动
+
+- `novelforge/__init__.py`：`__version__` 从 `"0.2.9"` 提升到 `"0.2.10"`
+- `README.md`：
+  - 顶部版本徽标 `v0.2.9` → `v0.2.10`
+  - 「更新记录」章节顶部追加 `### v0.2.10` 小节，列出 19 条修复要点（涵盖 ContextExtractor session 泄漏、storage 路径穿越、ConfigManager 线程安全、MainWindow closeEvent 崩溃、ContinuationPanel swipe 污染、VolumeOrchestrator 无限循环、FlowExecutor 递归栈溢出、FullTextSearchWorker 跨线程 SQLite、DebugPromptDialog 对话框契约、SettingsDialog base_url 校验、apply_highlights 异常吞没、ThreadPoolExecutor 未 shutdown、_row_to_* 位置索引、is_network_filesystem Windows 检测、volume_panel parse 异常、async_runner 协程泄漏、exporter 混淆表达式、9 项测试修复）
+- `agent.md`：
+  - 「当前版本」从 `v0.2.9` 更新到 `v0.2.10`
+  - 「修改后必须更新」节新增 `FLOW_PLUGIN_GUIDE.md` 更新触发规则段落，明确 8 类触发场景：
+    1. 数据模型变更（FlowPlugin/FlowStage 字段/校验规则）
+    2. agent 类型变更（新增/删除/返回值契约）
+    3. ui_mode / accept_mode 变更
+    4. flow_key 变更（标准 flow_key + 配置项结构）
+    5. 执行引擎逻辑变更（阶段推进/params 合并/挂起恢复/cancel）
+    6. 服务层行为变更（导入规则/版本升级/存储路径）
+    7. 内置插件变更（single/volume/rewrite_current JSON）
+    8. MainWindow 接线变更（start_flow/handler 分发/accept_mode 适配/FlowPluginManager UI）
+  - 每类场景标注需更新的 FLOW_PLUGIN_GUIDE.md 对应章节编号
+
+### 测试
+
+- `python -m pytest tests/ -q -k "not TestUIComponents" --ignore=tests/test_m5_polish.py --tb=short`
+- 结果：`663 passed, 15 skipped, 12 deselected in 8.29s`（0 失败，无回归）
+
+### 文档同步
+
+- `README.md`：版本徽标 + v0.2.10 更新记录
+- `agent.md`：当前版本号 + FLOW_PLUGIN_GUIDE.md 更新触发规则
+- `update.md`：本条目
+
+## 2026-07-12：修复 5 个 service 文件的异常吞没/无限循环/递归栈溢出问题
+
+### 背景
+
+5 个 service 文件存在中低风险问题：① ContinuationWorker/AuditWorker/AsyncLoopRunner 的 `run()` finally 块用 `except Exception: pass` 静默吞掉清理异常，且未在 `run_until_complete` 前检查 `loop.is_closed()`，循环已关闭时会抛 RuntimeError 被静默吞掉；② AsyncLoopRunner.run 超时后未取消 `concurrent.futures.Future`，导致协程在后台泄漏；③ VolumeOrchestrator 逐章 verify/revise 循环中 critical 问题忽略 `max_revise_rounds_per_chapter` 上限一直修正到通过，若 LLM 持续产生 critical 问题会陷入无限循环；④ FlowExecutor._execute_current_stage 用递归调用自身推进下一阶段，插件阶段数多时会触及 Python 递归上限。
+
+### 核心改动
+
+- `novelforge/services/continuation_worker.py`：
+  - `run()` finally 块：三处 `except Exception: pass` 改为 `except Exception as e: logger.warning("...: %s", e)`（描述性消息）；每处 `self._loop.run_until_complete(...)` 前加 `if not self._loop.is_closed():` 守卫；保留末尾 `self._loop.close()`
+- `novelforge/services/audit_worker.py`：
+  - `run()` finally 块：同 continuation_worker.py 的修复模式
+- `novelforge/services/async_runner.py`：
+  - `_run_loop` finally 块：`except Exception: pass` 改为 `except Exception as e: logger.warning("AsyncLoopRunner cleanup error: %s", e)`
+  - `run`：超时分支调 `future.cancel()` 取消协程后再 `raise`，避免协程在后台事件循环中泄漏
+- `novelforge/services/volume_orchestrator.py`：
+  - 新增模块级常量 `MAX_CRITICAL_REVISE_ROUNDS = 20`
+  - `_run_chapter_loop` 中两处 critical-issue verify/revise 循环（首轮强制修改循环 + after_chapter reject 后的循环）均新增硬上限检查：`if has_critical and rounds >= MAX_CRITICAL_REVISE_ROUNDS: logger.error(...); break`
+- `novelforge/services/flow_executor.py`：
+  - `_execute_current_stage`：递归自调用改为 `while True` 迭代循环推进下一阶段；CANCEL/PENDING/完成 三种退出条件用 `return` 退出循环，正常完成仅更新 `_prev_output`/`_stage_index` 后继续循环；`resume()` 无需改动（设置状态后调用本方法重新进入循环）
+
+### 测试
+
+- 5 个文件均通过 `python -c "import ast; ast.parse(open(r'FILE_PATH', encoding='utf-8').read())"` 语法校验
+
+### 文档同步
+
+- `agent.md`：line 168 强制修改流程条目补充 `MAX_CRITICAL_REVISE_ROUNDS=20` 硬上限说明；line 53 async_runner.py 描述补充超时取消与清理日志；line 56 flow_executor.py 描述补充迭代循环推进
+- `update.md`：本条目
+
+## 2026-07-12：修复 context_extractor.py 三处 aiohttp session 泄漏与 assert 控制流问题
+
+### 背景
+
+`novelforge/services/context_extractor.py` 存在三处问题：① `_extract_common` 方法在 line 1907 创建 LLMClient 后从未调用 `await client.close()`，方法有多个 return 点，导致 aiohttp session 泄漏（Unclosed client session 警告）；② `extract_protagonist_streaming` 方法存在相同的 session 泄漏问题；③ 两处 `assert` 语句用于控制流（`assert batch_protagonist is not None` / `assert raw_entries is not None`），在 Python `-O` 模式下会被移除导致逻辑错误。
+
+### 核心改动
+
+- `novelforge/services/context_extractor.py`：
+  - `_extract_common`：client 创建后的 body（330+ 行）抽取到辅助方法 `_extract_common_body`，原方法用 `try/finally` 包裹调用，`finally` 块中 `await client.close()` 释放 aiohttp session（镜像 `ontology_extractor.py` lines 1006-1011 的模式）
+  - `extract_protagonist_streaming`：同样将 client 创建后的 body 抽取到 `_extract_protagonist_body`，`try/finally` 包裹调用并关闭 client
+  - 两处 `assert ... is not None` 替换为 `if ... is None: raise RuntimeError(...)`，保证 `-O` 模式下逻辑不变
+
+### 测试
+
+- `python -c "import ast; ast.parse(open(r'novelforge/services/context_extractor.py', encoding='utf-8').read())"` 通过（Syntax OK）
+
+### 文档同步
+
+- `agent.md`：`context_extractor.py` 描述补充 try/finally 关闭 LLMClient 释放 aiohttp session + body 抽到辅助方法
+- `update.md`：本条目
+
+## 2026-07-12：修复 storage.py 三处安全与健壮性问题
+
+### 背景
+
+`novelforge/core/storage.py` 存在三处问题：① `delete_project` 直接用 `project_id` 拼接路径并 `shutil.rmtree`，未经 `validate_id` 校验，存在路径穿越漏洞（如 `project_id="../something"` 可删除任意目录）；② `_row_to_project`/`_row_to_chapter`/`_row_to_continuation`/`_row_to_history_log` 四个方法使用 `row[N]` 位置索引，列顺序变更（如迁移补列）会导致错位；③ `is_network_filesystem` 读取 `/proc/mounts`（仅 Linux 存在），Windows 上始终返回 False，无法检测 UNC 路径与网络驱动器。
+
+### 核心改动
+
+- `novelforge/core/storage.py`：
+  - `delete_project`：方法首行新增 `validate_id(project_id, "project_id")`（在任何 SQL 执行前校验），防止路径穿越删除任意目录
+  - `connect()`：新增 `self._conn.row_factory = aiosqlite.Row`，启用按列名访问（命名访问的前提条件）
+  - `_row_to_project`/`_row_to_chapter`/`_row_to_continuation`/`_row_to_history_log`：`row[N]` 位置索引改为 `row["column_name"]` 命名访问（列名对照 CREATE TABLE / SELECT 语句核实），移除 `len(row) > N` 防御性判断
+  - `is_network_filesystem`：新增 Windows 分支（`sys.platform == "win32"` 时检测 UNC 路径 `\\server\share` + `GetDriveTypeW` 判定 DRIVE_REMOTE 网络驱动器），Linux `/proc/mounts` 逻辑保持不变
+  - 新增 `import sys` 模块级导入
+
+### 测试
+
+- `python -c "import ast; ast.parse(open(r'novelforge/core/storage.py', encoding='utf-8').read())"` 通过（Syntax OK）
+
+### 文档同步
+
+- `agent.md`：storage.py 描述补充 row_factory/delete_project validate_id/is_network_filesystem Windows 检测；安全加固第 13 节 ID 路径穿越防护更新为四重防御（新增存储层 delete_project 入口）
+- `update.md`：本条目
+
+## 2026-07-12：修复主窗口三处线程与参数校验问题
+
+### 背景
+
+`novelforge/ui/main_window.py` 存在三处问题：① `closeEvent` 仅停止 `_continuation_worker`，未停止 `_audit_worker` 与 `_volume_orchestrator`，关闭窗口时审计/卷续写线程仍在后台运行；② `_on_start_continuation` 缺少温度与目标字数范围校验，异常参数会透传到 worker；③ 审计 worker 的 `chunk_received` 信号直接连接到 `AuditDialog.append_chunk`，若对话框在 worker 仍在流式输出时被关闭/删除，会触发 `RuntimeError: wrapped C/C++ object has been deleted` 崩溃。
+
+### 核心改动
+
+- `novelforge/ui/main_window.py`：
+  - `closeEvent`：在停止 `_continuation_worker` 后，新增循环停止 `_audit_worker` 与 `_volume_orchestrator`（`getattr` 防御式访问 + `isRunning` 检查 + `stop` + `wait(3000)`）
+  - `_on_start_continuation`：在模型检查后新增温度（`float` + 0.0-2.0 范围）与目标字数（`int` + 100-50000 范围）校验，非法值弹 `QMessageBox` 提示并 `return`
+  - 审计 `chunk_received` 改为连接到新增中转槽 `_on_audit_chunk_received`（`getattr` 取 `_audit_dialog` + `try/except RuntimeError` 防已删除崩溃）；`_on_audit_cancelled` 在 `stop` 前先 `disconnect` `chunk_received` 信号防止排队信号触达对话框
+
+### 测试
+
+- `python -c "import ast; ast.parse(open(r'novelforge/ui/main_window.py', encoding='utf-8').read())"` 通过（SYNTAX OK）
+
+### 文档同步
+
+- `agent.md`：`main_window.py` 描述补充 `closeEvent` 三 worker 停止、`_on_start_continuation` 参数范围校验、审计 `chunk_received` 中转槽 + 取消前 `disconnect`
+- `update.md`：本条目
+
 ## 2026-07-12：新增流程插件使用说明文档
 
 ### 背景

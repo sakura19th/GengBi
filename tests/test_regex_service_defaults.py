@@ -35,12 +35,12 @@ def _global_path(service: RegexService) -> Path:
 def test_ensure_default_scripts_injects_when_absent(
     regex_service: RegexService,
 ) -> None:
-    """global.json 不存在时，注入 4 条默认脚本。"""
+    """global.json 不存在时，注入 5 条默认脚本。"""
     assert not _global_path(regex_service).exists()
 
     scripts = regex_service.ensure_default_scripts_exist()
 
-    assert len(scripts) == 4
+    assert len(scripts) == 5
     names = {s.scriptName for s in scripts}
     assert "GB-思维链隐藏" in names
     assert _global_path(regex_service).exists()
@@ -55,7 +55,7 @@ def test_ensure_default_scripts_injects_when_empty(
 
     scripts = regex_service.ensure_default_scripts_exist()
 
-    assert len(scripts) == 4
+    assert len(scripts) == 5
     thinking = next(
         s for s in scripts if s.scriptName == "GB-思维链隐藏"
     )
@@ -100,4 +100,4 @@ def test_injected_scripts_loadable_via_get_ordered(
     scripts = [s for s, _ in ordered]
     names = {s.scriptName for s in scripts}
     assert "GB-思维链隐藏" in names
-    assert len(scripts) == 4
+    assert len(scripts) == 5

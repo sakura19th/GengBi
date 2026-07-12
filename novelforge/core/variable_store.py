@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,9 @@ class VariableStore:
         self._global_cache: dict[str, Any] | None = None
         self._project_cache: dict[str, dict[str, Any]] = {}
 
+        # 线程锁：保护 _cache/_global_cache/_project_cache 的并发读写
+        self._lock = threading.Lock()
+
     # ===== 路径计算 =====
 
     def _get_global_file_path(self) -> Path:
@@ -90,55 +94,59 @@ class VariableStore:
 
     def _load_global(self) -> dict[str, Any]:
         """加载全局变量（带内存缓存）。"""
-        if self._global_cache is not None:
-            return self._global_cache
+        with self._lock:
+            if self._global_cache is not None:
+                return self._global_cache
 
-        file_path = self._get_global_file_path()
-        data, error = load_json_with_recovery(file_path)
-        if error is not None:
-            logger.error("加载全局变量失败: %s", error)
-            data = {}
-        elif data is None:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
+            file_path = self._get_global_file_path()
+            data, error = load_json_with_recovery(file_path)
+            if error is not None:
+                logger.error("加载全局变量失败: %s", error)
+                data = {}
+            elif data is None:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
 
-        self._global_cache = data
-        return data
+            self._global_cache = data
+            return data
 
     def _save_global(self, data: dict[str, Any]) -> None:
         """保存全局变量。"""
-        file_path = self._get_global_file_path()
-        save_json_with_backup(file_path, data)
-        self._global_cache = dict(data)
+        with self._lock:
+            file_path = self._get_global_file_path()
+            save_json_with_backup(file_path, data)
+            self._global_cache = dict(data)
 
     # ===== project 作用域 =====
 
     def _load_project(self, project_id: str) -> dict[str, Any]:
         """加载项目变量（带内存缓存）。"""
-        if project_id in self._project_cache:
-            return self._project_cache[project_id]
+        with self._lock:
+            if project_id in self._project_cache:
+                return self._project_cache[project_id]
 
-        file_path = self._get_project_file_path(project_id)
-        data, error = load_json_with_recovery(file_path)
-        if error is not None:
-            logger.error("加载项目变量失败 %s: %s", project_id, error)
-            data = {}
-        elif data is None:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
+            file_path = self._get_project_file_path(project_id)
+            data, error = load_json_with_recovery(file_path)
+            if error is not None:
+                logger.error("加载项目变量失败 %s: %s", project_id, error)
+                data = {}
+            elif data is None:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
 
-        self._project_cache[project_id] = data
-        return data
+            self._project_cache[project_id] = data
+            return data
 
     def _save_project(self, project_id: str, data: dict[str, Any]) -> None:
         """保存项目变量。"""
-        file_path = self._get_project_file_path(project_id)
-        # 确保目录存在
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        save_json_with_backup(file_path, data)
-        self._project_cache[project_id] = dict(data)
+        with self._lock:
+            file_path = self._get_project_file_path(project_id)
+            # 确保目录存在
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            save_json_with_backup(file_path, data)
+            self._project_cache[project_id] = dict(data)
 
     # ===== chapter 作用域 =====
 
@@ -200,7 +208,8 @@ class VariableStore:
             data = self._get_chapter_vars(chapter_metadata)
             return data.get(name, default)
         if scope == SCOPE_CACHE:
-            return self._cache.get(name, default)
+            with self._lock:
+                return self._cache.get(name, default)
         logger.warning("未知的作用域 %r，返回默认值", scope)
         return default
 
@@ -241,7 +250,8 @@ class VariableStore:
             self._set_chapter_vars(chapter_metadata, data)
             return
         if scope == SCOPE_CACHE:
-            self._cache[name] = value
+            with self._lock:
+                self._cache[name] = value
             return
         raise ValueError(f"未知的作用域: {scope}")
 
@@ -274,7 +284,8 @@ class VariableStore:
                 return False
             return name in self._get_chapter_vars(chapter_metadata)
         if scope == SCOPE_CACHE:
-            return name in self._cache
+            with self._lock:
+                return name in self._cache
         return False
 
     def delvar(
@@ -321,10 +332,11 @@ class VariableStore:
                 return True
             return False
         if scope == SCOPE_CACHE:
-            if name in self._cache:
-                del self._cache[name]
-                return True
-            return False
+            with self._lock:
+                if name in self._cache:
+                    del self._cache[name]
+                    return True
+                return False
         return False
 
     # ===== 批量操作 =====
@@ -356,7 +368,8 @@ class VariableStore:
                 return {}
             return dict(self._get_chapter_vars(chapter_metadata))
         if scope == SCOPE_CACHE:
-            return dict(self._cache)
+            with self._lock:
+                return dict(self._cache)
         return {}
 
     def clear_scope(
@@ -378,7 +391,8 @@ class VariableStore:
             if project_id:
                 self._save_project(project_id, {})
         elif scope == SCOPE_CACHE:
-            self._cache.clear()
+            with self._lock:
+                self._cache.clear()
         else:
             logger.warning("不支持清空作用域: %s", scope)
 
@@ -393,13 +407,14 @@ class VariableStore:
             scope: 作用域（空字符串表示所有作用域）
             project_id: 项目 ID
         """
-        if not scope or scope == SCOPE_GLOBAL:
-            self._global_cache = None
-        if not scope or scope == SCOPE_PROJECT:
-            if project_id:
-                self._project_cache.pop(project_id, None)
-            elif not scope:
-                self._project_cache.clear()
+        with self._lock:
+            if not scope or scope == SCOPE_GLOBAL:
+                self._global_cache = None
+            if not scope or scope == SCOPE_PROJECT:
+                if project_id:
+                    self._project_cache.pop(project_id, None)
+                elif not scope:
+                    self._project_cache.clear()
 
     # ===== 便捷方法（用于模板引擎绑定） =====
 

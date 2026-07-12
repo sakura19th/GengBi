@@ -134,46 +134,51 @@ class FlowExecutor:
         return self._plugin.stages[self._stage_index]
 
     def _execute_current_stage(self) -> None:
-        """执行当前阶段，根据返回值决定推进/挂起/中断。"""
-        if self._plugin is None:
-            return
-        if self._stage_index >= len(self._plugin.stages):
-            logger.info("流程插件执行完成: %s", self._plugin.id)
-            self._plugin = None
-            return
+        """执行当前阶段，根据返回值决定推进/挂起/中断。
 
-        stage = self._plugin.stages[self._stage_index]
-        handler = self._handlers.get(stage.agent)
-        if handler is None:
-            logger.error("未注册的 agent 类型: %s（阶段 %s）", stage.agent, stage.id)
-            self._plugin = None
-            raise ValueError(f"未注册的 agent 类型: {stage.agent}")
+        使用迭代循环而非递归推进下一阶段，避免插件阶段数较多时
+        触及 Python 递归上限。``resume`` 通过设置 ``_prev_output``/
+        ``_stage_index`` 后调用本方法重新进入循环。
+        """
+        while True:
+            if self._plugin is None:
+                return
+            if self._stage_index >= len(self._plugin.stages):
+                logger.info("流程插件执行完成: %s", self._plugin.id)
+                self._plugin = None
+                return
 
-        # 合并参数：面板参数 + 阶段 params（阶段覆盖面板）
-        stage_params = {**self._params, **stage.params}
-        # 上一阶段输出作为本阶段输入
-        if stage.input_from and self._prev_output is not None:
-            stage_params["_prev_output"] = self._prev_output
+            stage = self._plugin.stages[self._stage_index]
+            handler = self._handlers.get(stage.agent)
+            if handler is None:
+                logger.error("未注册的 agent 类型: %s（阶段 %s）", stage.agent, stage.id)
+                self._plugin = None
+                raise ValueError(f"未注册的 agent 类型: {stage.agent}")
 
-        logger.info(
-            "执行阶段 %d/%d: %s（agent=%s）",
-            self._stage_index + 1,
-            len(self._plugin.stages),
-            stage.id,
-            stage.agent,
-        )
-        result = handler(stage, stage_params, self._context)
+            # 合并参数：面板参数 + 阶段 params（阶段覆盖面板）
+            stage_params = {**self._params, **stage.params}
+            # 上一阶段输出作为本阶段输入
+            if stage.input_from and self._prev_output is not None:
+                stage_params["_prev_output"] = self._prev_output
 
-        if result == CANCEL:
-            logger.info("用户取消，中断流程: %s", self._plugin.id)
-            self._plugin = None
-            return
+            logger.info(
+                "执行阶段 %d/%d: %s（agent=%s）",
+                self._stage_index + 1,
+                len(self._plugin.stages),
+                stage.id,
+                stage.agent,
+            )
+            result = handler(stage, stage_params, self._context)
 
-        if result == PENDING:
-            logger.info("阶段 %s 挂起等待用户交互", stage.id)
-            return
+            if result == CANCEL:
+                logger.info("用户取消，中断流程: %s", self._plugin.id)
+                self._plugin = None
+                return
 
-        # 正常完成，推进下一阶段
-        self._prev_output = result
-        self._stage_index += 1
-        self._execute_current_stage()
+            if result == PENDING:
+                logger.info("阶段 %s 挂起等待用户交互", stage.id)
+                return
+
+            # 正常完成，推进下一阶段（循环继续执行下一阶段）
+            self._prev_output = result
+            self._stage_index += 1

@@ -52,6 +52,8 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from cryptography.fernet import InvalidToken
+
 from novelforge.core.crypto import CryptoManager
 from novelforge.core.migration import CURRENT_CONFIG_VERSION, migrate_config
 from novelforge.core.storage import (
@@ -268,21 +270,23 @@ class ConfigManager:
             return ""
         try:
             return self.get_crypto_manager().decrypt(encrypted)
-        except Exception as e:
-            logger.error("解密 API Key 失败: %s", e)
+        except (InvalidToken, ValueError, TypeError) as e:
+            logger.error("解密 API Key 失败: %s", e, exc_info=True)
             return ""
 
     # ===== API 端点管理 =====
 
     def get_endpoints(self) -> list[dict[str, Any]]:
         """获取所有 API 端点。"""
-        return self.config.get("api_endpoints", [])
+        with self._lock:
+            return list(self.config.get("api_endpoints", []))
 
     def get_endpoint(self, endpoint_id: str) -> dict[str, Any] | None:
         """获取指定 API 端点。"""
-        for ep in self.config.get("api_endpoints", []):
-            if ep.get("id") == endpoint_id:
-                return ep
+        with self._lock:
+            for ep in self.config.get("api_endpoints", []):
+                if ep.get("id") == endpoint_id:
+                    return ep
         return None
 
     def get_default_endpoint(self) -> dict[str, Any] | None:

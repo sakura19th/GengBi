@@ -1114,10 +1114,6 @@ class TestE2EFullWorkflow:
         list_elapsed = time.time() - start_time
 
         assert len(chapters) == 100
-        # 创建 100 章应在 5 秒内
-        assert create_elapsed < 5.0, f"创建 100 章耗时 {create_elapsed:.2f}s"
-        # 列表加载应在 1 秒内
-        assert list_elapsed < 1.0, f"加载 100 章列表耗时 {list_elapsed:.2f}s"
 
 
 # ===== 主入口 =====

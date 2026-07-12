@@ -375,24 +375,26 @@ class ContinuationWorker(QThread):
                 pending = asyncio.all_tasks(self._loop)
                 for task in pending:
                     task.cancel()
-                if pending:
+                if pending and not self._loop.is_closed():
                     self._loop.run_until_complete(
                         asyncio.gather(*pending, return_exceptions=True)
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("续写线程清理未完成任务失败: %s", e)
             # 关闭主 LLM 客户端，释放 aiohttp ClientSession
             if self._client is not None:
                 try:
-                    self._loop.run_until_complete(self._client.close())
-                except Exception:
-                    pass
+                    if not self._loop.is_closed():
+                        self._loop.run_until_complete(self._client.close())
+                except Exception as e:
+                    logger.warning("续写线程关闭主 LLM 客户端失败: %s", e)
             # 关闭调试覆盖端点的缓存 client
             for dbg_client in self._debug_clients.values():
                 try:
-                    self._loop.run_until_complete(dbg_client.close())
-                except Exception:
-                    pass
+                    if not self._loop.is_closed():
+                        self._loop.run_until_complete(dbg_client.close())
+                except Exception as e:
+                    logger.warning("续写线程关闭调试 LLM 客户端失败: %s", e)
             self._debug_clients.clear()
             # 关闭事件循环
             self._loop.close()

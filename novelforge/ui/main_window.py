@@ -954,6 +954,13 @@ class MainWindow(QMainWindow):
             self._continuation_worker.stop()
             self._continuation_worker.wait(3000)
 
+        # 停止审计与卷续写线程
+        for worker_attr in ("_audit_worker", "_volume_orchestrator"):
+            worker = getattr(self, worker_attr, None)
+            if worker and worker.isRunning():
+                worker.stop()
+                worker.wait(3000)
+
         # M3: 关闭模板引擎线程池
         try:
             self.template_engine.shutdown()
@@ -1736,6 +1743,25 @@ class MainWindow(QMainWindow):
         model = params.get("model") or self.config_manager.get_flow_model("single_continuation")
         if not model:
             QMessageBox.warning(self, "提示", "请选择模型")
+            return
+
+        temperature = params.get("temperature", 0.8)
+        try:
+            temp_val = float(temperature)
+        except (TypeError, ValueError):
+            QMessageBox.warning(self, "提示", "温度必须是数字")
+            return
+        if not (0.0 <= temp_val <= 2.0):
+            QMessageBox.warning(self, "提示", "温度必须在 0.0 到 2.0 之间")
+            return
+        target_words = params.get("target_words", 2000)
+        try:
+            words_val = int(target_words)
+        except (TypeError, ValueError):
+            QMessageBox.warning(self, "提示", "目标字数必须是整数")
+            return
+        if words_val < 100 or words_val > 50000:
+            QMessageBox.warning(self, "提示", "目标字数必须在 100 到 50000 之间")
             return
 
         # ===== M4: 上下文提取（已解耦：用户可先点击"提取上下文"按钮）=====
@@ -4574,7 +4600,7 @@ class MainWindow(QMainWindow):
         self._audit_original_swipe = swipe
 
         # 连接 worker 信号
-        self._audit_worker.chunk_received.connect(self._audit_dialog.append_chunk)
+        self._audit_worker.chunk_received.connect(self._on_audit_chunk_received)
         self._audit_worker.token_count.connect(
             lambda count: self._token_count_label.setText(
                 f"Token: {count} (审计中)"
@@ -4598,6 +4624,16 @@ class MainWindow(QMainWindow):
         self._audit_worker.start()
         self._set_status_message("审计中...")
 
+    def _on_audit_chunk_received(self, chunk: str) -> None:
+        """转发审计 chunk 到对话框（防止对话框已删除时崩溃）。"""
+        audit_dialog = getattr(self, "_audit_dialog", None)
+        if audit_dialog is not None:
+            try:
+                audit_dialog.append_chunk(chunk)
+            except RuntimeError:
+                # 对话框已被删除，忽略
+                pass
+
     def _on_audit_worker_finished(self, full_text: str) -> None:
         """审计 worker 流式完成。"""
         if self._audit_dialog is not None:
@@ -4613,6 +4649,10 @@ class MainWindow(QMainWindow):
     def _on_audit_cancelled(self) -> None:
         """用户取消审计：停止 worker，清理发起章节标记。"""
         if self._audit_worker is not None:
+            try:
+                self._audit_worker.chunk_received.disconnect()
+            except (RuntimeError, TypeError):
+                pass
             self._audit_worker.stop()
         self._audit_chapter_id = None
         self._set_status_message("已取消审计")

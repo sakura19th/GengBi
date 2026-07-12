@@ -17,6 +17,9 @@ VALID_ANALYSIS_DEPTHS: frozenset[str] = frozenset(
     {"light", "standard", "thorough", "exhaustive"}
 )
 
+# 稳定顺序的合法值展示字符串（用于错误消息，避免 frozenset repr 顺序不确定）
+_VALID_ANALYSIS_DEPTHS_DISPLAY = "light/standard/thorough/exhaustive"
+
 # 默认大纲审计维度（13 维度：原 12 维度 + 刻板AI文本禁令）
 DEFAULT_AUDIT_DIMENSIONS: list[str] = [
     "consistency",
@@ -49,6 +52,9 @@ _logger = logging.getLogger(__name__)
 VALID_PACING_SPEEDS: frozenset[str] = frozenset(
     {"slow", "medium", "fast"}
 )
+
+# 稳定顺序的合法值展示字符串（用于错误消息，避免 frozenset repr 顺序不确定）
+_VALID_PACING_SPEEDS_DISPLAY = "slow/medium/fast"
 
 
 class DeepAnalysis(BaseModel):
@@ -368,7 +374,7 @@ class VolumeRunConfig(BaseModel):
     def validate_analysis_depth(cls, v):
         if v not in VALID_ANALYSIS_DEPTHS:
             raise ValueError(
-                f"无效的 analysis_depth: {v}，有效值: {VALID_ANALYSIS_DEPTHS}"
+                f"无效的 analysis_depth: {v}，有效值: {_VALID_ANALYSIS_DEPTHS_DISPLAY}"
             )
         return v
 
@@ -384,6 +390,6 @@ class VolumeRunConfig(BaseModel):
     def validate_pacing_speed(cls, v):
         if v not in VALID_PACING_SPEEDS:
             raise ValueError(
-                f"无效的 pacing_speed: {v}，有效值: {VALID_PACING_SPEEDS}"
+                f"无效的 pacing_speed: {v}，有效值: {_VALID_PACING_SPEEDS_DISPLAY}"
             )
         return v

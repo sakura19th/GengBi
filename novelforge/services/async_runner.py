@@ -65,8 +65,8 @@ class AsyncLoopRunner:
                 pending = asyncio.all_tasks(self._loop)
                 for task in pending:
                     task.cancel()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("AsyncLoopRunner cleanup error: %s", e)
             self._loop.close()
             logger.debug("后台事件循环已关闭")
 
@@ -85,7 +85,11 @@ class AsyncLoopRunner:
             Exception: 协程内部抛出的异常
         """
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
 
     def shutdown(self) -> None:
         """关闭后台事件循环（应用退出时调用）。"""

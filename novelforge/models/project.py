@@ -6,12 +6,12 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-if TYPE_CHECKING:
-    from novelforge.models.ontology import WorldOntology
+from novelforge.models.custom_audit_rule import CustomAuditRule
+from novelforge.models.ontology import WorldOntology
 
 
 class ManualOverride(BaseModel):
@@ -89,8 +89,8 @@ class Project(BaseModel):
     extract_config: dict[str, Any] | None = None
     chapter_split_rule: ChapterSplitRule = Field(default_factory=ChapterSplitRule)
     worldbook_id: str = ""  # 项目专属世界书 ID（存储世界观底层条目）
-    world_ontology: Any | None = None  # WorldOntology 模型实例（全文提取一次固化）
-    custom_audit_rules: list[Any] = Field(default_factory=list)  # list[CustomAuditRule]，Any 避免循环导入
+    world_ontology: WorldOntology | None = None  # WorldOntology 模型实例（全文提取一次固化）
+    custom_audit_rules: list[CustomAuditRule] = Field(default_factory=list)  # 自定义设定全局共享
 
     @field_validator("id", "preset_id", "worldbook_id")
     @classmethod

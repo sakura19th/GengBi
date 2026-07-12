@@ -277,6 +277,9 @@ class FullTextSearchWorker(QThread):
                 count += 1
 
             # 搜索正文（需要加载）
+            # 线程安全说明：read_chapter_content 直接读取文件系统
+            # （~/.novelforge/projects/{pid}/chapters/{cid}.txt），
+            # 不访问共享 SQLite 连接，可在 QThread 中安全调用。
             if self._storage:
                 try:
                     content = self._storage.read_chapter_content(
@@ -443,13 +446,31 @@ class ChapterListWidget(QWidget):
         )
         self._search_worker.progress.connect(self._progress_bar.setValue)
         self._search_worker.finished_search.connect(self._on_fulltext_done)
+        # worker 结束后自清理（非阻塞，替代 _stop_fulltext_search 中的 wait）
+        self._search_worker.finished.connect(self._on_search_worker_finished)
+        self._search_worker.finished.connect(self._search_worker.deleteLater)
         self._search_worker.start()
 
     def _stop_fulltext_search(self) -> None:
-        """停止全文搜索。"""
+        """停止全文搜索（非阻塞，worker 完成后自清理）。"""
         if self._search_worker and self._search_worker.isRunning():
             self._search_worker.stop()
-            self._search_worker.wait(3000)
+            # 不阻塞 wait()，worker finished 信号触发 _on_search_worker_finished 清理
+        # 立即更新 UI 状态
+        self._progress_bar.setVisible(False)
+        self._fulltext_btn.setText("全文搜索")
+        self._fulltext_btn.setChecked(False)
+
+    def _on_search_worker_finished(self) -> None:
+        """搜索 worker 完成后清理（非阻塞）。
+
+        替代 ``_stop_fulltext_search`` 中的阻塞 ``wait(3000)``，
+        由 worker 的 ``finished`` 信号触发，避免 UI 卡顿。
+        """
+        # 仅当 finished 的 worker 仍是当前 worker 时清理，
+        # 避免新搜索已启动时误清新 worker
+        if self.sender() is not self._search_worker:
+            return
         self._search_worker = None
         self._progress_bar.setVisible(False)
         self._fulltext_btn.setText("全文搜索")
