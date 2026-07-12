@@ -1,5 +1,147 @@
 # 更新日志
 
+## 2026-07-12：重写按钮复用审计结果（rewrite_current + writing_mode）
+
+### 背景
+
+在 rewrite_current 和 writing_mode 模式下，点击【重写】会重新走完整流程（含审计阶段），已完成的审计结果完全丢失，需要用户重新审阅 AuditDialog。期望行为：如果前面审计阶段已完成，点击重写后应当保存前面的审计片段，针对目前内容重新发送单章生成。
+
+### 核心改动
+
+- `novelforge/ui/continuation_panel.py`：`_on_rewrite_clicked` 统一走 rewrite 信号（不再 rewrite_current 特殊走 start_flow）
+- `novelforge/ui/main_window.py`：
+  - `_on_rewrite_analysis_accepted`：缓存 analysis_text 到 params（写入 swipe.parameters_snapshot）
+  - `_on_start_writing_mode_continuation`：缓存 refined_output 到 params
+  - `_on_rewrite`：核心决策逻辑 —— 有缓存审计结果则跳过审计直接生成新 swipe，无缓存则走完整流程
+- 旧 swipe 兼容：无缓存键的旧 swipe 回退到原流程（重新分析）
+
+### 测试
+
+- `python -m pytest tests/ -q -k "not TestUIComponents" --ignore=tests/test_m5_polish.py --tb=short`
+
+## 2026-07-12：修复 Grok 模型参数不支持错误 + reasoning_received 断开警告
+
+### 背景
+
+使用 grok-4.5 模型时出现两个错误：
+1. `API 错误 (400): Model grok-4.5 does not support parameter presencePenalty` —— stream_chat_completion 无条件把 presence_penalty/frequency_penalty 写入 payload，xAI Grok-4/4.5/code 系列不接受这两个参数
+2. `RuntimeWarning: Failed to disconnect (None) from signal "reasoning_received(QString)"` —— reasoning_received 信号在 worker 中声明但 UI 从未 connect，对无连接信号调用 disconnect 触发 PySide6 警告（非异常，无法被 except 捕获）
+
+### 核心改动
+
+- `novelforge/services/llm_client.py`：
+  - 新增 `_is_xai_model` 静态方法：检测 Grok 模型
+  - 新增 `_filter_unsupported_params` 静态方法：按模型子型号删除不支持参数（所有 Grok 模型删除 presence/frequency_penalty；非 grok-3-mini 删除 reasoning_effort）
+  - `stream_chat_completion` 和 `chat_completion` payload 构建后调用过滤
+- `novelforge/ui/main_window.py`：移除 3 处 `old_worker.reasoning_received.disconnect()` 调用（行 1904/4806/5308）
+- `tests/test_reasoning_effort.py`：新增 6 个测试验证过滤逻辑
+
+### 测试
+
+- `python -m pytest tests/ -q -k "not TestUIComponents" --ignore=tests/test_m5_polish.py --tb=short`
+
+## 2026-07-12：优化写作要素分析与深化提示词
+
+### 背景
+
+写作模式（writing_mode）的两个提示词模板需优化：分析阶段未严格约束"不在场角色不得提及"，伏笔分析缺乏合理性判断；深化阶段角色形象仅覆盖约 30% 的【主角形象】8 维度信息，不足以支撑续写一致性。
+
+### 核心改动
+
+- `novelforge/resources/defaults/agent/phase_writing_element_analysis.txt`：
+  - 分析原则新增"首要分析用户指令"与"在场角色绝对优先"（不在场角色不得提及）
+  - 新增「本章背景信息」分节（当前地点/在场角色/前情衔接/用户指令解析）
+  - 出场角色分节强化"不在场角色不得列入"约束
+  - 关键伏笔分节新增合理性判断（每个伏笔须明确回复"合理/不合理"并说明理由）
+- `novelforge/resources/defaults/agent/phase_writing_element_refinement.txt`：
+  - 精炼任务从"简化版"升级为"扩展版"，参照【主角形象】8 维度涵盖 75% 以上
+  - 角色格式从 4 项扩展为 8 维度结构（基础锚点/人格系统/动机系统/情感防御/行为指纹/关系坐标/成长弧光/OOC红线）
+  - 主角与关键配角须覆盖全部 8 维度，次要配角至少 6 维度
+
+### 测试
+
+- 提示词模板为纯文本资源，无单元测试；通过实际写作模式流程验证输出质量
+
+## 2026-07-12：修复 Gemini 模型在非正文流程中的 "contents are required" 错误
+
+### 背景
+
+在审计、写作模式分析、卷续写编排各阶段等非正文流程中使用 Gemini 模型（通过 Gemini 兼容网关如 one-api/new-api 代理）时，出现 `API 错误 (500): Error: contents are required`。根本原因：这些流程构建的 messages 列表全部是 `role: "system"` 消息，Gemini 兼容网关将 system 消息提取到 `systemInstruction` 字段后 `contents` 数组为空，触发 Gemini API 的 500 错误。
+
+### 核心改动
+
+- `novelforge/services/llm_client.py`：
+  - 新增 `_ensure_user_message` 静态方法：检测 messages 全为 system 角色时，将最后一条消息的角色改为 user（使用副本，不影响原始列表）
+  - `stream_chat_completion` 和 `chat_completion` 入口调用兜底
+- `tests/test_reasoning_effort.py`：新增 3 个测试验证兜底逻辑
+
+### 测试
+
+- `python -m pytest tests/ -q -k "not TestUIComponents" --ignore=tests/test_m5_polish.py --tb=short`
+
+## 2026-07-12：写作模式接入默认流程列表
+
+### 背景
+
+上一条目完成了 writing_mode 流程插件的全部资源与代码，但 `_BUILTIN_PLUGIN_IDS` 列表未包含 "writing_mode"，导致首启不复制 writing_mode.json 到用户目录、续写面板模式下拉不显示「写作模式」选项。本次修复将 writing_mode 正式接入默认流程列表，与 single/volume/rewrite_current 并列。
+
+### 核心改动
+
+- `novelforge/services/flow_plugin_service.py`：
+  - `_BUILTIN_PLUGIN_IDS` 新增 `"writing_mode"`（3→4 项）
+  - 模块 docstring + `_ensure_builtin_plugins` 方法 docstring："三种模式"→"四种模式"
+- `novelforge/utils/paths.py`：`get_default_flow_plugin_path` docstring 示例补 writing_mode
+- `tests/test_flow_plugin.py`：
+  - `test_builtin_plugins_copied`：新增 writing_mode 断言 + docstring 3→4
+  - `test_list_plugin_ids_sorted`：内置插件断言 3→4（`ids[:4]` + `ids[4:]`）
+  - 新增 `test_load_builtin_writing_mode`：验证 3 阶段 audit→audit→continuation 结构
+
+### 测试
+
+- `python -m pytest tests/ -q -k "not TestUIComponents" --ignore=tests/test_m5_polish.py --tb=short`
+
+## 2026-07-12：新增续写控制「写作模式」流程插件
+
+### 背景
+
+续写控制原有三种模式（单次续写/卷续写/重写当前章节）无法满足"先分析写作要素、再深化角色形象、最后生成"的精细创作需求。新增 writing_mode 流程插件，通过 3 阶段流程（audit→audit→continuation）实现：阶段 1 分析本次出场角色/场所/事件，阶段 2 为每个角色产出简化版形象档案（外貌+心理学形象+语言风格+OOC红线），阶段 3 将精炼输出前置【写作参考】到 user_input 走单章续写。复用 audit agent（不新增 agent 类型），通过通用分析路径 `_on_start_generic_analysis` 实现。
+
+### 核心改动
+
+- 新增提示词模板：
+  - `novelforge/resources/defaults/agent/phase_writing_element_analysis.txt`：6 占位符，5 分节输出（出场角色/场所/相关事件/关键伏笔/风格基调）
+  - `novelforge/resources/defaults/agent/phase_writing_element_refinement.txt`：3 占位符，角色形象（外貌/心理学形象/语言风格/OOC红线）+ 场所精炼 + 其他关键要素
+- 新增破限模板：
+  - `novelforge/resources/defaults/jailbreaks/jb_writing_element_analysis.txt`：LOW/MID/HIGH 三档，强调不拒绝敏感小说内容的角色/场所/事件分析
+  - `novelforge/resources/defaults/jailbreaks/jb_writing_element_refinement.txt`：LOW/MID/HIGH 三档，强调不拒绝敏感角色心理学形象/语言风格刻画
+- 新增内置流程插件：
+  - `novelforge/resources/defaults/flow_plugins/writing_mode.json`：3 阶段 audit→audit→continuation，ui_mode=standard，accept_mode=promote
+- `novelforge/ui/flow_endpoint_dialog.py`：FLOW_DEFINITIONS 新增 2 个 flow_key（writing_element_analysis/writing_element_refinement），docstring 8→10 流程、6→8 非正文流程
+- `novelforge/core/config.py`：FLOW_DEFAULT_JAILBREAKS 新增 2 键，默认 low 等级
+- `novelforge/ui/main_window.py`：
+  - `_flow_handler_audit`：按 stage.flow_key 分派，rewrite_analysis 走原路径，其余走 `_on_start_generic_analysis` 通用分析路径
+  - `_flow_handler_continuation`：新增 `created_by=="writing_mode"` 分支，调 `_on_start_writing_mode_continuation`
+  - `_on_start_continuation`：新增 `user_input_override` 参数（写作模式第 3 步注入精炼输出）
+  - 新增 `_build_previous_chapters_text(lookback)`：构建前 lookback 章正文（含当前章）
+  - 新增 `_on_start_generic_analysis`：通用分析路径，镜像 `_on_start_rewrite_current`，注入 7 占位符（含 `{{prev_analysis}}`/`{{previous_chapters_text}}`），AuditWorker max_tokens 默认 6000
+  - 新增 4 个回调：`_on_generic_analysis_finished`/`error`/`cancelled`/`accepted`（采纳后 resume 推进，不 cancel）
+  - 新增 `_on_start_writing_mode_continuation`：阶段 2 精炼输出前置【写作参考】到 user_input
+
+### 测试
+
+- 语法校验：`python -c "import ast; ast.parse(open(r'novelforge/ui/main_window.py', encoding='utf-8').read())"` → 通过
+- `python -m pytest tests/ -q -k "not TestUIComponents" --ignore=tests/test_m5_polish.py --tb=short`
+- 结果：`663 passed, 15 skipped, 12 deselected in 7.75s`（0 失败，无回归）
+- 测试修复：2 个断言旧 flow 数量的测试更新（8→10）：
+  - `tests/test_flow_endpoint_config.py`：`test_flow_endpoint_dialog_has_8_flows` → `test_flow_endpoint_dialog_has_10_flows`（断言 8→10）
+  - `tests/test_rewrite_current_mode.py`：`test_flow_definitions_count_is_8` → `test_flow_definitions_count_is_10`（断言 8→10）
+
+### 文档同步
+
+- `FLOW_PLUGIN_GUIDE.md`：第 2 节内置插件表 +1 行、第 4.1 节 agent 行为补充、第 4.4 节标题改"十个标准 flow_key" +2 行、第 7 节标题改"四个内置插件" +7.4 小节、新增写作模式使用说明与预期效果小节
+- `agent.md`：架构分层（jailbreaks 6→8、flow_plugins 3→4、+2 模板文件、flow_endpoint_dialog 8→10/6→8、main_window 接线补充、flow_plugin_service 3→4）、关键设计决策第 18 条更新（3→4 内置插件）、新增第 19 条写作模式流程
+- `update.md`：本条目
+
 ## 2026-07-12：发布 v0.2.10 版本——完整代码审查与修复 + 文档同步规则完善
 
 ### 背景

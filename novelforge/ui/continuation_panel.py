@@ -715,20 +715,14 @@ class ContinuationPanel(QWidget):
     def _on_rewrite_clicked(self) -> None:
         """重写按钮。
 
-        按 ``get_mode()`` 分发：
-        - ``rewrite_current``：统一发射 ``start_flow`` 信号
-          （重新走插件声明的「分析→生成」流程）
-        - 其他模式：发射 ``rewrite`` 信号（``created_by="rewrite"``）
+        统一发射 ``rewrite`` 信号（``created_by="rewrite"``），由 MainWindow
+        根据当前模式与是否有缓存审计结果决策：有缓存则跳过审计直接生成，
+        无缓存则走完整流程。
         """
         params = self.get_parameters()
         params["model"] = self._model_combo.currentText()
-        if self.get_mode() == "rewrite_current":
-            # 重写当前章节模式：重写按钮等同重新触发 start_flow
-            plugin_id = self.get_mode()
-            self.start_flow.emit(plugin_id, params)
-        else:
-            params["created_by"] = "rewrite"
-            self.rewrite.emit(params)
+        params["created_by"] = "rewrite"
+        self.rewrite.emit(params)
 
     def _set_swipe_info(self, text: str, state: str = "metaText") -> None:
         """请求 MainWindow 在状态栏显示 swipe 元信息。

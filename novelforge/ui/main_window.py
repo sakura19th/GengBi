@@ -1704,7 +1704,9 @@ class MainWindow(QMainWindow):
 
     # ===== 续写流程 =====
 
-    def _on_start_continuation(self, params: dict) -> None:
+    def _on_start_continuation(
+        self, params: dict, user_input_override: str | None = None
+    ) -> None:
         """开始续写。
 
         M4 流程：
@@ -1713,6 +1715,11 @@ class MainWindow(QMainWindow):
         3. 提取失败/取消时弹出 ExtractionDialog（重试/跳过/取消）
         4. 提取成功后将 entries 传给 PromptAssembler.assemble
         5. 将 entries 快照存入 swipe（传给 ContinuationWorker）
+
+        Args:
+            params: 续写参数字典（由 continuation_panel 传入）
+            user_input_override: 可选的 user_input 覆盖值（写作模式第 3 步用，
+                将阶段 2 精炼输出前置【写作参考】后传入；None 时读面板输入）
         """
         if not self._current_chapter:
             QMessageBox.warning(self, "提示", "请先选择章节")
@@ -1808,7 +1815,11 @@ class MainWindow(QMainWindow):
 
         # 调用 PromptAssembler 组装（M4: 传入提取的 context_entries）
         try:
-            user_input = self.continuation_panel.get_user_input()
+            user_input = (
+                user_input_override
+                if user_input_override is not None
+                else self.continuation_panel.get_user_input()
+            )
             lookback_chapters = params.get("lookback_chapters", 0)
             chapter_for_assemble = self._current_chapter
             assemble_result = self.prompt_assembler.assemble(
@@ -1890,7 +1901,6 @@ class MainWindow(QMainWindow):
         if old_worker is not None:
             try:
                 old_worker.chunk_received.disconnect()
-                old_worker.reasoning_received.disconnect()
                 old_worker.token_count.disconnect()
                 old_worker.finished.disconnect()
                 old_worker.error.disconnect()
@@ -2033,15 +2043,20 @@ class MainWindow(QMainWindow):
     def _flow_handler_continuation(self, stage, params: dict, context: dict):
         """continuation agent handler：流式续写创建 swipe。
 
-        根据 ``_prev_output`` 判断分支：
-        - 有 ``_prev_output``（来自 audit 阶段）：重写生成步骤，
+        根据 ``_prev_output`` 与 ``created_by`` 判断分支：
+        - ``created_by=="rewrite_current"`` + ``_prev_output``：重写生成步骤，
           调用 ``_on_rewrite_analysis_accepted``
-        - 无 ``_prev_output``：独立续写，调用 ``_on_start_continuation``
+        - ``created_by=="writing_mode"`` + ``_prev_output``：写作模式第 3 步，
+          调用 ``_on_start_writing_mode_continuation``（精炼输出前置【写作参考】到 user_input）
+        - 其余：独立续写，调用 ``_on_start_continuation``
         """
         prev_output = params.get("_prev_output")
         if prev_output and stage.created_by == "rewrite_current":
             # 重写生成步骤：prev_output 是分析文本
             self._on_rewrite_analysis_accepted(prev_output)
+        elif prev_output and stage.created_by == "writing_mode":
+            # 写作模式第 3 步：prev_output 是阶段 2 精炼输出
+            self._on_start_writing_mode_continuation(params, prev_output)
         else:
             # 独立续写
             self._on_start_continuation(params)
@@ -2050,11 +2065,20 @@ class MainWindow(QMainWindow):
     def _flow_handler_audit(self, stage, params: dict, context: dict):
         """audit agent handler：启动分析流程，返回 pending 等待用户采纳。
 
-        调用 ``_on_start_rewrite_current`` 启动 AuditWorker 分析，
-        AuditDialog.accepted_text 信号触发 ``_on_rewrite_analysis_accepted``
-        完成生成步骤（内置 rewrite_current 插件由信号链直接完成两步流程）。
+        按 ``stage.flow_key`` 分派：
+        - ``rewrite_analysis``：内置 rewrite_current 插件，调 ``_on_start_rewrite_current``
+          （AuditDialog.accepted_text 信号触发 ``_on_rewrite_analysis_accepted`` 完成生成步骤，
+          内置插件由信号链直接完成两步流程，FlowExecutor 在 audit handler 返回 pending 后结束）
+        - 其余（如 ``writing_element_analysis`` / ``writing_element_refinement``）：调
+          ``_on_start_generic_analysis`` 通用分析路径（读 ``params._prev_output`` 注入
+          ``{{prev_analysis}}``，用户采纳后 ``flow_executor.resume`` 推进下一阶段）
         """
-        self._on_start_rewrite_current(params)
+        if stage.flow_key == "rewrite_analysis":
+            self._on_start_rewrite_current(params)
+        else:
+            phase = stage.params.get("phase", stage.flow_key)
+            phase_name = stage.params.get("phase_name", phase)
+            self._on_start_generic_analysis(stage, params, phase, phase_name)
         return "pending"
 
     def _flow_handler_checkpoint(self, stage, params: dict, context: dict):
@@ -4136,14 +4160,42 @@ class MainWindow(QMainWindow):
         self._on_open_settings()
 
     def _on_rewrite(self, params: dict) -> None:
-        """重写（根据当前模式路由到单次/卷续写流程）。"""
-        # 沿用上次参数，created_by=rewrite
+        """重写：复用缓存审计结果直接生成新 swipe，无缓存则走完整流程。
+
+        - rewrite_current 模式：若当前 swipe 缓存了 _rewrite_analysis_text，
+          直接调 _on_rewrite_analysis_accepted 跳过分析步骤生成新 swipe；
+          否则走 _on_start_flow 重新分析
+        - writing_mode 模式：若当前 swipe 缓存了 _writing_mode_refinement，
+          直接调 _on_start_writing_mode_continuation 跳过阶段 1/2 生成新 swipe；
+          否则走 _on_start_flow 重新分析
+        - 其他模式：走 _on_start_continuation_routed（原逻辑）
+        """
+        # 沿用上次参数（含缓存的审计结果）
+        cached_analysis = None
+        cached_refinement = None
         if self.continuation_panel.current_swipe:
-            last_params = self.continuation_panel.current_swipe.parameters_snapshot
+            last_params = dict(self.continuation_panel.current_swipe.parameters_snapshot)
+            cached_analysis = last_params.pop("_rewrite_analysis_text", None)
+            cached_refinement = last_params.pop("_writing_mode_refinement", None)
+            # 移除缓存键后设置参数（避免缓存键污染面板参数）
             self.continuation_panel.set_parameters(last_params)
             params = self.continuation_panel.get_parameters()
-        params["created_by"] = "rewrite"
-        self._on_start_continuation_routed(params)
+
+        mode = self.continuation_panel.get_mode()
+
+        if mode == "rewrite_current" and cached_analysis:
+            # 已有审计结果，跳过分析步骤直接生成
+            self._rewrite_current_chapter_id = self._current_chapter.id
+            self._rewrite_current_params = params
+            self._rewrite_current_endpoint = self.continuation_panel.get_selected_endpoint()
+            self._on_rewrite_analysis_accepted(cached_analysis)
+        elif mode == "writing_mode" and cached_refinement:
+            # 已有阶段 2 精炼输出，跳过阶段 1/2 直接生成
+            self._on_start_writing_mode_continuation(params, cached_refinement)
+        else:
+            # 无缓存审计结果，走完整流程（重新分析）
+            params["created_by"] = "rewrite"
+            self._on_start_continuation_routed(params)
 
     def _on_accept_continuation(self) -> None:
         """接受续写：根据插件 accept_mode 分支处理。
@@ -4778,7 +4830,6 @@ class MainWindow(QMainWindow):
         if old_worker is not None:
             try:
                 old_worker.chunk_received.disconnect()
-                old_worker.reasoning_received.disconnect()
                 old_worker.token_count.disconnect()
                 old_worker.finished.disconnect()
                 old_worker.error.disconnect()
@@ -4877,6 +4928,42 @@ class MainWindow(QMainWindow):
             if content:
                 parts.append(f"- [{label}] {content}")
         return "\n".join(parts) if parts else "（无上下文条目）"
+
+    def _build_previous_chapters_text(self, lookback: int) -> str:
+        """构建前 ``lookback`` 章正文文本块（含当前章），供写作模式分析提示词注入。
+
+        写作模式是续写下一章，当前章是最末前文，故包含当前章正文
+        （区别于 rewrite_current 的 ``exclude_current=True``）。
+
+        格式：每章一段 ``## {标题}\\n\\n{正文}``，章间空行分隔。
+        ``lookback<=0`` 取全部前文（含当前章）。
+
+        Args:
+            lookback: 回溯章节数（含当前章）；<=0 取全部
+
+        Returns:
+            格式化的前文章节正文文本，无内容时返回占位文本
+        """
+        if not self._current_chapters or not self._current_chapter:
+            return "（无前文）"
+        self._ensure_chapter_contents()
+        # 定位当前章 index
+        idx = -1
+        for i, ch in enumerate(self._current_chapters):
+            if ch.id == self._current_chapter.id:
+                idx = i
+                break
+        if idx < 0:
+            return "（无前文）"
+        start = 0 if lookback <= 0 else max(0, idx - lookback + 1)
+        selected = self._current_chapters[start: idx + 1]
+        parts: list[str] = []
+        for ch in selected:
+            title = ch.title or f"第{ch.index}章"
+            content = (ch.content or "").strip()
+            if content:
+                parts.append(f"## {title}\n\n{content}")
+        return "\n\n".join(parts) if parts else "（无前文）"
 
     def _on_start_rewrite_current(self, params: dict) -> None:
         """「重写当前章节」模式入口：分析→检查点→生成两步流程。
@@ -5097,6 +5184,8 @@ class MainWindow(QMainWindow):
             return
 
         params = getattr(self, "_rewrite_current_params", None) or {}
+        # 缓存分析文本到 params，供重写时复用（写入 swipe.parameters_snapshot）
+        params["_rewrite_analysis_text"] = analysis_text
         endpoint = getattr(self, "_rewrite_current_endpoint", None)
         if not endpoint:
             endpoint = self.continuation_panel.get_selected_endpoint()
@@ -5244,7 +5333,6 @@ class MainWindow(QMainWindow):
         if old_worker is not None:
             try:
                 old_worker.chunk_received.disconnect()
-                old_worker.reasoning_received.disconnect()
                 old_worker.token_count.disconnect()
                 old_worker.finished.disconnect()
                 old_worker.error.disconnect()
@@ -5311,6 +5399,243 @@ class MainWindow(QMainWindow):
         self._rewrite_current_params = None
         self._rewrite_current_endpoint = None
         self._set_status_message("重写生成中...")
+
+    # ===== 写作模式（writing_mode）通用分析路径 =====
+
+    def _on_start_generic_analysis(
+        self, stage, params: dict, phase: str, phase_name: str
+    ) -> None:
+        """通用分析流程入口（audit agent 非 rewrite_analysis 分支）。
+
+        镜像 ``_on_start_rewrite_current`` 结构（加载模板→str.replace 注入→
+        AuditWorker 低温流式→AuditDialog 审阅），差异点：
+        - 模板由 ``stage.params["phase"]`` 决定（``phase_{phase}.txt``）
+        - flow_key 取 ``stage.flow_key``（端点/模型/破限）
+        - 读 ``params._prev_output`` 注入 ``{{prev_analysis}}``（阶段 2 接收阶段 1 输出）
+        - 读面板 ``lookback_chapters`` 构建前文文本注入 ``{{previous_chapters_text}}``
+        - 用户采纳后 ``flow_executor.resume`` 推进下一阶段（不 cancel）
+
+        Args:
+            stage: FlowStage 对象（含 flow_key / params）
+            params: 合并后的阶段参数（含面板参数 + 阶段 params + _prev_output）
+            phase: 提示词模板 phase 名（如 writing_element_analysis）
+            phase_name: 显示名 / AuditDialog 标题（如 写作要素分析）
+        """
+        if not self._current_chapter:
+            QMessageBox.warning(self, "提示", "请先选择章节")
+            return
+
+        flow_key = stage.flow_key
+
+        # 取流程端点（回退面板下拉）
+        endpoint = self.config_manager.get_flow_endpoint(flow_key)
+        if not endpoint:
+            endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            self._on_open_settings()
+            return
+
+        api_key = self.config_manager.decrypt_api_key(endpoint.get("id", ""))
+        if not api_key:
+            QMessageBox.warning(self, "提示", "API Key 无效，请检查设置")
+            self._on_open_settings()
+            return
+
+        model = params.get("model") or self.config_manager.get_flow_model(flow_key)
+        if not model:
+            QMessageBox.warning(self, "提示", "请选择模型")
+            return
+
+        # 上下文条目
+        raw_entries = getattr(self, "_current_context_entries", None)
+        entries = self._merge_worldbook_entries(raw_entries)
+        # 加载项目对象（用于世界观/主角/自定义设定）
+        project = None
+        if self._current_project_id:
+            project = self.storage_service.load_project(self._current_project_id)
+        wo_for_check = project.world_ontology if project else None
+        pp_for_check = (
+            self._protagonist_profile_by_chapter.get(self._current_chapter.id)
+            if self._current_chapter
+            else None
+        )
+        if not self._prompt_continue_without_extraction(
+            entries, wo_for_check, pp_for_check
+        ):
+            return
+
+        # 确保章节正文已加载
+        self._ensure_chapter_contents()
+
+        # 加载分析提示词模板
+        try:
+            template_path = get_agent_prompt_path(phase)
+            template = load_text_resource(template_path)
+        except Exception as e:
+            logger.error("加载通用分析模板失败: %s", e, exc_info=True)
+            QMessageBox.critical(self, "分析失败", f"加载分析模板失败: {e}")
+            return
+
+        # 组装宏（纯 str.replace，不用 MacroEngine）
+        user_input = self.continuation_panel.get_user_input() or "（无用户额外指令）"
+        world_ontology_str = self._format_world_ontology(
+            project.world_ontology if project else None
+        )
+        protagonist_profile = None
+        if self._current_chapter:
+            if self._current_chapter.protagonist_profile:
+                protagonist_profile = self._current_chapter.protagonist_profile
+            else:
+                protagonist_profile = self._protagonist_profile_by_chapter.get(
+                    self._current_chapter.id
+                )
+        protagonist_profile_str = self._format_protagonist_profile(protagonist_profile)
+        custom_rules_str = self._format_custom_audit_rules(
+            project.custom_audit_rules if project else None
+        )
+        context_entries_str = self._format_context_entries(entries)
+        lookback_chapters = params.get("lookback_chapters", 5)
+        previous_chapters_text = self._build_previous_chapters_text(lookback_chapters)
+        prev_analysis = params.get("_prev_output") or "（无前序分析）"
+
+        rendered = template.replace("{{user_input}}", user_input)
+        rendered = rendered.replace("{{world_ontology}}", world_ontology_str)
+        rendered = rendered.replace("{{protagonist_profile}}", protagonist_profile_str)
+        rendered = rendered.replace("{{custom_audit_rules}}", custom_rules_str)
+        rendered = rendered.replace("{{context_entries}}", context_entries_str)
+        rendered = rendered.replace("{{previous_chapters_text}}", previous_chapters_text)
+        rendered = rendered.replace("{{prev_analysis}}", prev_analysis)
+
+        messages = [{"role": "system", "content": rendered}]
+        # 注入破限（按 stage.flow_key，等级由 FlowEndpointDialog 配置）
+        messages = self._inject_jailbreak(
+            messages, self._get_flow_jailbreak_text(flow_key)
+        )
+
+        # 清理旧审计 worker
+        old_audit_worker = getattr(self, "_audit_worker", None)
+        if old_audit_worker is not None:
+            try:
+                old_audit_worker.chunk_received.disconnect()
+                old_audit_worker.finished.disconnect()
+                old_audit_worker.error.disconnect()
+                old_audit_worker.rate_limit_warning.disconnect()
+                old_audit_worker.auth_error.disconnect()
+                old_audit_worker.token_count.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            old_audit_worker.deleteLater()
+        self._audit_worker = None
+
+        reasoning_effort = self._resolve_reasoning_effort(endpoint)
+
+        # 创建分析 worker（低温稳定，max_tokens 默认 6000 容纳多角色形象）
+        self._audit_worker = AuditWorker(
+            base_url=endpoint["base_url"],
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            temperature=0.3,
+            max_tokens=params.get("analysis_max_tokens", 6000),
+            reasoning_effort=reasoning_effort,
+            endpoint_id=endpoint.get("id", ""),
+            debug_mode=self._debug_mode,
+            phase_name=phase_name,
+            parent=self,
+        )
+
+        # 创建分析对话框
+        self._audit_dialog = AuditDialog(self)
+        self._audit_dialog.setWindowTitle(phase_name)
+
+        # 连接 worker 信号
+        self._audit_worker.chunk_received.connect(self._audit_dialog.append_chunk)
+        self._audit_worker.token_count.connect(
+            lambda count: self._token_count_label.setText(
+                f"Token: {count} (分析中)"
+            )
+        )
+        self._audit_worker.finished.connect(self._on_generic_analysis_finished)
+        self._audit_worker.error.connect(self._on_generic_analysis_error)
+        self._audit_worker.rate_limit_warning.connect(
+            lambda msg: self.continuation_panel.show_toast(msg)
+        )
+        self._audit_worker.auth_error.connect(self._on_auth_error)
+        self._audit_worker.prompt_debug_requested.connect(self._on_prompt_debug_requested)
+
+        # 连接对话框信号（采纳→resume 推进；取消→cancel 清理）
+        self._audit_dialog.accepted_text.connect(self._on_generic_analysis_accepted)
+        self._audit_dialog.cancelled.connect(self._on_generic_analysis_cancelled)
+
+        self._audit_dialog.show()
+        self._audit_worker.start()
+        self._set_status_message(f"{phase_name}中...")
+
+    def _on_generic_analysis_finished(self, full_text: str) -> None:
+        """通用分析 worker 流式完成。"""
+        if self._audit_dialog is not None:
+            self._audit_dialog.finish_streaming(full_text)
+        self._set_status_message("分析完成，请审阅并采纳")
+
+    def _on_generic_analysis_error(self, error: str) -> None:
+        """通用分析 worker 出错：cancel 流程并提示。"""
+        if self._audit_dialog is not None:
+            self._audit_dialog.fail(error)
+        self._set_status_message(f"分析失败: {error}")
+        if self.flow_executor.is_active:
+            self.flow_executor.cancel()
+
+    def _on_generic_analysis_cancelled(self) -> None:
+        """用户取消通用分析：停止 worker，cancel 流程。"""
+        if self._audit_worker is not None:
+            self._audit_worker.stop()
+        self._audit_worker = None
+        self._audit_dialog = None
+        if self.flow_executor.is_active:
+            self.flow_executor.cancel()
+        self._set_status_message("已取消写作模式分析")
+
+    def _on_generic_analysis_accepted(self, analysis_text: str) -> None:
+        """用户采纳通用分析结果：resume 推进下一阶段（不 cancel）。
+
+        与 ``_on_rewrite_analysis_accepted`` 的关键差异：rewrite_current 走信号链
+        直接完成两步流程（cancel FlowExecutor），通用路径须 resume 让 FlowExecutor
+        继续执行后续阶段（阶段 2 / 阶段 3）。
+        """
+        self._audit_dialog = None
+        self._audit_worker = None
+        if self.flow_executor.is_active:
+            self.flow_executor.resume(analysis_text)
+        else:
+            logger.warning("generic_analysis_accepted 但无活跃流程")
+
+    def _on_start_writing_mode_continuation(
+        self, params: dict, prev_output: str
+    ) -> None:
+        """写作模式第 3 步：把阶段 2 精炼输出前置为【写作参考】到 user_input。
+
+        将 ``prev_output``（阶段 2 角色形象精炼输出）以 ``【写作参考】`` 标签包裹后
+        前置到面板 user_input，调 ``_on_start_continuation(user_input_override=...)``
+        走单章续写。复用 rewrite_current「分析文本→user_input」模式，零侵入
+        ``prompt_assembler`` / ``ContinuationWorker``。
+
+        Args:
+            params: 阶段参数（含面板参数 + 阶段 params）
+            prev_output: 阶段 2 精炼输出文本
+        """
+        panel_input = self.continuation_panel.get_user_input() or "（无用户额外指令）"
+        combined = (
+            f"【写作参考】（写作模式提取的强调参考内容，续写须严格遵循）\n"
+            f"{prev_output}\n\n"
+            f"【用户写作需求】\n{panel_input}"
+        )
+        # 缓存阶段 2 精炼输出到 params，供重写时复用（写入 swipe.parameters_snapshot）
+        params["_writing_mode_refinement"] = prev_output
+        # 清理 FlowExecutor pending 状态（continuation 内部自管 worker）
+        if self.flow_executor.is_active:
+            self.flow_executor.cancel()
+        self._on_start_continuation(params, user_input_override=combined)
 
     def _on_accept_and_continue(self) -> None:
         """接受并继续续写。"""

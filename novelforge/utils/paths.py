@@ -150,7 +150,7 @@ def get_default_flow_plugin_path(plugin_id: str) -> Path:
     首次启动时由 FlowPluginService 复制到用户目录。
 
     Args:
-        plugin_id: 插件 ID（如 single/volume/rewrite_current）
+        plugin_id: 插件 ID（如 single/volume/rewrite_current/writing_mode）
 
     Returns:
         内置插件 JSON 文件路径

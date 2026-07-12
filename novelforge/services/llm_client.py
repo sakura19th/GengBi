@@ -146,6 +146,11 @@ class LLMClient:
         """检测是否为 Gemini 模型（通过模型名判断）。"""
         return "gemini" in model.lower()
 
+    @staticmethod
+    def _is_xai_model(model: str) -> bool:
+        """检测是否为 xAI Grok 模型（通过模型名判断）。"""
+        return "grok" in model.lower()
+
     def _resolve_reasoning_effort_for_payload(self, model: str) -> str | None:
         """解析适用于当前模型的 reasoning_effort 值。
 
@@ -173,6 +178,25 @@ class LLMClient:
             return gemini_map.get(effort)
 
         return effort
+
+    @staticmethod
+    def _filter_unsupported_params(payload: dict, model: str) -> None:
+        """按模型类型删除不支持的参数（原地修改）。
+
+        xAI Grok 系列不支持 presence_penalty 和 frequency_penalty，
+        发送会导致 400 错误。除 grok-3-mini 外的 Grok 模型不支持
+        reasoning_effort。
+        """
+        if not model:
+            return
+        model_lower = model.lower()
+        if LLMClient._is_xai_model(model_lower):
+            # 所有 Grok 模型不支持 presence/frequency_penalty
+            payload.pop("presence_penalty", None)
+            payload.pop("frequency_penalty", None)
+            # 非 grok-3-mini 不支持 reasoning_effort
+            if "grok-3-mini" not in model_lower:
+                payload.pop("reasoning_effort", None)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取复用的 aiohttp.ClientSession（懒加载）。
@@ -224,6 +248,8 @@ class LLMClient:
             StreamChunk 增量数据
         """
         url = f"{self.base_url}/chat/completions"
+        # Gemini 兼容网关兜底：确保至少含一条 user 消息
+        messages = self._ensure_user_message(messages)
         payload: dict = {
             "model": model,
             "messages": messages,
@@ -239,6 +265,8 @@ class LLMClient:
         effort = self._resolve_reasoning_effort_for_payload(model)
         if effort:
             payload["reasoning_effort"] = effort
+        # 按模型类型过滤不支持的参数（Grok 等）
+        self._filter_unsupported_params(payload, model)
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -422,6 +450,34 @@ class LLMClient:
         except (json.JSONDecodeError, TypeError):
             return body[:200] if body else "未知错误"
 
+    @staticmethod
+    def _ensure_user_message(messages: list[dict]) -> list[dict]:
+        """确保 messages 至少含一条 user 消息（Gemini 兼容网关兜底）。
+
+        Gemini 兼容网关（如 one-api/new-api 代理）将 system 消息提取到
+        systemInstruction，user/assistant 消息放入 contents。若 messages
+        全为 system 角色，contents 为空数组，Gemini API 返回 500 错误
+        "contents are required"。
+
+        本方法检测此情况，将最后一条 system 消息的角色改为 user（最后一条
+        通常是实际任务指令，前面的 system 消息保留为角色设定/破限）。使用
+        副本修改，不影响调用方的原始列表。
+
+        Args:
+            messages: 原始消息列表
+
+        Returns:
+            处理后的消息列表（若已含 user 消息则原样返回）
+        """
+        if not messages:
+            return messages
+        if any(m.get("role") != "system" for m in messages):
+            return messages
+        # 全为 system：将最后一条改为 user（任务指令转为请求角色）
+        result = [dict(m) for m in messages]
+        result[-1]["role"] = "user"
+        return result
+
     async def chat_completion(
         self,
         messages: list[dict],
@@ -454,6 +510,8 @@ class LLMClient:
             LLMError: 网络或其他错误
         """
         url = f"{self.base_url}/chat/completions"
+        # Gemini 兼容网关兜底：确保至少含一条 user 消息
+        messages = self._ensure_user_message(messages)
         payload: dict = {
             "model": model,
             "messages": messages,
@@ -466,6 +524,8 @@ class LLMClient:
         effort = self._resolve_reasoning_effort_for_payload(model)
         if effort:
             payload["reasoning_effort"] = effort
+        # 按模型类型过滤不支持的参数（Grok 等）
+        self._filter_unsupported_params(payload, model)
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",

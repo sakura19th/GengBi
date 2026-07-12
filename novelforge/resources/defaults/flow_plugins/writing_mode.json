@@ -1,0 +1,48 @@
+{
+  "id": "writing_mode",
+  "name": "写作模式",
+  "description": "三步续写：写作要素分析→写作要素深化→单章生成，接受后提升为新章节",
+  "version": "1.0",
+  "author": "GengBi",
+  "builtin": true,
+  "ui_mode": "standard",
+  "accept_mode": "promote",
+  "stages": [
+    {
+      "id": "analysis",
+      "name": "写作要素分析",
+      "agent": "audit",
+      "flow_key": "writing_element_analysis",
+      "streaming": true,
+      "created_by": "",
+      "params": {
+        "phase": "writing_element_analysis",
+        "phase_name": "写作要素分析"
+      },
+      "input_from": ""
+    },
+    {
+      "id": "refinement",
+      "name": "写作要素深化",
+      "agent": "audit",
+      "flow_key": "writing_element_refinement",
+      "streaming": true,
+      "created_by": "",
+      "params": {
+        "phase": "writing_element_refinement",
+        "phase_name": "写作要素深化"
+      },
+      "input_from": "analysis"
+    },
+    {
+      "id": "generate",
+      "name": "单章生成",
+      "agent": "continuation",
+      "flow_key": "single_continuation",
+      "streaming": true,
+      "created_by": "writing_mode",
+      "params": {},
+      "input_from": "refinement"
+    }
+  ]
+}

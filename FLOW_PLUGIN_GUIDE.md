@@ -46,13 +46,14 @@
 3. 点击"开始续写"按钮启动流程
 4. 流程按插件 `stages` 顺序执行，部分阶段会弹窗等待用户交互（如 AuditDialog）
 
-### 3 个内置插件
+### 4 个内置插件
 
 | 插件 ID | 名称 | 阶段数 | 说明 |
 |---------|------|--------|------|
 | `single` | 单次续写 | 1 | 单阶段流式续写，接受后提升为新章节 |
 | `volume` | 卷续写（多章节） | 4 | 深度分析→卷大纲→审计→逐章写作 |
 | `rewrite_current` | 重写当前章节 | 2 | 分析→生成，接受后替换当前章节正文 |
+| `writing_mode` | 写作模式 | 3 | 写作要素分析→写作要素深化→单章生成 |
 
 ---
 
@@ -97,8 +98,8 @@
 
 | agent | 对应 handler | 行为 | 返回值 | 创建的 worker |
 |-------|-------------|------|--------|--------------|
-| `continuation` | `_flow_handler_continuation` | 流式续写创建 swipe。若 `params._prev_output` 非空且 `created_by=="rewrite_current"`，走重写生成分支；否则走独立续写 | `None`（推进下一阶段） | ContinuationWorker |
-| `audit` | `_flow_handler_audit` | 低温分析，弹 AuditDialog 供用户审阅采纳 | `"pending"`（挂起，等用户采纳后 resume） | AuditWorker |
+| `continuation` | `_flow_handler_continuation` | 流式续写创建 swipe。若 `params._prev_output` 非空且 `created_by=="rewrite_current"`，走重写生成分支；若 `created_by=="writing_mode"`，走写作模式第 3 步（精炼输出前置【写作参考】到 user_input）；否则走独立续写 | `None`（推进下一阶段） | ContinuationWorker |
+| `audit` | `_flow_handler_audit` | 低温分析，弹 AuditDialog 供用户审阅采纳。`flow_key=="rewrite_analysis"` 走 `_on_start_rewrite_current` 原路径；其余（如 `writing_element_analysis`/`writing_element_refinement`）走 `_on_start_generic_analysis` 通用分析路径（读 `params._prev_output` 注入 `{{prev_analysis}}`，采纳后 `flow_executor.resume` 推进） | `"pending"`（挂起，等用户采纳后 resume） | AuditWorker |
 | `checkpoint` | `_flow_handler_checkpoint` | 暂停点（占位实现，直接推进下一阶段） | `"continue"` | 无 |
 | `volume_pipeline` | `_flow_handler_volume` | 旧版卷续写 7 阶段（向后兼容，新版用 `volume_phase`） | `None` | VolumeOrchestrator |
 | `volume_phase` | `_flow_handler_volume_phase` | 卷续写单阶段执行，emit `phase_output` 后挂起，由 main_window resume 推进 | `"pending"` | VolumeOrchestrator |
@@ -118,9 +119,9 @@
 - **`replace`**：替换当前章节正文（重写模式）
 - **`volume_insert`**：卷续写内部自建章节（accept 不触发，由卷流程内部处理）
 
-### 4.4 八个标准 flow_key
+### 4.4 十个标准 flow_key
 
-`flow_key` 字段是自由字符串（模型层不校验），但建议使用以下 8 个标准值（定义于 `flow_endpoint_dialog.py:34-43` 的 `FLOW_DEFINITIONS`）：
+`flow_key` 字段是自由字符串（模型层不校验），但建议使用以下 10 个标准值（定义于 `flow_endpoint_dialog.py:34-45` 的 `FLOW_DEFINITIONS`）：
 
 | flow_key | 显示名 | 类别 | 破限配置入口 | 默认破限等级 |
 |----------|--------|------|------------|-------------|
@@ -132,6 +133,8 @@
 | `ontology_extraction` | 世界观底层提取 | 非正文流程 | 流程端点配置等级下拉 | `low` |
 | `protagonist_extraction` | 主角形象提取 | 非正文流程 | 流程端点配置等级下拉 | `low` |
 | `custom_rule_parsing` | 自定义设定解析 | 非正文流程 | 流程端点配置等级下拉 | `off` |
+| `writing_element_analysis` | 写作要素分析 | 非正文流程 | 流程端点配置等级下拉 | `low` |
+| `writing_element_refinement` | 写作要素深化 | 非正文流程 | 流程端点配置等级下拉 | `low` |
 
 > **说明**：正文流程（`single_continuation`/`volume_continuation`）的破限由预设管理器勾选 `nf_jb_*` 模块控制；非正文流程的破限由流程端点配置对话框的等级下拉控制（off/low/mid/high/custom）。未配置的 flow_key 回退默认端点 + 端点 default_model。
 
@@ -226,7 +229,7 @@ stage_params = {**面板params, **阶段params}  # 阶段 params 覆盖面板同
 
 ---
 
-## 7. 三个内置插件完整 JSON
+## 7. 四个内置插件完整 JSON
 
 ### 7.1 single.json — 单次续写
 
@@ -372,6 +375,68 @@ stage_params = {**面板params, **阶段params}  # 阶段 params 覆盖面板同
 - 阶段 2 `agent=continuation`，`created_by="rewrite_current"`（触发重写生成分支），`input_from="analysis"`（接收分析文本作为 `_prev_output`）
 - `accept_mode=replace`：接受后替换当前章节正文
 
+### 7.4 writing_mode.json — 写作模式
+
+3 阶段流程：先 `audit` 分析写作要素，再 `audit` 深化角色形象，最后 `continuation` 基于精炼输出单章生成。
+
+```json
+{
+  "id": "writing_mode",
+  "name": "写作模式",
+  "description": "三步续写：写作要素分析→写作要素深化→单章生成，接受后提升为新章节",
+  "version": "1.0",
+  "author": "GengBi",
+  "builtin": true,
+  "ui_mode": "standard",
+  "accept_mode": "promote",
+  "stages": [
+    {
+      "id": "analysis",
+      "name": "写作要素分析",
+      "agent": "audit",
+      "flow_key": "writing_element_analysis",
+      "streaming": true,
+      "created_by": "",
+      "params": {
+        "phase": "writing_element_analysis",
+        "phase_name": "写作要素分析"
+      },
+      "input_from": ""
+    },
+    {
+      "id": "refinement",
+      "name": "写作要素深化",
+      "agent": "audit",
+      "flow_key": "writing_element_refinement",
+      "streaming": true,
+      "created_by": "",
+      "params": {
+        "phase": "writing_element_refinement",
+        "phase_name": "写作要素深化"
+      },
+      "input_from": "analysis"
+    },
+    {
+      "id": "generate",
+      "name": "单章生成",
+      "agent": "continuation",
+      "flow_key": "single_continuation",
+      "streaming": true,
+      "created_by": "writing_mode",
+      "params": {},
+      "input_from": "refinement"
+    }
+  ]
+}
+```
+
+**要点**：
+- 阶段 1 `agent=audit`，`flow_key=writing_element_analysis`，`params.phase=writing_element_analysis`（决定模板文件名 `phase_writing_element_analysis.txt`），`input_from=""`（无前序输入，用面板参数）
+- 阶段 2 `agent=audit`，`flow_key=writing_element_refinement`，`params.phase=writing_element_refinement`（模板 `phase_writing_element_refinement.txt`），`input_from="analysis"`（接收阶段 1 输出注入 `{{prev_analysis}}`）
+- 阶段 3 `agent=continuation`，`created_by="writing_mode"`（触发写作模式第 3 步分支 `_on_start_writing_mode_continuation`），`input_from="refinement"`（接收阶段 2 输出前置【写作参考】到 user_input）
+- `accept_mode=promote`：接受后提升为新章节
+- 与 rewrite_current 的区别：3 阶段（多一层深化）、`accept_mode=promote`（非 replace）、阶段 3 走 `_on_start_writing_mode_continuation` 而非 `_on_rewrite_analysis_accepted`、前文含当前章（续写下一章而非重写当前章）
+
 ---
 
 ## 8. 自定义插件案例：先分析再续写
@@ -439,6 +504,38 @@ stage_params = {**面板params, **阶段params}  # 阶段 params 覆盖面板同
 6. 流式输出到续写面板，用户接受后因 `accept_mode=promote`，提升为新章节插入当前章之后
 
 > **与内置 `rewrite_current` 的区别**：本案例 `accept_mode=promote`（插入新章节）而非 `replace`（替换当前章）；阶段 2 `created_by="continuation"`（独立续写）而非 `"rewrite_current"`（重写生成）。
+
+### 写作模式使用说明与预期效果
+
+**使用说明**：
+1. 在续写面板模式下拉选择「写作模式」
+2. 在 user_input 框填写本次写作需求（如"主角与反派在酒楼对峙，揭示身世秘密"）
+3. 点击开始续写，进入 3 阶段流程
+
+**执行流程**（8 步）：
+1. 阶段 1（analysis）：audit agent 加载 `phase_writing_element_analysis.txt`，注入 6 占位符（`user_input`/`world_ontology`/`protagonist_profile`/`custom_audit_rules`/`context_entries`/`previous_chapters_text`），AuditWorker 低温流式输出「出场角色/场所/相关事件/关键伏笔/风格基调」5 分节，弹 AuditDialog 供审阅
+2. 用户审阅/编辑阶段 1 输出，点击「采纳」
+3. `_on_generic_analysis_accepted` 调 `flow_executor.resume(分析文本)`，阶段 1 输出作为 `_prev_output` 传递给阶段 2
+4. 阶段 2（refinement）：audit agent 加载 `phase_writing_element_refinement.txt`，注入 3 占位符（`prev_analysis`/`world_ontology`/`previous_chapters_text`），AuditWorker 流式输出「角色形象（外貌/心理学形象/语言风格/OOC红线）+ 场所精炼 + 其他关键要素」，弹 AuditDialog 供审阅
+5. 用户审阅/编辑阶段 2 输出，点击「采纳」
+6. `_on_generic_analysis_accepted` 调 `flow_executor.resume(精炼文本)`，阶段 2 输出作为 `_prev_output` 传递给阶段 3
+7. 阶段 3（generate）：continuation agent 检查 `_prev_output` 非空且 `created_by=="writing_mode"`，走 `_on_start_writing_mode_continuation`，将精炼输出以【写作参考】标签包裹后前置到 user_input，调 `_on_start_continuation(user_input_override=combined)` 走单章续写
+8. 流式输出到续写面板，用户接受后因 `accept_mode=promote`，提升为新章节插入当前章之后
+
+**预期效果**：
+- 阶段 1 输出：结构化的本次出场角色/场所/事件清单，用户可确认 AI 对写作需求的理解是否准确
+- 阶段 2 输出：每个出场角色的简化版形象档案（外貌+心理学形象+语言风格+OOC红线），场所精炼与其他关键要素，用户可确认角色刻画方向
+- 阶段 3 输出：严格遵循【写作参考】内容的单章正文，角色行为/语言符合阶段 2 刻画的形象，事件符合阶段 1 的规划
+
+**与 rewrite_current 的对比**：
+
+| 维度 | writing_mode | rewrite_current |
+|------|---------------|-----------------|
+| 阶段数 | 3（分析→深化→生成） | 2（分析→生成） |
+| 分析对象 | 下一章写作要素（角色/场所/事件） | 当前章节重写需求 |
+| 前文是否含当前章 | 是（续写下一章，当前章是末尾前文） | 否（当前章是待重写对象） |
+| accept_mode | promote（插入新章节） | replace（替换当前章） |
+| 第 3 步注入方式 | 前置【写作参考】到 user_input | 分析文本作为 user_input |
 
 ---
 

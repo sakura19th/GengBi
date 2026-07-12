@@ -52,11 +52,11 @@ novelforge/
 │   ├── exporter.py              # 导出（TXT/Markdown/备份 zip，含 ZIP slip 防护）
 │   ├── async_runner.py          # 后台事件循环运行器（单例；`run` 超时后 `future.cancel()` 取消协程避免泄漏；`_run_loop` finally 清理异常 logger.warning 而非静默吞掉）
 │   ├── jailbreak_provider.py     # 流程破限文本提供器（加载 jb_{flow}.txt 按 ### LOW/MID/HIGH ### 分段，4 等级 off/low/mid/high 返回文本；文件缓存）
-│   ├── flow_plugin_service.py  # 流程控制插件 CRUD（继承 BaseJsonService[FlowPlugin]；首启复制 3 内置插件 + 版本升级（builtin 插件资源版本高于已安装时覆盖）；导入强制 builtin=False，ID 冲突追加 _imported；内置不可删除）
+│   ├── flow_plugin_service.py  # 流程控制插件 CRUD（继承 BaseJsonService[FlowPlugin]；首启复制 4 内置插件 + 版本升级（builtin 插件资源版本高于已安装时覆盖）；导入强制 builtin=False，ID 冲突追加 _imported；内置不可删除）
 │   ├── flow_executor.py        # 流程执行引擎（按 FlowPlugin.stages 有序执行；5 agent handler 回调机制；挂起-恢复模式处理多阶段用户交互；cancel 清理；`_execute_current_stage` 用 while 迭代循环推进阶段而非递归，避免阶段数多时触及 Python 递归上限）
 │   └── storage_service.py       # 存储服务（项目/章节/续写 CRUD；update_chapter_index/update_chapter_title 单列更新不写文件）
 ├── ui/              # UI 组件（PySide6）
-│   ├── main_window.py           # 主窗口（5 栏 QSplitter + 主题管理 + 调试菜单；ont/protagonist/custom_rule 提取信号处理；FlowPluginService+FlowExecutor 流程插件系统接线；start_flow 统一入口 + 5 agent handler + accept_mode 适配；volume_phase 多阶段流程：_prepare_volume_run→_start_volume_phase→phase_output→resume；卷续写暂存节点持久化 ~/.novelforge/volume_states/{chapter_id}.json + 选中章节恢复入口 _check_volume_resume→_resume_volume_state + 阶段失败重试对话框 + 停止/完成/出错清理；逐章子步骤进度 _on_volume_chapter_step_started 累积 _volume_chapter_steps_seen 驱动面板 4 步标签（细纲/写作/验证/修订）+ 状态栏；章节切换状态保留 7 缓冲字段；closeEvent 停止 _continuation_worker/_audit_worker/_volume_orchestrator 三 worker；_on_start_continuation 温度（0.0-2.0）+目标字数（100-50000）范围校验；审计 chunk_received 经 _on_audit_chunk_received 中转槽转发到 AuditDialog 防对话框已删除 RuntimeError 崩溃 + _on_audit_cancelled 取消前 disconnect）
+│   ├── main_window.py           # 主窗口（5 栏 QSplitter + 主题管理 + 调试菜单；ont/protagonist/custom_rule 提取信号处理；FlowPluginService+FlowExecutor 流程插件系统接线；start_flow 统一入口 + 5 agent handler + accept_mode 适配；audit handler 按 flow_key 分派（rewrite_analysis 走 _on_start_rewrite_current 原路径，其余走 _on_start_generic_analysis 通用分析路径，采纳后 flow_executor.resume 推进）；continuation handler 新增 created_by=="writing_mode" 分支调 _on_start_writing_mode_continuation（精炼输出前置【写作参考】到 user_input）；_on_start_continuation 新增 user_input_override 参数支持写作模式第 3 步注入；新增 _build_previous_chapters_text(lookback) 构建前 lookback 章正文（含当前章）供写作模式分析注入 {{previous_chapters_text}}；volume_phase 多阶段流程：_prepare_volume_run→_start_volume_phase→phase_output→resume；卷续写暂存节点持久化 ~/.novelforge/volume_states/{chapter_id}.json + 选中章节恢复入口 _check_volume_resume→_resume_volume_state + 阶段失败重试对话框 + 停止/完成/出错清理；逐章子步骤进度 _on_volume_chapter_step_started 累积 _volume_chapter_steps_seen 驱动面板 4 步标签（细纲/写作/验证/修订）+ 状态栏；章节切换状态保留 7 缓冲字段；closeEvent 停止 _continuation_worker/_audit_worker/_volume_orchestrator 三 worker；_on_start_continuation 温度（0.0-2.0）+目标字数（100-50000）范围校验；审计 chunk_received 经 _on_audit_chunk_received 中转槽转发到 AuditDialog 防对话框已删除 RuntimeError 崩溃 + _on_audit_cancelled 取消前 disconnect）
 │   ├── continuation_panel.py    # 续写控制面板（动态插件下拉由 set_flow_plugins 填充；start_flow 统一信号替代原 start_continuation/rewrite_current_analysis_requested；端点/模型下拉框 AdjustToContents 自适应宽度；端点切换按 enabled_models 填充模型下拉并按名称排序，会话记忆每端点上次手动选择模型；select_model_by_name 供 _refresh_endpoints 同步流程配置模型；get_selected_model 供调试预览取面板当前模型；输出框右键 4 色高亮 + 备注；highlights_changed 信号持久化）
 │   ├── volume_panel.py          # 卷续写控制面板（配置/两层进度/五 Tab 产物查看/流式区）
 │   ├── context_preview_panel.py # 上下文提取预览面板（ontology/protagonist/custom_rule 三类提取按钮互斥 + 流式展示）
@@ -73,17 +73,17 @@ novelforge/
 │   ├── regex_manager.py         # 正则管理器（内联勾选即时持久化）
 │   ├── worldbook_manager.py     # 世界书管理器（条目级 enabled 开关）
 │   ├── settings_dialog.py       # 设置对话框（API 端点管理含 models 全部列表 + enabled_models 可勾选多选 QListWidget + 全选/全不选/自定义模型录入、复制端点；default_model 自动取首个已启用供后台流程；reasoning_effort 7 档；EndpointEditDialog._on_accept base_url 校验 http/https scheme + rstrip("/")；ModelFetchWorker 增加 stop() best-effort 标志位 + finished→deleteLater 自清理 + closeEvent/_on_fetch_models 停止前一个 worker wait(2000) + 防御式 isRunning 访问避免 wrapper 失效 RuntimeError；不含上下文提取配置——已统一由流程端点配置+预览面板管理）
-│   ├── flow_endpoint_dialog.py  # 流程端点配置（8 流程端点映射 + 每流程模型下拉 enabled_models 回退链 + 6 非正文流程破限等级下拉 off/low/mid/high/custom + 自定义文本编辑入口）
+│   ├── flow_endpoint_dialog.py  # 流程端点配置（10 流程端点映射 + 每流程模型下拉 enabled_models 回退链 + 8 非正文流程破限等级下拉 off/low/mid/high/custom + 自定义文本编辑入口）
 │   ├── jailbreak_custom_dialog.py # 自定义破限文本编辑对话框（QPlainTextEdit + 确定/取消）
 │   ├── font_settings.py / history_panel.py / project_panel.py / template_editor.py / worldbook_panel.py / dialogs.py / flow_layout.py / wheel_filter.py
 │   └── ...
 └── resources/       # 资源文件
     ├── defaults/
     │   ├── default_preset.json     # 默认写作预设（23 条分层模块：main/抗八股/抗重复/字数/文风互斥/推进互斥/思维链三层次互斥/破限层 4 套互斥+助手预填充/Marker；破限默认全关；nf_jb_* 已前置到 main 之前定调；nf_jb_high 含 NSFW 指引覆盖原 nf_nsfw；防全知硬约束贯穿 core_rules/anti_bagua/cot/main；nf_core_rules 集成基线轻度破限【创作自由基准】+ 第 8 条用户指令遵从/不引入意外内容；nf_cot 改为变量注入模板 {{getvar::COT-items}}；新增 nf_cot_low/mid/high 三层次互斥模块通过 setvar 注入思维链分析项（低 4 项/中 7 项/高 10 项全维度），默认启用 mid；main 输出格式描述泛化不再列举具体项；main 含【续写约束】段；main 输出格式含 <novelforge_title> 标签 + {{previous_chapter_titles}} 宏段落供章节标题生成）
-    │   ├── jailbreaks/                # 非正文流程破限模板（6 个 jb_*.txt，每文件含 ### LOW/MID/HIGH ### 三档；已全面深化：LOW=认知修正、MID=授权自由、HIGH=沙盒解放，含内部审查对抗锚点）
+    │   ├── jailbreaks/                # 非正文流程破限模板（8 个 jb_*.txt，每文件含 ### LOW/MID/HIGH ### 三档；已全面深化：LOW=认知修正、MID=授权自由、HIGH=沙盒解放，含内部审查对抗锚点）
     │   ├── default_regex_scripts.json  # 5 条默认正则（思维链隐藏/八股抹除/破折号规范/空行清理/章节标题剥离）
     │   ├── extract_prompt.txt / extract_merge_prompt.txt  # 上下文提取 + 汇总环节
-    │   ├── flow_plugins/              # 内置流程插件 JSON（single/volume/rewrite_current 三种模式声明式描述；volume v2.0 为 4 阶段 volume_phase；首启复制到 ~/.novelforge/flow_plugins/ + 版本升级）
+    │   ├── flow_plugins/              # 内置流程插件 JSON（single/volume/rewrite_current/writing_mode 四种模式声明式描述；volume v2.0 为 4 阶段 volume_phase；首启复制到 ~/.novelforge/flow_plugins/ + 版本升级）
     │   └── agent/                   # 续写阶段提示词模板（phase_*.txt；已加入严格遵循用户指令/不引入意外内容约束）
     │       ├── phase_verify.txt          # 16 维度验证（含 4 个一票否决 + rigid_ai_text 严格给分；认知越界检查 7 条含信息传递路径/元词汇/剧情奴隶化）
     │       ├── phase_custom_rule_parse.txt # 自定义设定结构化解析
@@ -92,7 +92,9 @@ novelforge/
     │       ├── phase_volume_outline.txt / phase_outline_audit.txt / phase_outline_final.txt  # 卷大纲/审计/终稿
     │       ├── phase_chapter_outline.txt  # 单章细纲
     │       ├── phase_single_audit.txt     # 单章审计（8 维度；认知越界检查 7 条含信息传递路径/元词汇/剧情奴隶化）
-    │       └── phase_rewrite_analysis.txt # 重写当前章节需求分析
+    │       ├── phase_rewrite_analysis.txt # 重写当前章节需求分析
+    │       ├── phase_writing_element_analysis.txt  # 写作模式阶段 1 写作要素分析（6 占位符含 {{previous_chapters_text}}，5 分节输出：出场角色/场所/相关事件/关键伏笔/风格基调）
+    │       └── phase_writing_element_refinement.txt # 写作模式阶段 2 写作要素深化（3 占位符含 {{prev_analysis}}，角色形象外貌/心理学形象/语言风格/OOC红线 + 场所精炼 + 其他关键要素）
     └── themes/          # QSS 主题（light/dark，Apple HIG 风格）
 ```
 
@@ -255,14 +257,26 @@ novelforge/
 将续写控制中的「单次续写」「卷续写」「重写当前章节」三种模式抽离为声明式 JSON 配置的流程插件，允许用户按规范自行组合既有 agent 或新增 agent 类型，以单个 JSON 文件导入导出分享。
 
 - **数据模型**（`models/flow_plugin.py`）：`FlowPlugin`（id/name/stages/builtin/ui_mode/accept_mode/version）+ `FlowStage`（id/agent/flow_key/created_by/params/input_from）；5 种 agent 类型（continuation/audit/checkpoint/volume_pipeline/volume_phase），FlowStage.agent 字段级校验；3 种 ui_mode（standard/volume）；3 种 accept_mode（promote/replace/volume_insert）；ID 路径穿越防护（拒绝含 `/` `\` `..` `\x00` 的 ID）
-- **内置插件**（`resources/defaults/flow_plugins/`）：single（1 阶段 continuation，accept_mode=promote）、volume v2.0（4 阶段 volume_phase：deep_analysis→volume_outline→outline_audit→chapter_writing，ui_mode=volume，accept_mode=volume_insert）、rewrite_current（2 阶段 audit→continuation，input_from=analysis，accept_mode=replace）；内置插件 ID 与原模式字符串一致以保兼容（`get_mode()` 返回值不变）
-- **服务层**（`services/flow_plugin_service.py`）：继承 `BaseJsonService[FlowPlugin]`，存储路径 `~/.novelforge/flow_plugins/{id}.json`；首启复制 3 个内置插件 + 版本升级（已安装 builtin=True 且资源版本更高时覆盖）；导入强制 `builtin=False`，ID 冲突追加 `_imported` 后缀；内置插件不可删除
+- **内置插件**（`resources/defaults/flow_plugins/`）：single（1 阶段 continuation，accept_mode=promote）、volume v2.0（4 阶段 volume_phase：deep_analysis→volume_outline→outline_audit→chapter_writing，ui_mode=volume，accept_mode=volume_insert）、rewrite_current（2 阶段 audit→continuation，input_from=analysis，accept_mode=replace）、writing_mode（3 阶段 audit→audit→continuation：写作要素分析→写作要素深化→单章生成，ui_mode=standard，accept_mode=promote；阶段 1/2 走通用分析路径 _on_start_generic_analysis 采纳后 resume 推进，阶段 3 created_by="writing_mode" 走 _on_start_writing_mode_continuation 将精炼输出前置【写作参考】到 user_input）；内置插件 ID 与原模式字符串一致以保兼容（`get_mode()` 返回值不变）
+- **服务层**（`services/flow_plugin_service.py`）：继承 `BaseJsonService[FlowPlugin]`，存储路径 `~/.novelforge/flow_plugins/{id}.json`；首启复制 4 个内置插件 + 版本升级（已安装 builtin=True 且资源版本更高时覆盖）；导入强制 `builtin=False`，ID 冲突追加 `_imported` 后缀；内置插件不可删除
 - **执行引擎**（`services/flow_executor.py`）：按 `FlowPlugin.stages` 有序执行；`register_handler(agent_type, handler)` 注册 5 种 agent handler；handler 返回 `"pending"` 挂起等待用户交互，`resume(output)` 恢复推进下阶段，`cancel()` 清理状态；参数合并优先级：阶段 params 覆盖面板 params（`{**self._params, **stage.params}`）
 - **main_window 接线**：`start_flow` 信号统一入口（plugin_id + params → FlowExecutor）；`_on_start_flow` 注入 `_flow_plugin_id` 到 params（经 FlowExecutor → handler → ContinuationWorker → `parameters_snapshot`）；5 个 handler（continuation/audit/checkpoint/volume_pipeline/volume_phase）分发到既有方法；volume_phase handler 返回 pending，VolumeOrchestrator 单阶段执行后 emit phase_output → `_on_volume_phase_output` → `flow_executor.resume(artifact)` 推进下一阶段；chapter_writing 阶段 emit finished → `_on_volume_continuation_finished` → `flow_executor.cancel()` 结束流程；`_volume_state` dict 存储准备数据与各阶段产物（Python 对象直传）
 - **accept_mode 适配**：`_on_accept_continuation` 优先从 `swipe.parameters_snapshot["_flow_plugin_id"]` 查插件 `accept_mode`，回退按 `created_by` 推断（兼容旧 swipe）；`replace` 替换当前章节正文，`promote` 提升为新章节，`volume_insert` 直接 return（卷续写内部自建章节）
 - **挂起-恢复**：内置 rewrite_current 插件由信号链直接完成两步流程（audit handler 返回 pending → AuditDialog.accepted_text → `_on_rewrite_analysis_accepted` → cancel FlowExecutor）；自定义插件的 audit→continuation 流程可通过 `flow_executor.resume(output)` 推进
 - **插件管理器**（`ui/flow_plugin_manager.py`）：继承 `PersistentDialog` 非模态独立窗口；列表/详情/导入/导出/删除（内置禁用）；`plugin_changed` 信号通知 MainWindow 刷新面板下拉；工具菜单「流程插件管理器(&F)」入口
-- **开发者文档**：完整插件 JSON 格式、合法取值速查、6 大编写规律、3 个内置插件完整 JSON、自定义插件案例（analyze_then_write）与调试验证见 [`FLOW_PLUGIN_GUIDE.md`](FLOW_PLUGIN_GUIDE.md)（项目根目录，开发者向）
+- **开发者文档**：完整插件 JSON 格式、合法取值速查、6 大编写规律、4 个内置插件完整 JSON、自定义插件案例（analyze_then_write）与调试验证见 [`FLOW_PLUGIN_GUIDE.md`](FLOW_PLUGIN_GUIDE.md)（项目根目录，开发者向）
+
+### 19. 写作模式流程（writing_mode）
+
+三步续写流程，面向"先分析再深化最后生成"的精细创作场景。复用 audit agent（不新增 agent 类型），通过通用分析路径 `_on_start_generic_analysis` 实现两个分析阶段。
+
+- **阶段 1 写作要素分析**（`phase_writing_element_analysis.txt`）：6 占位符（`user_input`/`world_ontology`/`protagonist_profile`/`custom_audit_rules`/`context_entries`/`previous_chapters_text`），低温流式输出 5 分节（出场角色/场所/相关事件/关键伏笔/风格基调）；AuditDialog 供用户审阅，采纳后 `flow_executor.resume` 推进
+- **阶段 2 写作要素深化**（`phase_writing_element_refinement.txt`）：3 占位符（`prev_analysis`/`world_ontology`/`previous_chapters_text`），为每个出场角色产出简化版形象档案（外貌+心理学形象+语言风格+OOC 红线，对标【提取主角形象】但简化）+ 场所精炼 + 其他关键要素；采纳后 resume 推进
+- **阶段 3 单章生成**：continuation agent 检查 `created_by=="writing_mode"` + `_prev_output` 非空，走 `_on_start_writing_mode_continuation`：将阶段 2 精炼输出以【写作参考】标签包裹后前置到面板 user_input，调 `_on_start_continuation(user_input_override=combined)` 走单章续写（零侵入 `prompt_assembler`/`ContinuationWorker`）
+- **通用分析路径**（`_on_start_generic_analysis`）：镜像 `_on_start_rewrite_current` 结构，差异点：模板由 `stage.params["phase"]` 决定、flow_key 取 `stage.flow_key`、读 `params._prev_output` 注入 `{{prev_analysis}}`（阶段 2 接收阶段 1 输出）、读面板 `lookback_chapters` 构建 `{{previous_chapters_text}}`、采纳后 `flow_executor.resume` 推进（不 cancel）；AuditWorker max_tokens 默认 6000 容纳多角色形象
+- **前文构建**：`_build_previous_chapters_text(lookback)` 构建前 lookback 章正文（含当前章，格式 `## {标题}\n\n{正文}`），区别于 rewrite_current 的 `exclude_current=True`（当前章是待重写对象）
+- **破限**：`writing_element_analysis`/`writing_element_refinement` 两个 flow_key 默认 `low` 等级（与提取类一致），`jb_writing_element_*.txt` 含 LOW/MID/HIGH 三档
+- **accept_mode=promote**：接受后提升为新章节插入当前章之后
 
 ## 代码风格规范
 

@@ -1,11 +1,11 @@
 """流程端点配置对话框。
 
-列出全部 8 个 LLM 流程，允许用户为每个流程选择使用的 API 端点。
+列出全部 10 个 LLM 流程，允许用户为每个流程选择使用的 API 端点。
 默认使用端点管理中的默认端点（首项），也可选择其它已配置端点。
 配置持久化到 ``config["flow_endpoints"]``（``{flow_key: endpoint_id}``），
 由 ``ConfigManager.get_flow_endpoint(flow_key)`` 解析（未配置或端点被删则回退默认端点）。
 
-另为 6 个非正文流程（除 single/volume continuation 外）提供破限配置：
+另为 8 个非正文流程（除 single/volume continuation 外）提供破限配置：
 每流程选破限等级（关闭/低/中/高/自定义），自定义可编辑文本。配置持久化到
 ``config["flow_endpoints"]`` 与 ``config["flow_jailbreaks"]``/``flow_jailbreaks_custom``。
 正文流程的破限由预设管理器勾选 ``nf_jb_*`` 模块控制，不在此对话框配置。
@@ -40,6 +40,8 @@ FLOW_DEFINITIONS: list[tuple[str, str]] = [
     ("ontology_extraction", "世界观底层提取"),
     ("protagonist_extraction", "主角形象提取"),
     ("custom_rule_parsing", "自定义设定解析"),
+    ("writing_element_analysis", "写作要素分析"),
+    ("writing_element_refinement", "写作要素深化"),
 ]
 
 # 正文流程（破限由预设控制，不在本对话框配置破限）
@@ -62,7 +64,7 @@ class FlowEndpointDialog(QDialog):
     其余项为已配置的端点。保存时收集所有下拉的 currentData() 写入
     ``config["flow_endpoints"]``。
 
-    另为 6 个非正文流程提供破限等级下拉 + 自定义编辑按钮，写入
+    另为 8 个非正文流程提供破限等级下拉 + 自定义编辑按钮，写入
     ``config["flow_jailbreaks"]`` 与 ``config["flow_jailbreaks_custom"]``。
 
     Usage::

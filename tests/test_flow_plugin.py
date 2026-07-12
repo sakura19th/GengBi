@@ -139,11 +139,12 @@ class TestFlowPluginService:
         return FlowPluginService(storage_path=tmp_path)
 
     def test_builtin_plugins_copied(self, service: FlowPluginService) -> None:
-        """首启复制 3 个内置插件。"""
+        """首启复制 4 个内置插件。"""
         ids = service.list_ids()
         assert "single" in ids
         assert "volume" in ids
         assert "rewrite_current" in ids
+        assert "writing_mode" in ids
 
     def test_load_builtin_single(self, service: FlowPluginService) -> None:
         """加载内置 single 插件。"""
@@ -179,6 +180,30 @@ class TestFlowPluginService:
             assert stage.agent == "volume_phase"
             assert stage.params.get("phase") in expected_ids
 
+    def test_load_builtin_writing_mode(self, service: FlowPluginService) -> None:
+        """加载内置 writing_mode 插件（3 阶段 audit→audit→continuation）。"""
+        plugin = service.load_plugin("writing_mode")
+        assert plugin is not None
+        assert plugin.builtin is True
+        assert plugin.ui_mode == "standard"
+        assert plugin.accept_mode == "promote"
+        assert len(plugin.stages) == 3
+        # 阶段 1：写作要素分析
+        assert plugin.stages[0].id == "analysis"
+        assert plugin.stages[0].agent == "audit"
+        assert plugin.stages[0].flow_key == "writing_element_analysis"
+        assert plugin.stages[0].params.get("phase") == "writing_element_analysis"
+        # 阶段 2：写作要素深化
+        assert plugin.stages[1].id == "refinement"
+        assert plugin.stages[1].agent == "audit"
+        assert plugin.stages[1].flow_key == "writing_element_refinement"
+        assert plugin.stages[1].input_from == "analysis"
+        # 阶段 3：单章生成
+        assert plugin.stages[2].id == "generate"
+        assert plugin.stages[2].agent == "continuation"
+        assert plugin.stages[2].created_by == "writing_mode"
+        assert plugin.stages[2].input_from == "refinement"
+
     def test_save_and_load_custom(self, service: FlowPluginService) -> None:
         """保存并加载自定义插件。"""
         plugin = FlowPlugin(
@@ -212,10 +237,10 @@ class TestFlowPluginService:
         custom2 = FlowPlugin(id="apple", name="A")
         service.save_plugin(custom2)
         ids = service.list_plugin_ids_sorted()
-        # 内置 3 个在前（顺序不保证，用集合比较）
-        assert set(ids[:3]) == {"single", "volume", "rewrite_current"}
+        # 内置 4 个在前（顺序不保证，用集合比较）
+        assert set(ids[:4]) == {"single", "volume", "rewrite_current", "writing_mode"}
         # 自定义按 ID 排序
-        assert ids[3:] == ["apple", "zebra"]
+        assert ids[4:] == ["apple", "zebra"]
 
     def test_builtin_plugin_version_upgrade(
         self, service: FlowPluginService, tmp_path: Path

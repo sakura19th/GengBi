@@ -5,7 +5,7 @@
 存储路径：``~/.novelforge/flow_plugins/{plugin_id}.json``
 
 主要功能：
-- 内置插件首启复制（single/volume/rewrite_current 三种模式）
+- 内置插件首启复制（single/volume/rewrite_current/writing_mode 四种模式）
 - 插件 CRUD 操作（基于 BaseJsonService + .bak 备份）
 - 导入插件 JSON：校验后强制 builtin=False，ID 冲突追加 ``_imported`` 后缀
 - 导出插件 JSON：单个 JSON 文件，可分享给其他用户
@@ -27,7 +27,7 @@ from novelforge.utils.paths import get_default_flow_plugin_path
 logger = logging.getLogger(__name__)
 
 # 内置插件 ID 列表（与原续写模式字符串一致以保兼容）
-_BUILTIN_PLUGIN_IDS: tuple[str, ...] = ("single", "volume", "rewrite_current")
+_BUILTIN_PLUGIN_IDS: tuple[str, ...] = ("single", "volume", "rewrite_current", "writing_mode")
 
 
 class FlowPluginService(BaseJsonService[FlowPlugin]):
@@ -67,7 +67,7 @@ class FlowPluginService(BaseJsonService[FlowPlugin]):
     def _ensure_builtin_plugins(self) -> None:
         """首次启动时将内置插件 JSON 复制到用户目录，已有旧版时按版本升级。
 
-        内置插件是三种续写模式的声明式描述，ID 与原模式字符串一致。
+        内置插件是四种续写模式的声明式描述，ID 与原模式字符串一致。
         用户目录已有同名文件时：若已安装版本为 builtin 且资源版本更高，覆盖升级；
         否则跳过（允许用户自定义修改内置插件）。
         """
