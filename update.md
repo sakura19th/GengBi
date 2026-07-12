@@ -1,5 +1,25 @@
 # 更新日志
 
+## 2026-07-12：v0.2.10 文档同步——补全发版后改动的文档记录
+
+### 背景
+
+v0.2.10 发版后又陆续完成 5 项改动（写作模式流程插件、写作要素提示词优化、Grok 参数过滤、Gemini contents 兜底、重写按钮复用审计结果），但这些改动未及时同步到 README.md 的 v0.2.10 更新记录与 agent.md 的架构分层描述。本次保持版本号 v0.2.10 不变，仅同步相关文档。
+
+### 核心改动
+
+- `README.md`：v0.2.10 更新记录追加 5 条（写作模式流程插件/写作要素提示词优化/Grok 参数过滤/Gemini contents 兜底/重写按钮复用审计结果）
+- `agent.md`：
+  - `llm_client.py` 描述补充 `_filter_unsupported_params`（xAI Grok 参数过滤）与 `_ensure_user_message`（Gemini 兼容网关兜底）
+  - `continuation_panel.py` 描述补充 `_on_rewrite_clicked` 统一发射 rewrite 信号
+  - `main_window.py` 描述补充 `_on_rewrite_analysis_accepted`/`_on_start_writing_mode_continuation` 缓存审计/精炼结果到 `swipe.parameters_snapshot` + `_on_rewrite` 核心决策逻辑（有缓存跳过分析直接生成，无缓存走完整流程）
+
+### 文档同步
+
+- `README.md`：v0.2.10 更新记录补全
+- `agent.md`：llm_client/continuation_panel/main_window 描述同步
+- `update.md`：本条目
+
 ## 2026-07-12：重写按钮复用审计结果（rewrite_current + writing_mode）
 
 ### 背景
