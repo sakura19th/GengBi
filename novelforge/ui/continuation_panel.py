@@ -119,6 +119,9 @@ class ContinuationPanel(QWidget):
     highlights_changed = Signal(list)
     # 重写当前章节模式：触发「分析→检查点→生成」两步流程
     rewrite_current_analysis_requested = Signal(dict)
+    # 统一流程启动信号（携带 plugin_id + params），替代 start_continuation/
+    # rewrite_current_analysis_requested 的新统一入口，由 FlowExecutor 执行
+    start_flow = Signal(str, dict)
 
     def __init__(self, parent=None) -> None:
         """初始化续写控制面板。"""
@@ -148,9 +151,7 @@ class ContinuationPanel(QWidget):
         mode_group = QGroupBox("续写模式")
         mode_layout = QHBoxLayout(mode_group)
         self._mode_combo = QComboBox()
-        self._mode_combo.addItem("单次续写", "single")
-        self._mode_combo.addItem("卷续写（多章节）", "volume")
-        self._mode_combo.addItem("重写当前章节", "rewrite_current")
+        # 不再硬编码 3 项，由 set_flow_plugins 动态填充插件注册表
         mode_layout.addWidget(self._mode_combo)
         layout.addWidget(mode_group)
 
@@ -412,7 +413,7 @@ class ContinuationPanel(QWidget):
         self.mode_changed.emit(self.get_mode())
 
     def get_mode(self) -> str:
-        """获取当前续写模式（"single"/"volume"/"rewrite_current"）。"""
+        """获取当前续写模式（plugin_id，内置为 single/volume/rewrite_current）。"""
         idx = self._mode_combo.currentIndex()
         if idx >= 0:
             data = self._mode_combo.itemData(idx)
@@ -424,12 +425,40 @@ class ContinuationPanel(QWidget):
         """设置续写模式。
 
         Args:
-            mode: 模式名（"single"/"volume"/"rewrite_current"）
+            mode: 模式名 / plugin_id（"single"/"volume"/"rewrite_current" 或自定义插件 ID）
         """
         for i in range(self._mode_combo.count()):
             if self._mode_combo.itemData(i) == mode:
                 self._mode_combo.setCurrentIndex(i)
                 return
+
+    def set_flow_plugins(self, plugins: list) -> None:
+        """设置流程插件列表（替换模式下拉项）。
+
+        由 main_window 在初始化和插件变更时调用，用 FlowPluginService 注册表
+        填充模式下拉框。内置插件 ID 与原模式字符串一致以保兼容。
+
+        Args:
+            plugins: FlowPlugin 对象列表（内置在前，自定义按序）
+        """
+        # 记录当前选中项，填充后恢复
+        prev_mode = self.get_mode()
+        self._mode_combo.blockSignals(True)
+        self._mode_combo.clear()
+        for plugin in plugins:
+            self._mode_combo.addItem(plugin.name, plugin.id)
+        # 恢复选中项（若仍存在），否则选第一项
+        restored = False
+        for i in range(self._mode_combo.count()):
+            if self._mode_combo.itemData(i) == prev_mode:
+                self._mode_combo.setCurrentIndex(i)
+                restored = True
+                break
+        if not restored and self._mode_combo.count() > 0:
+            self._mode_combo.setCurrentIndex(0)
+        self._mode_combo.blockSignals(False)
+        # 触发一次 mode_changed 以同步 UI 显隐
+        self.mode_changed.emit(self.get_mode())
 
     def show_volume_panel(self, visible: bool) -> None:
         """切换 Volume 面板的显示。
@@ -674,31 +703,30 @@ class ContinuationPanel(QWidget):
     def _on_start_clicked(self) -> None:
         """开始续写按钮。
 
-        按 ``get_mode()`` 分发：
-        - ``single`` / ``volume``：发射 ``start_continuation`` 信号
-        - ``rewrite_current``：发射 ``rewrite_current_analysis_requested`` 信号
-          （触发 MainWindow 的「分析→检查点→生成」两步流程）
+        统一发射 ``start_flow`` 信号（携带 plugin_id + params），
+        由 MainWindow 的 FlowExecutor 按 plugin 声明的阶段序列执行。
+        内置插件 ID 与原模式字符串一致，FlowExecutor 内部按 agent 类型
+        分发到对应的 handler（continuation/audit/volume_pipeline）。
         """
         params = self.get_parameters()
         params["model"] = self._model_combo.currentText()
-        if self.get_mode() == "rewrite_current":
-            self.rewrite_current_analysis_requested.emit(params)
-        else:
-            self.start_continuation.emit(params)
+        plugin_id = self.get_mode()
+        self.start_flow.emit(plugin_id, params)
 
     def _on_rewrite_clicked(self) -> None:
         """重写按钮。
 
         按 ``get_mode()`` 分发：
-        - ``rewrite_current``：复用 ``rewrite_current_analysis_requested`` 信号
-          （重新走「分析→生成」流程；分析步骤会读取当前 swipe 与用户输入）
+        - ``rewrite_current``：统一发射 ``start_flow`` 信号
+          （重新走插件声明的「分析→生成」流程）
         - 其他模式：发射 ``rewrite`` 信号（``created_by="rewrite"``）
         """
         params = self.get_parameters()
         params["model"] = self._model_combo.currentText()
         if self.get_mode() == "rewrite_current":
-            # 重写当前章节模式：重写按钮等同重新触发分析→生成
-            self.rewrite_current_analysis_requested.emit(params)
+            # 重写当前章节模式：重写按钮等同重新触发 start_flow
+            plugin_id = self.get_mode()
+            self.start_flow.emit(plugin_id, params)
         else:
             params["created_by"] = "rewrite"
             self.rewrite.emit(params)
@@ -757,8 +785,12 @@ class ContinuationPanel(QWidget):
             self._all_swipes = all_swipes
 
         if swipe:
-            # 显示 swipe 内容
-            self._output_edit.setPlainText(swipe.content)
+            # 显示 swipe 内容（若有生成的标题，在内容前显示）
+            display_text = swipe.content
+            generated_title = getattr(swipe, "generated_title", "") or ""
+            if generated_title:
+                display_text = f"【生成标题】{generated_title}\n\n{swipe.content}"
+            self._output_edit.setPlainText(display_text)
             # 加载该 swipe 已持久化的高亮
             self._current_highlights = list(getattr(swipe, "highlights", []) or [])
             self.apply_highlights()

@@ -94,6 +94,7 @@ class VolumeOrchestrator(QThread):
         phase_finished(str, object): 卷级阶段名, 产物对象
         chapter_started(int): 章节序号
         chapter_finished(int, object): 章节序号, ChapterArtifacts
+        chapter_step_started(int, str): 章节序号, 子步骤名（outline/writing/verify/revise）
         chunk_received(str): 写作阶段正文增量
         reasoning_received(str): 推理内容增量
         checkpoint_reached(str, object): 检查点名, 产物对象
@@ -107,6 +108,7 @@ class VolumeOrchestrator(QThread):
     phase_finished = Signal(str, object)
     chapter_started = Signal(int)
     chapter_finished = Signal(int, object)
+    chapter_step_started = Signal(int, str)
     chunk_received = Signal(str)
     reasoning_received = Signal(str)
     checkpoint_reached = Signal(str, object)
@@ -114,7 +116,8 @@ class VolumeOrchestrator(QThread):
     error = Signal(str)
     auth_error = Signal()
     token_count = Signal(int)
-    prompt_debug_requested = Signal(str, str)
+    prompt_debug_requested = Signal(str, str, str, str)
+    phase_output = Signal(str, object)
 
     def __init__(
         self,
@@ -137,9 +140,12 @@ class VolumeOrchestrator(QThread):
         preset_id: str = "",
         preset_snapshot: dict[str, Any] | None = None,
         chapter_id: str = "",
+        endpoint_id: str = "",
         world_ontology: WorldOntology | None = None,
         protagonist_profile: ProtagonistProfile | None = None,
         custom_audit_rules: list[Any] | None = None,
+        phase: str = "all",
+        phase_inputs: dict[str, Any] | None = None,
         parent=None,
     ) -> None:
         """初始化卷级编排器。
@@ -167,6 +173,9 @@ class VolumeOrchestrator(QThread):
             world_ontology: 底层世界观元描述（从 Project 读取，全文固化）
             protagonist_profile: 主角形象档案（从当前章节缓存读取，反映至当前章节状态）
             custom_audit_rules: 自定义设定/审计必查项列表（从 Project 读取，注入各阶段提示词作为硬约束）
+            phase: 执行阶段（"all"=完整流程，"deep_analysis"/"volume_outline"/
+                "outline_audit"/"chapter_writing"=单阶段，供 volume_phase agent 使用）
+            phase_inputs: 单阶段模式的输入产物（如 {"deep_analysis": DeepAnalysis对象}）
             parent: 父 QObject
         """
         super().__init__(parent)
@@ -198,12 +207,18 @@ class VolumeOrchestrator(QThread):
         self.preset_id = preset_id
         self.preset_snapshot = preset_snapshot or {}
         self.chapter_id = chapter_id
+        # 当前端点 ID（调试模式覆盖回传时供 dialog 默认选中）
+        self._endpoint_id = endpoint_id
         # 底层世界观元描述（全文提取一次固化，注入各阶段提示词）
         self.world_ontology = world_ontology
         # 主角形象档案（跟随章节缓存，反映至当前章节状态，注入各阶段提示词）
         self.protagonist_profile = protagonist_profile
         # 自定义设定/审计必查项（项目级全局，注入各阶段提示词作为硬约束，一票否决）
         self.custom_audit_rules = custom_audit_rules
+
+        # 分阶段执行模式（volume_phase agent）：phase="all" 为完整流程
+        self.phase = phase
+        self.phase_inputs = phase_inputs or {}
 
         # 线程安全停止
         self._stop_event = threading.Event()
@@ -234,6 +249,13 @@ class VolumeOrchestrator(QThread):
         self.debug_mode: bool = False
         self._debug_confirmed: asyncio.Event | None = None
         self._debug_confirmed_result: bool = False
+        # 调试覆盖：confirm_debug_prompt 写入，_effective_model/_effective_client 读取
+        # 每次 _maybe_debug_prompt 开始时清空，保证覆盖仅对紧接的下一次 LLM 调用生效
+        self._debug_override_endpoint: dict | None = None
+        self._debug_override_model: str = ""
+        self._debug_override_api_key: str = ""
+        # 调试覆盖端点的 LLMClient 缓存（endpoint_id → client），避免重复创建 aiohttp session
+        self._debug_clients: dict[str, Any] = {}
 
     def stop(self) -> None:
         """请求停止卷级流程（线程安全）。
@@ -254,13 +276,26 @@ class VolumeOrchestrator(QThread):
         if self._loop and self._resume_event:
             self._loop.call_soon_threadsafe(self._resume_event.set)
 
-    def confirm_debug_prompt(self, confirmed: bool) -> None:
+    def confirm_debug_prompt(
+        self,
+        confirmed: bool,
+        endpoint_override: dict | None = None,
+        model_override: str = "",
+        api_key_override: str = "",
+    ) -> None:
         """UI 线程调用，确认调试提示词弹窗。
 
         Args:
             confirmed: True=发送，False=取消
+            endpoint_override: 覆盖端点 dict（含 base_url 等），None=不覆盖
+            model_override: 覆盖模型名，空串=不覆盖
+            api_key_override: 覆盖端点的解密 API Key（endpoint_override 非 None 时需提供）
         """
         self._debug_confirmed_result = confirmed
+        if confirmed:
+            self._debug_override_endpoint = endpoint_override
+            self._debug_override_model = model_override
+            self._debug_override_api_key = api_key_override
         if self._loop and self._debug_confirmed:
             self._loop.call_soon_threadsafe(self._debug_confirmed.set)
 
@@ -270,7 +305,10 @@ class VolumeOrchestrator(QThread):
         """调试模式下弹窗确认提示词。
 
         若 debug_mode 为 False，直接返回 True。
-        若为 True，emit prompt_debug_requested 信号，等待 UI 线程确认。
+        若为 True，清空覆盖字段 → emit prompt_debug_requested 信号（含当前
+        endpoint_id/model 供 dialog 默认选中）→ 等待 UI 线程确认。
+        确认后覆盖字段由 confirm_debug_prompt 写入，供紧接的 LLM 调用经
+        _effective_model/_effective_client 读取。
 
         Args:
             messages: 即将发送的 messages 列表
@@ -283,12 +321,51 @@ class VolumeOrchestrator(QThread):
             return True
         if self._debug_confirmed is None:
             return True
+        # 清空覆盖字段（保证覆盖仅对紧接的下一次 LLM 调用生效）
+        self._debug_override_endpoint = None
+        self._debug_override_model = ""
+        self._debug_override_api_key = ""
         self._debug_confirmed.clear()
         self._debug_confirmed_result = False
         messages_json = json.dumps(messages, ensure_ascii=False, indent=2)
-        self.prompt_debug_requested.emit(phase_name, messages_json)
+        self.prompt_debug_requested.emit(
+            phase_name, messages_json, self._endpoint_id, self.model
+        )
         await self._debug_confirmed.wait()
         return self._debug_confirmed_result
+
+    def _effective_model(self) -> str:
+        """返回当前 LLM 调用应使用的模型（调试覆盖优先）。
+
+        Returns:
+            覆盖模型名（若有）否则构造时传入的 self.model
+        """
+        if self._debug_override_model:
+            return self._debug_override_model
+        return self.model
+
+    def _effective_client(self) -> Any:
+        """返回当前 LLM 调用应使用的 client（调试覆盖端点优先）。
+
+        覆盖端点时按 endpoint_id 缓存 LLMClient，避免重复创建 aiohttp session；
+        无覆盖时返回主 client。
+
+        Returns:
+            LLMClient 实例
+        """
+        if self._debug_override_endpoint is not None:
+            ep_id = self._debug_override_endpoint.get("id", "")
+            if ep_id and ep_id in self._debug_clients:
+                return self._debug_clients[ep_id]
+            client = LLMClient(
+                self._debug_override_endpoint.get("base_url", ""),
+                self._debug_override_api_key,
+                reasoning_effort=self.parameters.get("reasoning_effort", ""),
+            )
+            if ep_id:
+                self._debug_clients[ep_id] = client
+            return client
+        return self._client
 
     def get_writing_messages(self) -> list[dict[str, Any]]:
         """获取最后一章写作阶段的 messages 快照（供历史日志记录）。
@@ -330,12 +407,25 @@ class VolumeOrchestrator(QThread):
                     )
             except Exception:
                 pass
+            # 关闭 LLM 客户端，释放 aiohttp ClientSession（修复 Unclosed client session）
+            if self._client is not None:
+                try:
+                    self._loop.run_until_complete(self._client.close())
+                except Exception:
+                    pass
+            # 关闭调试覆盖端点的缓存 client
+            for dbg_client in self._debug_clients.values():
+                try:
+                    self._loop.run_until_complete(dbg_client.close())
+                except Exception:
+                    pass
+            self._debug_clients.clear()
             self._loop.close()
             self._loop = None
             logger.debug("卷级线程事件循环已关闭")
 
     async def _async_run(self) -> None:
-        """异步执行卷级多章节续写流程。"""
+        """异步执行卷级多章节续写流程（按 self.phase 分支调度）。"""
         self._loop = asyncio.get_running_loop()
         self._resume_event = asyncio.Event()
         self._debug_confirmed = asyncio.Event()
@@ -351,114 +441,270 @@ class VolumeOrchestrator(QThread):
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
             )
 
+        try:
+            if self.phase == "all":
+                await self._run_full_pipeline()
+            elif self.phase == "deep_analysis":
+                await self._run_phase_deep_analysis()
+            elif self.phase == "volume_outline":
+                await self._run_phase_volume_outline()
+            elif self.phase == "outline_audit":
+                await self._run_phase_outline_audit()
+            elif self.phase == "chapter_writing":
+                await self._run_phase_chapter_writing()
+            else:
+                self.error.emit(f"未知阶段: {self.phase}")
+        except asyncio.CancelledError:
+            logger.info("卷级任务被取消")
+            raise
+        except AuthError:
+            self.auth_error.emit()
+        except (RateLimitError, APIError) as e:
+            self.error.emit(str(e))
+        except Exception as e:
+            logger.error("卷级流程异常: %s", e, exc_info=True)
+            self.error.emit(str(e))
+
+    async def _run_full_pipeline(self) -> None:
+        """完整卷级流程（phase="all"，向后兼容 volume_pipeline agent）。"""
         artifacts = VolumeArtifacts()
 
-        try:
-            # ===== 阶段 1：前文深度分析 =====
-            self.phase_started.emit("deep_analysis")
-            deep_analysis = await self._run_deep_analysis()
-            artifacts.deep_analysis = deep_analysis
-            self.phase_finished.emit("deep_analysis", deep_analysis)
+        # ===== 阶段 1：前文深度分析 =====
+        self.phase_started.emit("deep_analysis")
+        deep_analysis = await self._run_deep_analysis()
+        artifacts.deep_analysis = deep_analysis
+        self.phase_finished.emit("deep_analysis", deep_analysis)
 
-            # 暂停点 after_deep_analysis
-            if self.config.checkpoints.get("after_deep_analysis"):
-                self.checkpoint_reached.emit("after_deep_analysis", deep_analysis)
-                edited = await self._wait_for_resume("after_deep_analysis")
-                if edited is not None and isinstance(edited, DeepAnalysis):
-                    artifacts.deep_analysis = edited
-                    deep_analysis = edited
+        # 暂停点 after_deep_analysis
+        if self.config.checkpoints.get("after_deep_analysis"):
+            self.checkpoint_reached.emit("after_deep_analysis", deep_analysis)
+            edited = await self._wait_for_resume("after_deep_analysis")
+            if edited is not None and isinstance(edited, DeepAnalysis):
+                artifacts.deep_analysis = edited
+                deep_analysis = edited
 
-            # ===== 阶段 2：卷大纲生成 =====
-            self.phase_started.emit("volume_outline")
-            volume_outline = await self._run_volume_outline(deep_analysis)
-            if volume_outline is None:
-                # 卷大纲失败为致命错误，终止流程
-                self.phase_finished.emit("volume_outline", None)
-                self.error.emit("卷大纲生成失败，流程终止")
-                return
-            artifacts.volume_outline = volume_outline
-            self.phase_finished.emit("volume_outline", volume_outline)
+        # ===== 阶段 2：卷大纲生成 =====
+        self.phase_started.emit("volume_outline")
+        volume_outline = await self._run_volume_outline(deep_analysis)
+        if volume_outline is None:
+            # 卷大纲失败为致命错误，终止流程
+            self.phase_finished.emit("volume_outline", None)
+            self.error.emit("卷大纲生成失败，流程终止")
+            return
+        artifacts.volume_outline = volume_outline
+        self.phase_finished.emit("volume_outline", volume_outline)
 
-            # 暂停点 after_volume_outline
-            if self.config.checkpoints.get("after_volume_outline"):
-                self.checkpoint_reached.emit(
-                    "after_volume_outline", volume_outline
+        # 暂停点 after_volume_outline
+        if self.config.checkpoints.get("after_volume_outline"):
+            self.checkpoint_reached.emit(
+                "after_volume_outline", volume_outline
+            )
+            edited = await self._wait_for_resume("after_volume_outline")
+            if edited is not None and isinstance(edited, VolumeOutline):
+                artifacts.volume_outline = edited
+                volume_outline = edited
+
+        # ===== 阶段 3：大纲审计（可选，多轮循环）=====
+        final_outline = volume_outline
+        final_audit_report: OutlineAuditReport | None = None
+        if self.config.enable_outline_audit:
+            # 检查点 before_audit：用户输入需着重审计的部分
+            if self.config.checkpoints.get("before_audit", True):
+                self.checkpoint_reached.emit("before_audit", volume_outline)
+                audit_focus = await self._wait_for_resume("before_audit")
+                # resume payload 为字符串（用户输入的审计重点），
+                # None/非字符串表示无重点
+                self._audit_focus = (
+                    audit_focus if isinstance(audit_focus, str) else ""
                 )
-                edited = await self._wait_for_resume("after_volume_outline")
-                if edited is not None and isinstance(edited, VolumeOutline):
-                    artifacts.volume_outline = edited
-                    volume_outline = edited
-
-            # ===== 阶段 3：大纲审计（可选，多轮循环）=====
-            final_outline = volume_outline
-            final_audit_report: OutlineAuditReport | None = None
-            if self.config.enable_outline_audit:
-                # 检查点 before_audit：用户输入需着重审计的部分
-                if self.config.checkpoints.get("before_audit", True):
-                    self.checkpoint_reached.emit("before_audit", volume_outline)
-                    audit_focus = await self._wait_for_resume("before_audit")
-                    # resume payload 为字符串（用户输入的审计重点），
-                    # None/非字符串表示无重点
-                    self._audit_focus = (
-                        audit_focus if isinstance(audit_focus, str) else ""
-                    )
-                self.phase_started.emit("outline_audit")
-                audit_reports: list[OutlineAuditReport] = []
-                current_outline_to_audit = volume_outline
-                for round_idx in range(self.config.audit_rounds):
-                    audit_report = await self._run_outline_audit(
-                        current_outline_to_audit, deep_analysis, round_idx
-                    )
-                    if audit_report is None:
-                        break
-                    audit_reports.append(audit_report)
-                    if audit_report.revised_outline is not None:
-                        current_outline_to_audit = audit_report.revised_outline
-                # 取最后一轮审计报告
-                final_audit_report = audit_reports[-1] if audit_reports else None
-                artifacts.audit_reports = audit_reports
-                artifacts.audit_report = final_audit_report  # 向后兼容
-                # 审计失败降级：用原大纲作为 final_outline
-                if final_audit_report is not None and final_audit_report.revised_outline is not None:
-                    final_outline = final_audit_report.revised_outline
-                artifacts.final_outline = final_outline
-                self.phase_finished.emit("outline_audit", final_audit_report)
-
-                # 暂停点 after_audit（显示最后一轮修订大纲，用户可编辑）
-                if self.config.checkpoints.get("after_audit"):
-                    self.checkpoint_reached.emit("after_audit", final_outline)
-                    edited = await self._wait_for_resume("after_audit")
-                    if edited is not None and isinstance(edited, VolumeOutline):
-                        final_outline = edited
-                        artifacts.final_outline = edited
-
-                # ===== 阶段 3.5：终稿大纲生成 =====
-                # 输入：最后一轮审计结果 + 原大纲 + 前10章前文 + 推进速度
-                if final_audit_report is not None:
-                    self.phase_started.emit("outline_final")
-                    final_outline_result = await self._run_outline_final(
-                        volume_outline, final_audit_report, deep_analysis
-                    )
-                    if final_outline_result is not None:
-                        final_outline = final_outline_result
-                        artifacts.final_outline = final_outline
-                    self.phase_finished.emit("outline_final", final_outline)
-            else:
-                artifacts.final_outline = final_outline
-
-            # ===== 阶段 4：逐章循环 =====
-            previous_chapters_text = ""
-            previous_chapter_text = ""
-            chapter_count = self.config.chapter_count
-            for i in range(chapter_count):
-                if self._stop_event.is_set():
-                    logger.info("逐章循环在第 %d 章被停止", i)
+            self.phase_started.emit("outline_audit")
+            audit_reports: list[OutlineAuditReport] = []
+            current_outline_to_audit = volume_outline
+            for round_idx in range(self.config.audit_rounds):
+                audit_report = await self._run_outline_audit(
+                    current_outline_to_audit, deep_analysis, round_idx
+                )
+                if audit_report is None:
                     break
+                audit_reports.append(audit_report)
+                if audit_report.revised_outline is not None:
+                    current_outline_to_audit = audit_report.revised_outline
+            # 取最后一轮审计报告
+            final_audit_report = audit_reports[-1] if audit_reports else None
+            artifacts.audit_reports = audit_reports
+            artifacts.audit_report = final_audit_report  # 向后兼容
+            # 审计失败降级：用原大纲作为 final_outline
+            if final_audit_report is not None and final_audit_report.revised_outline is not None:
+                final_outline = final_audit_report.revised_outline
+            artifacts.final_outline = final_outline
+            self.phase_finished.emit("outline_audit", final_audit_report)
 
-                self.chapter_started.emit(i)
+            # 暂停点 after_audit（显示最后一轮修订大纲，用户可编辑）
+            if self.config.checkpoints.get("after_audit"):
+                self.checkpoint_reached.emit("after_audit", final_outline)
+                edited = await self._wait_for_resume("after_audit")
+                if edited is not None and isinstance(edited, VolumeOutline):
+                    final_outline = edited
+                    artifacts.final_outline = edited
+
+            # ===== 阶段 3.5：终稿大纲生成 =====
+            # 输入：最后一轮审计结果 + 原大纲 + 前10章前文 + 推进速度
+            if final_audit_report is not None:
+                self.phase_started.emit("outline_final")
+                final_outline_result = await self._run_outline_final(
+                    volume_outline, final_audit_report, deep_analysis
+                )
+                if final_outline_result is not None:
+                    final_outline = final_outline_result
+                    artifacts.final_outline = final_outline
+                self.phase_finished.emit("outline_final", final_outline)
+        else:
+            artifacts.final_outline = final_outline
+
+        await self._run_chapter_loop(deep_analysis, final_outline, artifacts)
+
+    async def _run_phase_deep_analysis(self) -> None:
+        """单阶段：前文深度分析（phase="deep_analysis"）。
+
+        完成后 emit phase_output("deep_analysis", DeepAnalysis)，
+        由 main_window resume FlowExecutor 推进下阶段。
+        """
+        self.phase_started.emit("deep_analysis")
+        deep_analysis = await self._run_deep_analysis()
+        self.phase_finished.emit("deep_analysis", deep_analysis)
+
+        # 暂停点 after_deep_analysis
+        if self.config.checkpoints.get("after_deep_analysis"):
+            self.checkpoint_reached.emit("after_deep_analysis", deep_analysis)
+            edited = await self._wait_for_resume("after_deep_analysis")
+            if edited is not None and isinstance(edited, DeepAnalysis):
+                deep_analysis = edited
+
+        self.phase_output.emit("deep_analysis", deep_analysis)
+
+    async def _run_phase_volume_outline(self) -> None:
+        """单阶段：卷大纲生成（phase="volume_outline"）。
+
+        从 phase_inputs["deep_analysis"] 取输入，完成后 emit phase_output。
+        """
+        deep_analysis = self.phase_inputs.get("deep_analysis")
+        self.phase_started.emit("volume_outline")
+        volume_outline = await self._run_volume_outline(deep_analysis)
+        if volume_outline is None:
+            self.phase_finished.emit("volume_outline", None)
+            self.error.emit("卷大纲生成失败，流程终止")
+            return
+        self.phase_finished.emit("volume_outline", volume_outline)
+
+        # 暂停点 after_volume_outline
+        if self.config.checkpoints.get("after_volume_outline"):
+            self.checkpoint_reached.emit("after_volume_outline", volume_outline)
+            edited = await self._wait_for_resume("after_volume_outline")
+            if edited is not None and isinstance(edited, VolumeOutline):
+                volume_outline = edited
+
+        self.phase_output.emit("volume_outline", volume_outline)
+
+    async def _run_phase_outline_audit(self) -> None:
+        """单阶段：大纲审计 + 终稿大纲（phase="outline_audit"）。
+
+        从 phase_inputs 取 deep_analysis + volume_outline，完成后 emit
+        phase_output("outline_audit", final_outline)。
+        """
+        deep_analysis = self.phase_inputs.get("deep_analysis")
+        volume_outline = self.phase_inputs.get("volume_outline")
+        final_outline = volume_outline
+
+        if self.config.enable_outline_audit:
+            # 检查点 before_audit
+            if self.config.checkpoints.get("before_audit", True):
+                self.checkpoint_reached.emit("before_audit", volume_outline)
+                audit_focus = await self._wait_for_resume("before_audit")
+                self._audit_focus = (
+                    audit_focus if isinstance(audit_focus, str) else ""
+                )
+            self.phase_started.emit("outline_audit")
+            audit_reports: list[OutlineAuditReport] = []
+            current_outline_to_audit = volume_outline
+            for round_idx in range(self.config.audit_rounds):
+                audit_report = await self._run_outline_audit(
+                    current_outline_to_audit, deep_analysis, round_idx
+                )
+                if audit_report is None:
+                    break
+                audit_reports.append(audit_report)
+                if audit_report.revised_outline is not None:
+                    current_outline_to_audit = audit_report.revised_outline
+            final_audit_report = audit_reports[-1] if audit_reports else None
+            if final_audit_report is not None and final_audit_report.revised_outline is not None:
+                final_outline = final_audit_report.revised_outline
+            self.phase_finished.emit("outline_audit", final_audit_report)
+
+            # 暂停点 after_audit
+            if self.config.checkpoints.get("after_audit"):
+                self.checkpoint_reached.emit("after_audit", final_outline)
+                edited = await self._wait_for_resume("after_audit")
+                if edited is not None and isinstance(edited, VolumeOutline):
+                    final_outline = edited
+
+            # 终稿大纲生成
+            if final_audit_report is not None:
+                self.phase_started.emit("outline_final")
+                final_outline_result = await self._run_outline_final(
+                    volume_outline, final_audit_report, deep_analysis
+                )
+                if final_outline_result is not None:
+                    final_outline = final_outline_result
+                self.phase_finished.emit("outline_final", final_outline)
+
+        self.phase_output.emit("outline_audit", final_outline)
+
+    async def _run_phase_chapter_writing(self) -> None:
+        """单阶段：逐章写作循环（phase="chapter_writing"）。
+
+        从 phase_inputs 取 deep_analysis + final_outline，完成后 emit
+        finished(Continuation)。
+        """
+        deep_analysis = self.phase_inputs.get("deep_analysis")
+        final_outline = self.phase_inputs.get("outline_audit")
+        if final_outline is None:
+            self.error.emit("终稿大纲为空，无法逐章写作（请检查大纲审计阶段是否成功）")
+            return
+        artifacts = VolumeArtifacts()
+        artifacts.deep_analysis = deep_analysis
+        artifacts.final_outline = final_outline
+
+        await self._run_chapter_loop(deep_analysis, final_outline, artifacts)
+
+    async def _run_chapter_loop(
+        self,
+        deep_analysis: DeepAnalysis | None,
+        final_outline: VolumeOutline | None,
+        artifacts: VolumeArtifacts,
+    ) -> None:
+        """逐章写作循环 + 构建 Continuation（phase=all 和 chapter_writing 共用）。
+
+        Args:
+            deep_analysis: 前文深度分析产物
+            final_outline: 终稿卷大纲
+            artifacts: 卷产物容器（本方法填充 chapter_artifacts 并 emit finished）
+        """
+
+        # ===== 阶段 4：逐章循环 =====
+        previous_chapters_text = ""
+        previous_chapter_text = ""
+        chapter_count = self.config.chapter_count
+        reasoning = ""  # 初始化，防 chapter_count=0 时 NameError
+        for i in range(chapter_count):
+            if self._stop_event.is_set():
+                logger.info("逐章循环在第 %d 章被停止", i)
+                break
+
+            self.chapter_started.emit(i)
+            try:
                 chapter_plan = (
                     final_outline.chapters[i]
-                    if i < len(final_outline.chapters)
+                    if final_outline is not None and i < len(final_outline.chapters)
                     else None
                 )
 
@@ -469,6 +715,7 @@ class VolumeOrchestrator(QThread):
                 stages: list[ChapterStageArtifact] = []
 
                 # 单章细纲
+                self.chapter_step_started.emit(i, "outline")
                 outline = await self._run_chapter_outline(
                     final_outline,
                     chapter_plan,
@@ -481,6 +728,7 @@ class VolumeOrchestrator(QThread):
                 ))
 
                 # 写作（初稿）
+                self.chapter_step_started.emit(i, "writing")
                 content, reasoning, messages = await self._run_chapter_writing(
                     outline,
                     chapter_plan,
@@ -488,7 +736,7 @@ class VolumeOrchestrator(QThread):
                     lookback_chapters_text=dynamic_lookback,
                 )
                 self._writing_messages = messages
-                self._writing_model = self.model
+                self._writing_model = self._effective_model()
                 stages.append(ChapterStageArtifact(
                     stage_type="draft", round_index=0, content=content,
                 ))
@@ -499,6 +747,7 @@ class VolumeOrchestrator(QThread):
                 final_critique = None
                 audit_round = 0  # 审计轮次计数（1,2,3...）
                 if self.config.enable_chapter_verify:
+                    self.chapter_step_started.emit(i, "verify")
                     critique = await self._run_chapter_verify(
                         deep_analysis, outline, content,
                         lookback_chapters_text=dynamic_lookback,
@@ -530,6 +779,7 @@ class VolumeOrchestrator(QThread):
                                     break  # 无 critical 且达到上限，退出
 
                             rounds += 1
+                            self.chapter_step_started.emit(i, "revise")
                             content, reasoning, messages = (
                                 await self._run_chapter_rewrite(
                                     outline,
@@ -544,6 +794,7 @@ class VolumeOrchestrator(QThread):
                                 stage_type="revise", round_index=rounds,
                                 guidance=None, content=content,
                             ))
+                            self.chapter_step_started.emit(i, "verify")
                             critique = await self._run_chapter_verify(
                                 deep_analysis, outline, content,
                                 lookback_chapters_text=dynamic_lookback,
@@ -571,6 +822,7 @@ class VolumeOrchestrator(QThread):
                             feedback = payload.get("feedback", "")
                             # 新流程：用户反馈作为额外修改意见拼入 critique，跳过 _run_chapter_revise
                             rounds += 1
+                            self.chapter_step_started.emit(i, "revise")
                             content, reasoning, messages = await self._run_chapter_rewrite(
                                 outline, chapter_plan,
                                 content, None,
@@ -586,6 +838,7 @@ class VolumeOrchestrator(QThread):
                             # 新流程：跳过 _run_chapter_revise，直接用审计报告作为修改意见
                             # critical 问题忽略 max_revise_rounds_per_chapter 上限，一直修正到通过为止
                             if self.config.enable_chapter_verify:
+                                self.chapter_step_started.emit(i, "verify")
                                 critique = await self._run_chapter_verify(
                                     deep_analysis, outline, content,
                                     lookback_chapters_text=dynamic_lookback,
@@ -615,6 +868,7 @@ class VolumeOrchestrator(QThread):
                                         break  # 无 critical 且达到上限，退出
 
                                     rounds += 1
+                                    self.chapter_step_started.emit(i, "revise")
                                     content, reasoning, messages = (
                                         await self._run_chapter_rewrite(
                                             outline, chapter_plan,
@@ -627,6 +881,7 @@ class VolumeOrchestrator(QThread):
                                         stage_type="revise", round_index=rounds,
                                         guidance=None, content=content,
                                     ))
+                                    self.chapter_step_started.emit(i, "verify")
                                     critique = await self._run_chapter_verify(
                                         deep_analysis, outline, content,
                                         lookback_chapters_text=dynamic_lookback,
@@ -677,40 +932,40 @@ class VolumeOrchestrator(QThread):
                 previous_chapter_text = content
 
                 self.chapter_finished.emit(i, chapter_artifacts)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error("第 %d 章生成失败: %s", i + 1, e, exc_info=True)
+                self.error.emit(f"第{i + 1}章生成失败: {e}")
+                continue  # 跳过该章，继续下一章
 
-            # ===== 拼接 N 章正文 + 构建 Continuation =====
-            full_content = "\n\n".join(
-                ca.content for ca in artifacts.chapter_artifacts if ca.content
-            )
-            continuation = Continuation(
-                id=_generate_id("sw_"),
-                created_at=datetime.now(),
-                content=full_content,
-                model=self.model,
-                is_accepted=False,
-                status="completed",
-                created_by="volume",
-                parameters_snapshot=dict(self.parameters),
-                preset_id=self.preset_id,
-                preset_snapshot=self.preset_snapshot,
-                regex_script_ids_snapshot=list(self.regex_script_ids),
-                extracted_context_snapshot=list(self.context_entries),
-                prompt_snapshot=self._writing_messages,
-                reasoning_content=reasoning or None,
-                volume_artifacts=artifacts,
-            )
-            self.finished.emit(continuation)
+        # 空产物保护：所有章节都失败时不构建 Continuation
+        if not artifacts.chapter_artifacts:
+            self.error.emit("所有章节生成失败，无内容输出")
+            return
 
-        except asyncio.CancelledError:
-            logger.info("卷级任务被取消")
-            raise
-        except AuthError:
-            self.auth_error.emit()
-        except (RateLimitError, APIError) as e:
-            self.error.emit(str(e))
-        except Exception as e:
-            logger.error("卷级流程异常: %s", e, exc_info=True)
-            self.error.emit(str(e))
+        # ===== 拼接 N 章正文 + 构建 Continuation =====
+        full_content = "\n\n".join(
+            ca.content for ca in artifacts.chapter_artifacts if ca.content
+        )
+        continuation = Continuation(
+            id=_generate_id("sw_"),
+            created_at=datetime.now(),
+            content=full_content,
+            model=self.model,
+            is_accepted=False,
+            status="completed",
+            created_by="volume",
+            parameters_snapshot=dict(self.parameters),
+            preset_id=self.preset_id,
+            preset_snapshot=self.preset_snapshot,
+            regex_script_ids_snapshot=list(self.regex_script_ids),
+            extracted_context_snapshot=list(self.context_entries),
+            prompt_snapshot=self._writing_messages,
+            reasoning_content=reasoning or None,
+            volume_artifacts=artifacts,
+        )
+        self.finished.emit(continuation)
 
     async def _run_deep_analysis(self) -> DeepAnalysis | None:
         """阶段①：前文深度分析，产出 DeepAnalysis。
@@ -839,9 +1094,9 @@ class VolumeOrchestrator(QThread):
         for attempt in range(2):
             temperature = 0.3 if attempt == 0 else 0.0
             try:
-                response = await self._client.chat_completion(
+                response = await self._effective_client().chat_completion(
                     messages,
-                    self.model,
+                    self._effective_model(),
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
@@ -909,9 +1164,9 @@ class VolumeOrchestrator(QThread):
         for attempt in range(2):
             temperature = 0.2 if attempt == 0 else 0.0
             try:
-                response = await self._client.chat_completion(
+                response = await self._effective_client().chat_completion(
                     messages,
-                    self.model,
+                    self._effective_model(),
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
@@ -1094,9 +1349,9 @@ class VolumeOrchestrator(QThread):
             temperature = 0.3 if attempt == 0 else 0.0
             content = ""
             try:
-                response = await self._client.chat_completion(
+                response = await self._effective_client().chat_completion(
                     messages,
-                    self.model,
+                    self._effective_model(),
                     temperature=temperature,
                     max_tokens=8000,
                 )
@@ -1202,9 +1457,9 @@ class VolumeOrchestrator(QThread):
             temperature = 0.3 if attempt == 0 else 0.0
             content = ""
             try:
-                response = await self._client.chat_completion(
+                response = await self._effective_client().chat_completion(
                     messages,
-                    self.model,
+                    self._effective_model(),
                     temperature=temperature,
                     max_tokens=8000,
                 )
@@ -1295,9 +1550,9 @@ class VolumeOrchestrator(QThread):
             temperature = 0.3 if attempt == 0 else 0.0
             content = ""
             try:
-                response = await self._client.chat_completion(
+                response = await self._effective_client().chat_completion(
                     messages,
-                    self.model,
+                    self._effective_model(),
                     temperature=temperature,
                     max_tokens=8000,
                 )
@@ -1384,9 +1639,9 @@ class VolumeOrchestrator(QThread):
         for attempt in range(2):
             temperature = 0.3 if attempt == 0 else 0.0
             try:
-                response = await self._client.chat_completion(
+                response = await self._effective_client().chat_completion(
                     messages,
-                    self.model,
+                    self._effective_model(),
                     temperature=temperature,
                     max_tokens=3000,
                 )
@@ -1546,9 +1801,9 @@ class VolumeOrchestrator(QThread):
         reasoning_parts: list[str] = []
         char_count = 0
 
-        async for chunk in self._client.stream_chat_completion(
+        async for chunk in self._effective_client().stream_chat_completion(
             messages=messages,
-            model=self.model,
+            model=self._effective_model(),
             temperature=self.parameters.get("temperature", 0.8),
             max_tokens=self.parameters.get("max_tokens"),
             top_p=self.parameters.get("top_p", 1.0),
@@ -1686,9 +1941,9 @@ class VolumeOrchestrator(QThread):
         reasoning_parts: list[str] = []
         char_count = 0
 
-        async for chunk in self._client.stream_chat_completion(
+        async for chunk in self._effective_client().stream_chat_completion(
             messages=messages,
-            model=self.model,
+            model=self._effective_model(),
             temperature=self.parameters.get("temperature", 0.8),
             max_tokens=self.parameters.get("max_tokens"),
             top_p=self.parameters.get("top_p", 1.0),
@@ -1767,9 +2022,9 @@ class VolumeOrchestrator(QThread):
         for attempt in range(2):
             temperature = 0.2 if attempt == 0 else 0.0
             try:
-                response = await self._client.chat_completion(
+                response = await self._effective_client().chat_completion(
                     messages,
-                    self.model,
+                    self._effective_model(),
                     temperature=temperature,
                     max_tokens=3000,
                 )
@@ -1838,9 +2093,9 @@ class VolumeOrchestrator(QThread):
         for attempt in range(2):
             temperature = 0.3 if attempt == 0 else 0.0
             try:
-                response = await self._client.chat_completion(
+                response = await self._effective_client().chat_completion(
                     messages,
-                    self.model,
+                    self._effective_model(),
                     temperature=temperature,
                     max_tokens=3000,
                 )

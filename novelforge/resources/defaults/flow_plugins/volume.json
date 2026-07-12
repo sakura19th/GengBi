@@ -1,0 +1,52 @@
+{
+  "id": "volume",
+  "name": "卷续写（多章节）",
+  "description": "卷级多章节续写：深度分析→卷大纲→审计→逐章写作",
+  "version": "2.0",
+  "author": "GengBi",
+  "builtin": true,
+  "ui_mode": "volume",
+  "accept_mode": "volume_insert",
+  "stages": [
+    {
+      "id": "deep_analysis",
+      "name": "前文深度分析",
+      "agent": "volume_phase",
+      "flow_key": "volume_continuation",
+      "streaming": true,
+      "created_by": "volume",
+      "params": {"phase": "deep_analysis"},
+      "input_from": ""
+    },
+    {
+      "id": "volume_outline",
+      "name": "卷大纲生成",
+      "agent": "volume_phase",
+      "flow_key": "volume_continuation",
+      "streaming": true,
+      "created_by": "volume",
+      "params": {"phase": "volume_outline"},
+      "input_from": "deep_analysis"
+    },
+    {
+      "id": "outline_audit",
+      "name": "大纲审计与终稿",
+      "agent": "volume_phase",
+      "flow_key": "volume_continuation",
+      "streaming": true,
+      "created_by": "volume",
+      "params": {"phase": "outline_audit"},
+      "input_from": "volume_outline"
+    },
+    {
+      "id": "chapter_writing",
+      "name": "逐章写作",
+      "agent": "volume_phase",
+      "flow_key": "volume_continuation",
+      "streaming": true,
+      "created_by": "volume",
+      "params": {"phase": "chapter_writing"},
+      "input_from": "outline_audit"
+    }
+  ]
+}

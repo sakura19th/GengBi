@@ -31,7 +31,6 @@
         },
         "volume": {},  # 卷续写配置持久化（VolumeRunConfig 的 JSON dump）
         "context_extract": {
-            "extractor_model": "",
             "cache_enabled": true,
             "cache_ttl_hours": 24,
             "extractor_prompt_override": null,
@@ -103,7 +102,6 @@ def get_default_config() -> dict[str, Any]:
         },
         "volume": {},
         "context_extract": {
-            "extractor_model": "",
             "cache_enabled": True,
             "cache_ttl_hours": 24,
             "extractor_prompt_override": None,

@@ -17,6 +17,13 @@ from novelforge.models.context import (
     VALID_ROLES,
     ContextEntry,
 )
+from novelforge.models.flow_plugin import (
+    VALID_ACCEPT_MODES,
+    VALID_AGENT_TYPES,
+    VALID_UI_MODES,
+    FlowPlugin,
+    FlowStage,
+)
 from novelforge.models.ontology import WorldOntology
 from novelforge.models.preset import (
     GLOBAL_CHARACTER_ID,
@@ -82,6 +89,12 @@ __all__ = [
     "VALID_CATEGORIES",
     "VALID_POSITIONS",
     "VALID_ROLES",
+    # 流程控制插件
+    "FlowPlugin",
+    "FlowStage",
+    "VALID_AGENT_TYPES",
+    "VALID_UI_MODES",
+    "VALID_ACCEPT_MODES",
     # 底层世界观与主角形象
     "WorldOntology",
     "ProtagonistProfile",

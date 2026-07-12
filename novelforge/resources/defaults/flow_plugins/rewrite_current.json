@@ -1,0 +1,36 @@
+{
+  "id": "rewrite_current",
+  "name": "重写当前章节",
+  "description": "分析→生成两步流程，接受后替换当前章节正文",
+  "version": "1.0",
+  "author": "GengBi",
+  "builtin": true,
+  "ui_mode": "standard",
+  "accept_mode": "replace",
+  "stages": [
+    {
+      "id": "analysis",
+      "name": "重写分析",
+      "agent": "audit",
+      "flow_key": "rewrite_analysis",
+      "streaming": true,
+      "created_by": "",
+      "params": {
+        "exclude_current": true
+      },
+      "input_from": ""
+    },
+    {
+      "id": "generate",
+      "name": "重写生成",
+      "agent": "continuation",
+      "flow_key": "single_continuation",
+      "streaming": true,
+      "created_by": "rewrite_current",
+      "params": {
+        "exclude_current": true
+      },
+      "input_from": "analysis"
+    }
+  ]
+}

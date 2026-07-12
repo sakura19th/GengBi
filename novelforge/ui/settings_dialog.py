@@ -549,32 +549,6 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(cont_group)
 
-        # 上下文提取配置组
-        extract_group = QGroupBox("上下文提取")
-        extract_form = QFormLayout(extract_group)
-
-        self._extractor_model_edit = QLineEdit()
-        self._extractor_model_edit.setPlaceholderText("留空=使用端点默认模型")
-        extract_settings = self._config_manager.get_context_extract_settings()
-        self._extractor_model_edit.setText(extract_settings.get("extractor_model", ""))
-        extract_form.addRow("提取模型:", self._extractor_model_edit)
-
-        # Token 拆分限制（默认值，UI 面板可按次覆盖）
-        self._token_limit_combo = QComboBox()
-        self._token_limit_combo.addItems(["不限制", "50k", "100k", "250k", "500k"])
-        token_limit = extract_settings.get("token_limit", 0)
-        if token_limit <= 0:
-            self._token_limit_combo.setCurrentText("不限制")
-        else:
-            self._token_limit_combo.setCurrentText(f"{token_limit // 1000}k")
-        self._token_limit_combo.setToolTip(
-            "选中章节超出 token 限制时，自动按章节拆分成多次请求。\n"
-            "此为默认值，上下文预览面板可按次覆盖。"
-        )
-        extract_form.addRow("Token 拆分:", self._token_limit_combo)
-
-        layout.addWidget(extract_group)
-
         # M5: 外观与维护组
         appearance_group = QGroupBox("外观与维护")
         appearance_layout = QFormLayout(appearance_group)
@@ -780,15 +754,6 @@ class SettingsDialog(QDialog):
         cont_settings["default_lookback_chapters"] = self._lookback_spin.value()
         cont_settings["default_temperature"] = self._temp_spin.value()
         self._config_manager.config["continuation"] = cont_settings
-
-        # 保存上下文提取配置
-        extract_settings = self._config_manager.get_context_extract_settings()
-        extract_settings["extractor_model"] = self._extractor_model_edit.text().strip()
-        # Token 限制
-        extract_settings["token_limit"] = parse_token_limit(
-            self._token_limit_combo.currentText()
-        )
-        self._config_manager.config["context_extract"] = extract_settings
 
         self._config_manager.save()
         self.accept()

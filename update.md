@@ -1,5 +1,370 @@
 # 更新日志
 
+## 2026-07-12：新增流程插件使用说明文档
+
+### 背景
+
+流程插件系统（见 update.md 2026-07-12「流程控制插件系统」条目与 agent.md 第 18 节）已上线，但缺少面向开发者的完整文档，用户不知道如何编写自定义插件 JSON、有哪些合法取值、阶段间如何传参。用户要求针对【流程插件管理】写一个使用说明，包括写插件规律、可用格式及相应模型，并生成一个案例。
+
+### 核心改动
+
+#### 新增
+- `FLOW_PLUGIN_GUIDE.md`（项目根目录，503 行）：面向开发者的流程插件完整使用说明，9 章节：
+  1. 概述（插件概念、与预设正交关系、存储位置）
+  2. 快速开始（导入流程、使用方法、3 个内置插件简介）
+  3. JSON 格式规范（FlowPlugin + FlowStage 完整字段表，含类型/必填/默认值/说明）
+  4. 合法取值速查（5 种 agent / 2 种 ui_mode / 3 种 accept_mode / 8 个标准 flow_key）
+  5. 写插件的 6 大规律（阶段顺序执行 / params 合并优先级 / input_from 链式传递 / flow_key 决定端点 / accept_mode 决定接受行为 / 插件与预设正交）
+  6. volume_phase 阶段顺序（deep_analysis → volume_outline → outline_audit → chapter_writing 4 阶段固定顺序）
+  7. 三个内置插件完整 JSON（single / volume / rewrite_current 原文嵌入）
+  8. 自定义插件案例：先分析再续写（analyze_then_write，audit → continuation，accept_mode=promote，含完整 JSON + 执行流程说明 + 日志示例）
+  9. 调试与验证（导入校验、检查 JSON 文件、版本升级、日志、5 条 FAQ）
+
+### 设计决策
+- **文档位置**：项目根目录 `FLOW_PLUGIN_GUIDE.md`（与 `README.md`/`agent.md` 平级），便于开发者发现
+- **文档深度**：开发者向完整文档，涵盖格式规范 + 合法取值 + 编写规律 + 内置插件 + 自定义案例 + 调试验证
+- **案例选择**：analyze_then_write（audit → continuation，promote）—— 与内置 rewrite_current（audit → continuation，replace）对照，展示 accept_mode 的不同取值效果
+- **内置插件 JSON 直接嵌入**：避免开发者跳转查文件，一文档自洽
+- **文档语言**：中文叙述 + 英文字段名/代码（遵循 agent.md 代码风格规范）
+
+### 文档同步
+- `agent.md`：第 18 节末尾补充 `FLOW_PLUGIN_GUIDE.md` 文档链接
+- `update.md`：本条目
+
+## 2026-07-12：移除设置中「提取上下文」单独控制，统一由流程端点配置管理
+
+### 背景
+
+Settings 对话框的「上下文提取」组含「提取模型」和「Token 拆分」两个控件。其中「提取模型」与流程端点配置的 `flow_models["context_extraction"]` 重复，且不一致地额外覆盖 `protagonist_extraction`（但不动 `ontology_extraction`/`custom_rule_parsing`），造成 UI 迷惑。用户要求移除该单独控制，模型统一由流程端点配置管理，Token 拆分保留在上下文预览面板。
+
+### 核心改动
+
+- `novelforge/ui/settings_dialog.py`：移除「上下文提取」QGroupBox（提取模型 QLineEdit + Token 拆分 QComboBox）+ 对应保存逻辑
+- `novelforge/services/context_extractor.py`：移除 `extractor_model` 读取（上下文提取入口 + 主角形象提取入口）与覆盖逻辑，模型统一由 `_get_llm_client` 返回的 `get_flow_model(flow_key)` 控制
+- `novelforge/ui/main_window.py`：Token 拆分改由预览面板独管——启动时连接 `_token_limit_combo.currentTextChanged` → 新增 `_save_token_limit_to_config` 持久化到 config；移除设置关闭后的 `_sync_token_limit_default` 同步调用
+- `novelforge/core/config.py`：移除 `context_extract.extractor_model` 默认值（2 处）
+- `novelforge/models/project.py`：`extract_config` docstring 移除 `extractor_model` 子键
+- 测试：3 个测试文件（test_m4_context_extraction.py 2 处、test_protagonist_extraction.py、test_rewrite_current_mode.py）移除 `extractor_model` mock，补 `get_flow_model.return_value` mock
+
+### 测试
+
+- `python -m py_compile` 五文件通过
+- `python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"`：638 passed，9 failed（均为预先存在的无关失败）
+
+### 文档同步
+
+- `agent.md`：context_extractor 描述补充模型统一由 flow_models 控制；settings_dialog 描述标注不含上下文提取配置；第 15 节补充 extractor_model 移除 + Token 拆分持久化说明
+
+## 2026-07-12：修复调试模式对单次续写/重写当前章节失效
+
+### 背景
+
+用户报告：开启调试模式后，「重写当前章节」和「单次续写」均无法查看提示词和选择模型。根因是 `ContinuationWorker` 和 `AuditWorker` 完全没有调试模式基础设施，`main_window` 的调试模式接线仅覆盖 `VolumeOrchestrator`。
+
+### 核心改动
+
+#### ContinuationWorker 加调试模式
+- `novelforge/services/continuation_worker.py`：
+  - 新增信号 `prompt_debug_requested = Signal(str, str, str, str)`（phase_name, messages_json, current_endpoint_id, current_model）
+  - `__init__` 新增 `endpoint_id`/`debug_mode` 参数 + 覆盖字段（`_debug_confirmed`/`_debug_override_*`/`_debug_clients`）+ `self._client`
+  - 新增 `confirm_debug_prompt`/`_maybe_debug_prompt`/`_effective_model`/`_effective_client` 4 个方法（镜像 VolumeOrchestrator）
+  - `_async_run` 在创建 client 前调 `_maybe_debug_prompt`，phase_name 按 `created_by` 映射（continuation→续写、rewrite_current→重写生成、audit_rewrite→修正）；取消 emit `error("用户取消调试")`
+  - client 改用 `_effective_client()`/`_effective_model()`；`run()` finally 关闭主+调试缓存 LLMClient
+
+#### AuditWorker 加调试模式
+- `novelforge/services/audit_worker.py`：
+  - 镜像 ContinuationWorker 调试模式实现
+  - `__init__` 额外新增 `phase_name` 参数（单章审计/重写需求分析）
+  - `_effective_client` 用 `self.reasoning_effort`（非 parameters.get）
+
+#### main_window 接线
+- `novelforge/ui/main_window.py`：
+  - `_on_debug_mode_toggled` 扩展：实时设置 `_continuation_worker`/`_audit_worker` 的 debug_mode
+  - `_on_prompt_debug_requested` 路由：按运行状态优先级 volume > continuation > audit，调对应 worker 的 `confirm_debug_prompt`
+  - 5 个 worker 创建点（3 ContinuationWorker + 2 AuditWorker）传 `endpoint_id`/`debug_mode`（AuditWorker 额外传 `phase_name`）+ 连 `prompt_debug_requested` 信号
+
+### 测试
+
+- `python -m py_compile` 三文件通过
+- `python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"`：638 passed，9 failed（均为预先存在的无关失败：flow_executor 属性缺失/regex 数量/mode combo）
+
+### 文档同步
+
+- `agent.md`：continuation_worker/audit_worker 描述补充调试模式；第 10 条调试说明扩展为三种 worker 统一描述
+
+## 2026-07-12：调试模式新增端点/模型覆盖选择
+
+### 背景
+
+调试模式（菜单「调试→调试模式」勾选后）原仅能预览提示词并选择发送/取消。用户希望在调试对话框中额外选择端点与模型，从而在运行时覆盖当前 LLM 调用使用的端点/模型，方便对比不同模型/端点的输出效果。
+
+### 核心改动
+
+#### DebugPromptDialog 加端点/模型下拉
+- `novelforge/ui/debug_prompt_dialog.py`：
+  - 构造函数新增 `endpoints`/`current_endpoint_id`/`current_model` 三参数
+  - 布局新增端点+模型下拉行（端点 combo itemData 存 endpoint dict；端点切换 `_on_endpoint_changed` → `_populate_models` 按 enabled_models→models→[default_model] 回退链填充模型，默认选中 current_model）
+  - 新增 `get_selected_endpoint()`/`get_selected_model()`；`_on_send` 记录 `selected_endpoint`/`selected_model`
+
+#### VolumeOrchestrator 信号扩参 + 覆盖机制
+- `novelforge/services/volume_orchestrator.py`：
+  - `prompt_debug_requested` 信号从 `Signal(str, str)` 改为 `Signal(str, str, str, str)`（追加 current_endpoint_id + current_model）
+  - `__init__` 新增 `endpoint_id` 参数（存 `self._endpoint_id`）+ 覆盖字段 `_debug_override_endpoint`/`_debug_override_model`/`_debug_override_api_key` + `_debug_clients: dict[str, LLMClient]` 缓存
+  - `confirm_debug_prompt` 签名扩展为 `(confirmed, endpoint_override=None, model_override="", api_key_override="")`，确认时写入覆盖字段
+  - `_maybe_debug_prompt` 每次开始清空覆盖字段（保证覆盖仅对紧接的下一次 LLM 调用生效），emit 时追加 endpoint_id + model
+  - 新增 `_effective_model()`/`_effective_client()` helper：返回覆盖值（若有）否则原值；覆盖端点时按 endpoint_id 缓存 LLMClient 避免重复创建 aiohttp session
+  - 10 处 LLM 调用点（deep_analysis×2/volume_outline/outline_audit/outline_final/chapter_outline/chapter_writing/chapter_rewrite/chapter_verify/chapter_revise）`self._client` → `self._effective_client()`、`self.model` → `self._effective_model()`
+  - `_run_chapter_writing` 的 `self._writing_model = self.model` → `self._effective_model()`（记录实际使用模型）
+  - `run()` finally 块关闭所有 `_debug_clients` 缓存的 client
+
+#### main_window 传参 + 覆盖回传
+- `novelforge/ui/main_window.py`：
+  - `_on_prompt_debug_requested` 签名扩展为 `(phase_name, messages_json, current_endpoint_id, current_model)`；从 `config_manager.get_endpoints()` 取端点列表传给 dialog
+  - dialog 关闭后读取 `get_selected_endpoint`/`get_selected_model`：端点变更时 `decrypt_api_key` 解密新端点 api_key；端点覆盖但模型未改时用新端点 default_model；调 `confirm_debug_prompt(True, endpoint_override, model_override, api_key_override)`
+  - `_start_volume_phase` 创建 VolumeOrchestrator 时传入 `endpoint_id=endpoint.get("id", "")`
+
+### 设计决策
+
+- **仅改 VolumeOrchestrator 调试流**：ContinuationWorker 无调试机制，本次不扩展
+- **覆盖仅对下一次 LLM 调用生效**：`_maybe_debug_prompt` 开始清空 override，确认后写入，紧接的 LLM 调用用 `_effective_*()`；每阶段一次 LLM 调用，覆盖自然只生效一次
+- **client 缓存按 endpoint_id**：避免同端点反复覆盖时重复创建 aiohttp session；run 结束统一关闭
+- **不改 messages**：覆盖只影响 endpoint/model，提示词内容不变
+- **端点不变仅模型变**：用原 client + 新 model
+
+### 测试
+
+- `python -m py_compile`：三文件语法检查通过
+- `python -m pytest tests/test_volume_orchestrator.py tests/test_volume_models.py tests/test_flow_plugin.py -q`：118 passed（无回归）
+
+### 文档同步
+
+- `agent.md`：debug_prompt_dialog/volume_orchestrator 描述 + 第 10 条调试说明扩展
+
+## 2026-07-12：卷续写逐章子步骤进度显示
+
+### 背景
+
+多章节生成时看不出当前处于「细纲」「写作」「审计」还是「修订」子阶段。VolumePanel 的 4 步标签（细纲/写作/验证/修订）UI 已就绪，但 `_run_chapter_loop` 只 emit `chapter_started`/`chapter_finished`，中间过程 `_on_volume_chapter_started` 传入 `current_step=""`、`_on_volume_chapter_finished` 一次性全标记完成，导致 4 个步骤标签全程 pending。
+
+### 核心改动
+
+- `novelforge/services/volume_orchestrator.py`：
+  - 新增信号 `chapter_step_started = Signal(int, str)`（章节序号 + 步骤名 outline/writing/verify/revise）
+  - `_run_chapter_loop` 每个子阶段 `await` 前 emit（9 处：outline/writing/首次 verify/循环内 revise+verify/after_chapter reject 分支 revise+verify+循环 revise+verify），保证 verify↔revise 循环中每次切换都更新
+- `novelforge/ui/main_window.py`：
+  - 新增属性 `_volume_chapter_steps_seen: set[str]`（章节开始时重置）
+  - `_start_volume_phase` 连接 `chapter_step_started` → `_on_volume_chapter_step_started`
+  - 新增 `_on_volume_chapter_step_started`：累积 completed = set(seen)，调 `update_chapter_progress(current=step, completed=seen)` 驱动面板 4 步标签三态 + 状态栏「卷续写中: 第N章 细纲/写作/验证/修订」，最后 `seen.add(step)`
+  - 停止/完成/出错清理处同步 `self._volume_chapter_steps_seen = set()`
+
+### 设计决策
+
+- **步骤名直接复用面板 CHAPTER_STEPS**：outline/writing/verify/revise，避免映射层
+- **累积态**：`_volume_chapter_steps_seen` 记录已执行过的步骤，verify 二次进入时 revise 仍保留 ✓（current 优先级高于 completed），符合「已修订过，正在复审」直觉
+- **状态栏双重提示**：面板 4 步标签 + 状态栏文字同步更新
+
+### 测试
+
+- `python -m py_compile`：两文件语法检查通过
+- `python -m pytest tests/test_volume_orchestrator.py tests/test_volume_models.py tests/test_flow_plugin.py -q`：118 passed（无回归）
+
+### 文档同步
+
+- `agent.md`：volume_orchestrator 信号列表 + main_window 描述 + 第 9 节新增「逐章子步骤进度」条目
+
+## 2026-07-12：卷续写暂存节点 + 关闭后恢复 + 阶段失败重试
+
+### 背景
+
+卷续写 chapter_writing 阶段闪退（已在前序变更修复 5 处根因）。用户要求：①过程中给暂存节点，关闭软件后再打开选择该章节能返回当前处理状态；②任意阶段失败后不结束，给重试选项。此外 `_on_volume_continuation_finished` 存储操作无异常隔离，单章保存异常会崩溃整个完成回调。
+
+### 核心改动
+
+- `novelforge/ui/main_window.py`：
+  - `_on_volume_continuation_finished` 存储操作块（index 后移 + save_chapter + _refresh_chapter_list）外包 try/except，失败 logger.error + QMessageBox.warning 但不崩溃
+  - `_on_continuation_error` volume 错误块改为弹重试/取消对话框（QMessageBox.question）；重试复用 `_volume_state` + `_volume_current_phase` 调 `_start_volume_phase` 重启失败阶段；取消清理全部 + 删除状态文件
+  - `_on_chapter_selected` 末尾新增 `_check_volume_resume(chapter_id)` 恢复入口
+  - 新增 `_check_volume_resume`：检测状态文件 + 弹恢复确认对话框
+  - 新增 `_resume_volume_state`：重建 prepare_data（reload endpoint/project/preset + 当前章节 entries/metadata/regex_script_ids）+ 反序列化已完成阶段产物（DeepAnalysis/VolumeOutline/OutlineAuditReport.model_validate）+ 确定下一未完成阶段 + 设 `_volume_resuming=True` 恢复模式启动
+  - `_on_stop_continuation` volume 块新增清理 `_volume_current_phase`/`_volume_resuming` + 删除状态文件
+  - （前序已完成）`_save/_load/_delete_volume_state` + `_get_volume_state_path` + `_get_next_volume_phase` + `_on_volume_phase_output` 持久化 + 恢复分支 + `_on_volume_continuation_finished` 末尾删除状态文件 + `_volume_current_phase`/`_volume_resuming` 属性
+
+### 设计决策
+
+- **状态文件位置**：`~/.novelforge/volume_states/{chapter_id}.json`（按章节隔离，一个章节一个状态文件）
+- **持久化时机**：阶段 1-3 每阶段产物完成后写一次；chapter_writing 不持久化（最后阶段，失败重试从头生成）
+- **恢复入口**：`_on_chapter_selected` 末尾（此时章节已加载 + 上下文条目已通过 `_load_context_entries_for_chapter` 加载，重建 prepare_data 所需数据就绪）
+- **重试不重新准备数据**：重试复用已持久化的 `_volume_state`（含 prepare_data + 前序产物），避免重复弹校验对话框
+- **停止视为放弃**：用户主动停止删除状态文件（不再可恢复）
+
+### 测试
+
+- `python -m py_compile novelforge\ui\main_window.py novelforge\services\volume_orchestrator.py`：语法检查通过
+- `python -m pytest tests/test_flow_plugin.py tests/test_volume_orchestrator.py tests/test_volume_models.py -q`：118 passed（无回归）
+
+### 文档同步
+
+- `agent.md` 第 9 节新增「暂存节点持久化」「关闭后恢复」「阶段失败重试」「停止/完成清理」条目；main_window.py 描述补充暂存节点/恢复/重试
+
+## 2026-07-12：卷续写逐章错误隔离 + 空产物保护
+
+### 背景
+
+`_run_chapter_loop` 的 for 循环体内无异常隔离，单章生成失败（如 LLM 调用异常、JSON 解析错误）直接中止整卷续写，已成功生成的章节也丢失。所有章节失败时仍尝试构建空 Continuation，可能引发下游异常。
+
+### 核心改动
+
+- `novelforge/services/volume_orchestrator.py`：
+  - `_run_chapter_loop` 的 for 循环体内新增 try/except 包裹从 `dynamic_lookback` 到 `chapter_finished.emit` 的全部章节生成逻辑（chapter_plan 已在 try 内）
+  - `except asyncio.CancelledError: raise` 向上传播用户取消
+  - `except Exception as e: logger.error(...) + self.error.emit(...) + continue` 跳过该章继续下一章
+  - for 循环结束后新增空产物保护：`if not artifacts.chapter_artifacts: self.error.emit(...); return`
+
+### 测试
+
+- `python -m py_compile novelforge\services\volume_orchestrator.py` 语法验证通过
+
+### 文档同步
+
+- `agent.md` 第 9 节新增「逐章错误隔离」条目
+
+## 2026-07-12：卷续写多阶段插件 + 资源泄漏修复
+
+### 背景
+
+卷续写无法正常使用，报错：`Unclosed client session`（aiohttp 泄漏）、`Failed to disconnect from signal reasoning_received`（信号断开警告）、`无法解析 JSON: line 1 column 1`（模型选择错误）、卷插件为单阶段 `volume_pipeline` 不合理（应像重写一样多阶段）。
+
+### 根因与修复
+
+1. **LLMClient 资源泄漏**：`VolumeOrchestrator.run()` finally 块关闭事件循环但未调用 `self._client.close()` → 新增 `self._loop.run_until_complete(self._client.close())`
+2. **模型选择错误**：`_on_start_volume_continuation` 从隐藏的 `_model_combo` 读取模型，卷模式下残留单次模式模型 → 翻转优先级：`get_flow_model("volume_continuation")` 优先，`params.get("model")` 回退
+3. **信号断开警告**：`reasoning_received` 信号在卷模式从未连接，断开触发 libpyside 警告 → 移除 volume 路径的 `reasoning_received.disconnect()`
+4. **插件结构不合理**：卷续写为单阶段 `volume_pipeline`，应拆分为多阶段 → 重写为 4 阶段 `volume_phase`
+
+### 核心改动
+
+#### VolumeOrchestrator 分阶段执行
+- `novelforge/services/volume_orchestrator.py`：
+  - 新增 `phase_output` 信号（str, object）
+  - `__init__` 新增 `phase`/`phase_inputs` 参数
+  - `_async_run` 重构为按 `self.phase` 分支调度
+  - 新增 5 个方法：`_run_full_pipeline`/`_run_phase_deep_analysis`/`_run_phase_volume_outline`/`_run_phase_outline_audit`/`_run_phase_chapter_writing`
+  - 新增 `_run_chapter_loop` 共享逐章循环（phase=all 和 chapter_writing 共用）
+  - `run()` finally 块关闭 LLMClient
+
+#### volume_phase agent 类型
+- `novelforge/models/flow_plugin.py`：VALID_AGENT_TYPES 新增 `volume_phase`；FlowStage.agent 字段级校验（field_validator）
+
+#### volume.json v2.0（4 阶段）
+- `novelforge/resources/defaults/flow_plugins/volume.json`：从 1 阶段 `volume_pipeline` v1.0 → 4 阶段 `volume_phase` v2.0（deep_analysis→volume_outline→outline_audit→chapter_writing）
+
+#### 内置插件版本升级
+- `novelforge/services/flow_plugin_service.py`：
+  - 新增 `_parse_version` 静态方法
+  - 新增 `_should_upgrade_builtin` 方法
+  - `_ensure_builtin_plugins` 增加版本升级逻辑（已安装 builtin=True 且资源版本更高时覆盖）
+
+#### main_window volume_phase 接线
+- `novelforge/ui/main_window.py`：
+  - 初始化 `_volume_state: dict | None`
+  - 注册 `volume_phase` handler（`_register_flow_handlers`）
+  - 新增 `_flow_handler_volume_phase`：返回 pending，首次调用 `_prepare_volume_run`
+  - 提取 `_prepare_volume_run`：校验 + 准备数据，返回 dict
+  - 提取 `_start_volume_phase`：创建 VolumeOrchestrator（传 phase/phase_inputs）+ 连接信号（含 phase_output）+ start
+  - 重构 `_on_start_volume_continuation` 为薄包装（volume_pipeline 向后兼容）
+  - 新增 `_on_volume_phase_output`：存入 `_volume_state[phase]` + `flow_executor.resume(artifact)`
+  - `_on_volume_continuation_finished` 末尾清理 `_volume_state` + `flow_executor.cancel()`
+  - `_on_stop_continuation`/`_on_continuation_error` 增加 volume 状态清理
+
+#### 测试
+- `tests/test_flow_plugin.py`：36 个测试（+5）——更新 test_load_builtin_volume 断言 v2.0 4 阶段；新增 test_volume_phase_agent_type/test_invalid_agent_type/test_builtin_plugin_version_upgrade/test_builtin_version_upgrade_skips_non_builtin/test_volume_phase_pending_and_resume
+
+### 验证
+
+- `python -m py_compile`：语法检查通过
+- `python -m pytest tests/test_flow_plugin.py -v`：36 passed
+- `python -m pytest tests/test_volume_orchestrator.py tests/test_volume_models.py tests/test_volume_prompts.py -q`：116 passed（无回归）
+
+### 文档同步
+
+- 更新 `agent.md`：5 agent 类型 + volume v2.0 4 阶段 + 版本升级 + volume_phase handler + FlowStage.agent 校验
+
+## 2026-07-12：流程控制插件系统
+
+### 背景
+
+用户需求：将续写控制中的「单次续写」「卷续写」「重写当前章节」三种模式抽离为独立的「流程控制」组件，允许用户按规范代码自行组合既有功能或新增 agent，以单个 JSON 文件形式导入导出新模式给其他用户使用，且不影响原有功能。
+
+### 核心改动
+
+#### 新增
+- `novelforge/models/flow_plugin.py`：FlowPlugin/FlowStage 声明式 JSON 配置数据模型；4 种 agent 类型（continuation/audit/checkpoint/volume_pipeline）、3 种 ui_mode（standard/volume）、3 种 accept_mode（promote/replace/volume_insert）；ID 路径穿越防护
+- `novelforge/services/flow_plugin_service.py`：流程插件 CRUD 服务（继承 BaseJsonService[FlowPlugin]）；首启复制 3 内置插件到 `~/.novelforge/flow_plugins/`；导入强制 builtin=False，ID 冲突追加 `_imported`；内置不可删除
+- `novelforge/services/flow_executor.py`：流程执行引擎；按 stages 有序执行；4 agent handler 回调机制；挂起-恢复模式（pending/resume/cancel）；参数合并优先级：阶段 params 覆盖面板 params
+- `novelforge/resources/defaults/flow_plugins/single.json`：内置单次续写插件（1 阶段 continuation，accept_mode=promote）
+- `novelforge/resources/defaults/flow_plugins/volume.json`：内置卷续写插件（1 阶段 volume_pipeline，ui_mode=volume，accept_mode=volume_insert）
+- `novelforge/resources/defaults/flow_plugins/rewrite_current.json`：内置重写当前章节插件（2 阶段 audit→continuation，input_from=analysis，accept_mode=replace）
+- `novelforge/ui/flow_plugin_manager.py`：流程插件管理器（继承 PersistentDialog 非模态）；列表/详情/导入/导出/删除（内置禁用）；plugin_changed 信号通知 MainWindow 刷新面板下拉
+- `tests/test_flow_plugin.py`：31 个测试覆盖模型校验、服务 CRUD、导入导出、执行引擎
+
+#### 修改
+- `novelforge/models/__init__.py`：导出 FlowPlugin/FlowStage/VALID_AGENT_TYPES/VALID_UI_MODES/VALID_ACCEPT_MODES
+- `novelforge/utils/paths.py`：新增 `get_default_flow_plugin_path` 函数
+- `novelforge/ui/continuation_panel.py`：新增 `start_flow` 信号（plugin_id + params 统一入口）；`set_flow_plugins` 动态填充模式下拉；`_on_start_clicked`/`_on_rewrite_clicked` 改为发射 `start_flow`
+- `novelforge/ui/main_window.py`：
+  - 新增 FlowPluginService/FlowExecutor/FlowPluginManager 初始化与 import
+  - `start_flow` 信号连接到 `_on_start_flow` 统一入口
+  - 4 个 agent handler 注册（`_register_flow_handlers`）
+  - `_on_start_flow` 注入 `_flow_plugin_id` 到 params（经 FlowExecutor → handler → ContinuationWorker → parameters_snapshot）
+  - `_on_mode_changed` 改为查插件 ui_mode
+  - `_on_accept_continuation` 适配 accept_mode（优先查插件，回退 created_by）
+  - `_on_rewrite_analysis_accepted` 开头 cancel FlowExecutor 清理 pending 状态
+  - 移除 `rewrite_current_analysis_requested` 死信号连接（改走 start_flow）
+  - 工具菜单新增「流程插件管理器(&F)」入口
+- `agent.md`：架构分层补充 flow_plugin.py/flow_plugin_service.py/flow_executor.py/flow_plugin_manager.py/flow_plugins/ 目录；关键设计决策新增第 18 条「流程控制插件系统」；第 14 条接受逻辑更新
+
+### 测试
+
+- `python -m pytest tests/test_flow_plugin.py -v`：31 passed
+- `python -m pytest tests/test_promote_continuation.py tests/test_chapter_title_generation.py -q`：21 passed（无回归）
+
+### 文档同步
+
+- 更新 `agent.md`：架构分层新增 4 个模块 + flow_plugins/ 资源目录；关键设计决策新增第 18 条；第 14 条接受逻辑更新；main_window/continuation_panel 描述更新
+
+## 2026-07-11：章节名生成与编辑
+
+### 背景
+
+用户需求：①默认预设加入章节名生成要求，让 LLM 根据前几个章节名的命名规律继续生成新章节名；②支持修改章节名字（此前只能修改章节正文）。
+
+### 核心改动
+
+#### 修改
+- `novelforge/resources/defaults/default_preset.json`：`main` 模块新增 `{{previous_chapter_titles}}` 宏段落（前章标题列表）+ `<novelforge_title>` 输出标签（LLM 分析前章命名规律生成一致的新标题）；`nf_core_rules` 第 5 条调整为"章节标题仅在 `<novelforge_title>` 标签内输出"
+- `novelforge/core/prompt_assembler.py`：新增 `_build_previous_chapter_titles` 方法（按序排序，支持 `exclude_current` 重写模式排除当前章、`max_titles=20` 限制）；`assemble` 调用该方法构建前章标题；`_build_macro_context` 新增 `previous_chapter_titles` 参数注入 `ctx.extra`（空串时注入占位文本）
+- `novelforge/resources/defaults/default_regex_scripts.json`：新增第 5 条 `nf_regex_strip_title`（"GB-章节标题剥离"，在 AI_OUTPUT 阶段剥离 `<novelforge_title>` 标签）
+- `novelforge/models/chapter.py`：`Continuation` 模型新增 `generated_title: str = ""` 字段（LLM 生成的章节标题）
+- `novelforge/services/continuation_worker.py`：`run` 方法在 `post_process_content` 调用前用正则提取 `<novelforge_title>` 标签内容到 `generated_title`
+- `novelforge/services/chapter_service.py`：`promote_continuation_to_chapter` 优先使用 `generated_title` 作为新章节标题，无则回退默认"第N章"；`rename_chapter` 改用 `update_chapter_title` 单列更新（不写正文文件）
+- `novelforge/core/storage.py`：`continuations` 表新增 `generated_title` 列（schema + 幂等迁移）；`save_continuation`/`list_continuations`/`load_chapters_with_continuations`/`_row_to_continuation` 同步该字段；新增 `update_chapter_title` 方法（只更新 title 列不写文件）
+- `novelforge/services/storage_service.py`：新增 `update_chapter_title` 方法
+- `novelforge/ui/chapter_editor.py`：`QLineEdit`（objectName="chapterTitleEdit"）替代原 QLabel 支持标题编辑；新增 `title_changed` 信号 + `_on_title_changed` 方法 + `title` 属性；`load_chapter` 签名改为接收 `chapter_index` + `chapter_title`；`set_streaming_locked` 同步锁定标题输入框
+- `novelforge/ui/main_window.py`：连接 `title_changed` 信号到新增的 `_on_chapter_title_changed` 方法（实时更新章节标题并刷新列表）；`_on_save` 同步标题
+- `novelforge/ui/continuation_panel.py`：`set_current_swipe` 在输出框前显示 `【生成标题】{title}`
+
+#### 新增
+- `tests/test_chapter_title_generation.py`：15 个测试用例覆盖 `generated_title` 字段、`promote_continuation_to_chapter` 使用 `generated_title`、`_build_previous_chapter_titles`（含 `exclude_current`/`max_titles`）、`_build_macro_context` 注入、`<novelforge_title>` 标签正则提取、`update_chapter_title` 存储方法
+
+### 测试
+
+- `python -m pytest tests/test_chapter_title_generation.py -v`：15 passed
+- `python -m pytest tests/test_promote_continuation.py tests/test_m2_prompt_assembly.py -q`：16 passed（无回归）
+
+### 文档同步
+
+- 更新 `agent.md`：架构分层补充 `generated_title`/`_build_previous_chapter_titles`/`update_chapter_title`/标题编辑；关键设计决策第 8 条补充标题来源；新增第 17 条「章节标题生成与编辑」；代码风格规范补充 `rename_chapter` 用 `update_chapter_title`；默认正则条数 4→5
+
 ## 2026-07-11：版本号升级至 v0.2.9
 
 将 `novelforge/__init__.py` 的 `__version__` 由 `0.2.8` 升级至 `0.2.9`；同步更新 `README.md` 顶部「当前版本」标注与「更新记录」章节（新增 v0.2.9 小节，汇总自 v0.2.8 以来的 2 项改动：流程端点配置新增模型下拉、思维链预设升级为三层次互斥模块），同步更新 `agent.md` 当前版本标注。

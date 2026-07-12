@@ -1,0 +1,22 @@
+{
+  "id": "single",
+  "name": "单次续写",
+  "description": "单章节流式续写，接受后提升为新章节插入当前章之后",
+  "version": "1.0",
+  "author": "GengBi",
+  "builtin": true,
+  "ui_mode": "standard",
+  "accept_mode": "promote",
+  "stages": [
+    {
+      "id": "write",
+      "name": "续写",
+      "agent": "continuation",
+      "flow_key": "single_continuation",
+      "streaming": true,
+      "created_by": "continuation",
+      "params": {},
+      "input_from": ""
+    }
+  ]
+}

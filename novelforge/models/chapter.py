@@ -49,6 +49,7 @@ class Continuation(BaseModel):
     extracted_context_snapshot: list[ContextEntry] = Field(default_factory=list)
     prompt_snapshot: list[dict[str, Any]] = Field(default_factory=list)
     reasoning_content: str | None = None
+    generated_title: str = ""  # LLM 生成的章节标题（从 <novelforge_title> 标签提取）
     agent_artifacts: dict[str, Any] | None = None
     volume_artifacts: VolumeArtifacts | None = None
     highlights: list[dict[str, Any]] = Field(default_factory=list)  # 输出栏高亮：[{start, end, color, note}]

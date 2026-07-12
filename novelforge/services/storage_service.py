@@ -155,6 +155,15 @@ class StorageService:
             self.storage.update_chapter_index(chapter_id, new_index)
         )
 
+    def update_chapter_title(self, chapter_id: str, title: str) -> None:
+        """只更新章节的 title 列，不触碰正文文件。
+
+        用于重命名场景，避免 save_chapter 重写正文文件。
+        """
+        self._runner.run(
+            self.storage.update_chapter_title(chapter_id, title)
+        )
+
     def update_chapter_protagonist(
         self, chapter_id: str, profile: ProtagonistProfile | None
     ) -> None:

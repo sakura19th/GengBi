@@ -62,5 +62,21 @@
     "minDepth": 0,
     "maxDepth": 0,
     "markupSafety": false
+  },
+  {
+    "id": "nf_regex_strip_title",
+    "scriptName": "GB-章节标题剥离",
+    "findRegex": "/<novelforge_title>[\\s\\S]*?<\\/novelforge_title>\\n*/g",
+    "replaceString": "",
+    "trimStrings": [],
+    "placement": [2],
+    "disabled": false,
+    "markdownOnly": false,
+    "promptOnly": false,
+    "runOnEdit": false,
+    "substituteRegex": false,
+    "minDepth": 0,
+    "maxDepth": 0,
+    "markupSafety": false
   }
 ]

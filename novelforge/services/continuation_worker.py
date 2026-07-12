@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import aiohttp
 import asyncio
+import json
 import logging
 import threading
 from datetime import datetime
@@ -157,6 +158,8 @@ class ContinuationWorker(QThread):
     auth_error = Signal()
     # M2 新增：token 预算信息（用于状态栏显示）
     token_budget_info = Signal(dict)
+    # 调试模式：phase_name, messages_json, current_endpoint_id, current_model
+    prompt_debug_requested = Signal(str, str, str, str)
 
     def __init__(
         self,
@@ -177,6 +180,8 @@ class ContinuationWorker(QThread):
         regex_script_ids: list[str] | None = None,
         extracted_context_snapshot: list[dict[str, Any]] | None = None,
         parent_continuation_id: str | None = None,
+        endpoint_id: str = "",
+        debug_mode: bool = False,
         parent=None,
     ) -> None:
         """初始化续写工作线程。
@@ -199,6 +204,8 @@ class ContinuationWorker(QThread):
             regex_script_ids: 正则脚本 ID 列表快照
             extracted_context_snapshot: 提取的上下文条目快照（M4: 存入 swipe）
             parent_continuation_id: 链式续写父续写 id（None=章节直接子节点）
+            endpoint_id: 当前端点 ID（调试模式覆盖回传时供 dialog 默认选中）
+            debug_mode: 是否开启调试模式（开启后每次 LLM 调用前弹窗确认）
             parent: 父 QObject
         """
         super().__init__(parent)
@@ -229,6 +236,111 @@ class ContinuationWorker(QThread):
         self._stop_event = threading.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._task: asyncio.Task | None = None
+
+        # 调试模式（UI 线程设置，开启后每次 LLM 调用前弹窗确认）
+        self._endpoint_id = endpoint_id
+        self.debug_mode = debug_mode
+        self._client: Any = None
+        self._debug_confirmed: asyncio.Event | None = None
+        self._debug_confirmed_result: bool = False
+        # 调试覆盖：confirm_debug_prompt 写入，_effective_model/_effective_client 读取
+        # 每次 _maybe_debug_prompt 开始时清空，保证覆盖仅对紧接的下一次 LLM 调用生效
+        self._debug_override_endpoint: dict | None = None
+        self._debug_override_model: str = ""
+        self._debug_override_api_key: str = ""
+        # 调试覆盖端点的 LLMClient 缓存（endpoint_id → client），避免重复创建 aiohttp session
+        self._debug_clients: dict[str, Any] = {}
+
+    def confirm_debug_prompt(
+        self,
+        confirmed: bool,
+        endpoint_override: dict | None = None,
+        model_override: str = "",
+        api_key_override: str = "",
+    ) -> None:
+        """UI 线程调用，确认调试提示词弹窗。
+
+        Args:
+            confirmed: True=发送，False=取消
+            endpoint_override: 覆盖端点 dict（含 base_url 等），None=不覆盖
+            model_override: 覆盖模型名，空串=不覆盖
+            api_key_override: 覆盖端点的解密 API Key（endpoint_override 非 None 时需提供）
+        """
+        self._debug_confirmed_result = confirmed
+        if confirmed:
+            self._debug_override_endpoint = endpoint_override
+            self._debug_override_model = model_override
+            self._debug_override_api_key = api_key_override
+        if self._loop and self._debug_confirmed:
+            self._loop.call_soon_threadsafe(self._debug_confirmed.set)
+
+    async def _maybe_debug_prompt(
+        self, messages: list[dict[str, Any]], phase_name: str
+    ) -> bool:
+        """调试模式下弹窗确认提示词。
+
+        若 debug_mode 为 False，直接返回 True。
+        若为 True，清空覆盖字段 → emit prompt_debug_requested 信号（含当前
+        endpoint_id/model 供 dialog 默认选中）→ 等待 UI 线程确认。
+        确认后覆盖字段由 confirm_debug_prompt 写入，供紧接的 LLM 调用经
+        _effective_model/_effective_client 读取。
+
+        Args:
+            messages: 即将发送的 messages 列表
+            phase_name: 阶段名（用于弹窗标题）
+
+        Returns:
+            True=确认发送，False=取消
+        """
+        if not self.debug_mode:
+            return True
+        if self._debug_confirmed is None:
+            return True
+        # 清空覆盖字段（保证覆盖仅对紧接的下一次 LLM 调用生效）
+        self._debug_override_endpoint = None
+        self._debug_override_model = ""
+        self._debug_override_api_key = ""
+        self._debug_confirmed.clear()
+        self._debug_confirmed_result = False
+        messages_json = json.dumps(messages, ensure_ascii=False, indent=2)
+        self.prompt_debug_requested.emit(
+            phase_name, messages_json, self._endpoint_id, self.model
+        )
+        await self._debug_confirmed.wait()
+        return self._debug_confirmed_result
+
+    def _effective_model(self) -> str:
+        """返回当前 LLM 调用应使用的模型（调试覆盖优先）。
+
+        Returns:
+            覆盖模型名（若有）否则构造时传入的 self.model
+        """
+        if self._debug_override_model:
+            return self._debug_override_model
+        return self.model
+
+    def _effective_client(self) -> Any:
+        """返回当前 LLM 调用应使用的 client（调试覆盖端点优先）。
+
+        覆盖端点时按 endpoint_id 缓存 LLMClient，避免重复创建 aiohttp session；
+        无覆盖时返回主 client。
+
+        Returns:
+            LLMClient 实例
+        """
+        if self._debug_override_endpoint is not None:
+            ep_id = self._debug_override_endpoint.get("id", "")
+            if ep_id and ep_id in self._debug_clients:
+                return self._debug_clients[ep_id]
+            client = LLMClient(
+                self._debug_override_endpoint.get("base_url", ""),
+                self._debug_override_api_key,
+                reasoning_effort=self.parameters.get("reasoning_effort", ""),
+            )
+            if ep_id:
+                self._debug_clients[ep_id] = client
+            return client
+        return self._client
 
     def stop(self) -> None:
         """请求停止流式输出（线程安全）。
@@ -269,6 +381,19 @@ class ContinuationWorker(QThread):
                     )
             except Exception:
                 pass
+            # 关闭主 LLM 客户端，释放 aiohttp ClientSession
+            if self._client is not None:
+                try:
+                    self._loop.run_until_complete(self._client.close())
+                except Exception:
+                    pass
+            # 关闭调试覆盖端点的缓存 client
+            for dbg_client in self._debug_clients.values():
+                try:
+                    self._loop.run_until_complete(dbg_client.close())
+                except Exception:
+                    pass
+            self._debug_clients.clear()
             # 关闭事件循环
             self._loop.close()
             self._loop = None
@@ -293,11 +418,26 @@ class ContinuationWorker(QThread):
 
         check_stop()
 
-        client = LLMClient(
-            self.base_url,
-            self.api_key,
-            reasoning_effort=self.parameters.get("reasoning_effort", ""),
-        )
+        # 调试模式：弹窗确认提示词（取消则 emit error 并返回）
+        self._debug_confirmed = asyncio.Event()
+        phase_name = {
+            "continuation": "续写",
+            "rewrite_current": "重写生成",
+            "audit_rewrite": "修正",
+        }.get(self.created_by, "续写")
+        if not await self._maybe_debug_prompt(self.messages, phase_name):
+            # 用户取消：emit error 重置 UI（非 popup，仅 inline 提示）
+            self.error.emit("用户取消调试")
+            return
+
+        # 创建主 client（供 _effective_client 无覆盖时返回）
+        if self._client is None:
+            self._client = LLMClient(
+                self.base_url,
+                self.api_key,
+                reasoning_effort=self.parameters.get("reasoning_effort", ""),
+            )
+        client = self._effective_client()
 
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -307,7 +447,7 @@ class ContinuationWorker(QThread):
         try:
             async for chunk in client.stream_chat_completion(
                 messages=self.messages,
-                model=self.model,
+                model=self._effective_model(),
                 temperature=self.parameters.get("temperature", 0.8),
                 max_tokens=self.parameters.get("max_tokens"),
                 top_p=self.parameters.get("top_p", 1.0),
@@ -383,6 +523,14 @@ class ContinuationWorker(QThread):
 
         # M3: 对结果应用 AI_OUTPUT 正则和接收后模板渲染，再剥离 HTML
         # 流水线抽取至 post_process_content（与 AgentOrchestrator 共用）
+
+        # 在后处理剥离标签之前，提取 <novelforge_title> 章节标题
+        title_match = _re.search(
+            r"<novelforge_title>\s*(.*?)\s*</novelforge_title>",
+            result.content, _re.DOTALL,
+        )
+        generated_title = title_match.group(1).strip() if title_match else ""
+
         final_content = post_process_content(
             result.content,
             regex_engine=self.regex_engine,
@@ -396,7 +544,7 @@ class ContinuationWorker(QThread):
             id=_generate_id("sw_"),
             created_at=datetime.now(),
             content=final_content,
-            model=self.model,
+            model=self._effective_model(),
             is_accepted=False,
             parent_id=self.parent_continuation_id,
             status=result.status,
@@ -408,6 +556,7 @@ class ContinuationWorker(QThread):
             extracted_context_snapshot=list(self.extracted_context_snapshot),
             prompt_snapshot=list(self.messages),
             reasoning_content=result.reasoning_content if result.reasoning_content else None,
+            generated_title=generated_title,
         )
 
         self.finished.emit(continuation)

@@ -1813,7 +1813,6 @@ class ContextExtractor:
             token_limit = token_limit_override
         else:
             token_limit = int(config.get("token_limit", 0))
-        extractor_model = config.get("extractor_model", "") or ""
         cache_ttl_hours = int(
             config.get("cache_ttl_hours", DEFAULT_CACHE_TTL_HOURS)
         )
@@ -1906,11 +1905,9 @@ class ContextExtractor:
                 elapsed_seconds=time.time() - start_time,
             )
         client, default_model = client_info
-        # 模型选择优先级：用户配置的 extractor_model > 端点 default_model > DEFAULT_EXTRACTOR_MODEL
-        if extractor_model:
-            model = extractor_model
-        else:
-            model = default_model or DEFAULT_EXTRACTOR_MODEL
+        # 模型由流程端点配置 flow_models["context_extraction"] 控制
+        # （_get_llm_client 已解析 get_flow_model → 端点 default_model → DEFAULT_EXTRACTOR_MODEL）
+        model = default_model
 
         # 按 token 限制拆分批次
         batches = self._split_chapters_by_token_limit(
@@ -2365,7 +2362,6 @@ class ContextExtractor:
         """
         start_time = time.time()
         config = self._get_extract_config(project)
-        extractor_model = config.get("extractor_model", "") or ""
         cache_ttl_hours = int(
             config.get("cache_ttl_hours", DEFAULT_CACHE_TTL_HOURS)
         )
@@ -2395,10 +2391,8 @@ class ContextExtractor:
         if client_info is None:
             return None, "未配置 API 端点或 API Key 无效"
         client, default_model = client_info
-        if extractor_model:
-            model = extractor_model
-        else:
-            model = default_model or DEFAULT_EXTRACTOR_MODEL
+        # 模型由流程端点配置 flow_models["protagonist_extraction"] 控制
+        model = default_model
 
         # 按 token 限制拆分批次
         batches = self._split_chapters_by_token_limit(

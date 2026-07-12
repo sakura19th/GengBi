@@ -90,6 +90,7 @@ CREATE TABLE IF NOT EXISTS continuations (
     extracted_context_snapshot TEXT DEFAULT '[]',
     prompt_snapshot TEXT DEFAULT '[]',
     reasoning_content TEXT,
+    generated_title TEXT DEFAULT '',
     agent_artifacts TEXT,
     volume_artifacts TEXT,
     highlights TEXT,
@@ -392,6 +393,11 @@ class Storage:
                 "ALTER TABLE continuations ADD COLUMN highlights TEXT"
             )
             logger.info("已为 continuations 表添加 highlights 列")
+        if "generated_title" not in column_names:
+            await self._conn.execute(
+                "ALTER TABLE continuations ADD COLUMN generated_title TEXT DEFAULT ''"
+            )
+            logger.info("已为 continuations 表添加 generated_title 列")
         if "parent_id" not in column_names:
             await self._conn.execute(
                 "ALTER TABLE continuations ADD COLUMN parent_id TEXT"
@@ -702,6 +708,23 @@ class Storage:
         )
         await self.conn.commit()
 
+    async def update_chapter_title(
+        self, chapter_id: str, title: str
+    ) -> None:
+        """只更新章节的 title 列，不触碰正文文件。
+
+        用于重命名场景，避免 save_chapter 重写正文文件。
+
+        Args:
+            chapter_id: 章节 ID
+            title: 新标题
+        """
+        await self.conn.execute(
+            "UPDATE chapters SET title = ?, updated_at = ? WHERE id = ?",
+            (title, datetime.now().isoformat(), chapter_id),
+        )
+        await self.conn.commit()
+
     async def load_chapter(self, chapter_id: str) -> dict[str, Any] | None:
         """加载章节元数据与正文。
 
@@ -760,7 +783,7 @@ class Storage:
             "parent_id, status, created_by, parameters_snapshot, preset_id, "
             "preset_snapshot, regex_script_ids_snapshot, "
             "extracted_context_snapshot, prompt_snapshot, reasoning_content, "
-            "agent_artifacts, volume_artifacts, highlights "
+            "generated_title, agent_artifacts, volume_artifacts, highlights "
             f"FROM continuations WHERE chapter_id IN ({placeholders}) "
             "ORDER BY created_at ASC",
             tuple(chapter_ids),
@@ -948,8 +971,8 @@ class Storage:
                 parent_id, status, created_by, parameters_snapshot, preset_id,
                 preset_snapshot, regex_script_ids_snapshot,
                 extracted_context_snapshot, prompt_snapshot, reasoning_content,
-                agent_artifacts, volume_artifacts, highlights)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                generated_title, agent_artifacts, volume_artifacts, highlights)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 continuation["id"],
                 continuation["chapter_id"],
@@ -971,6 +994,7 @@ class Storage:
                 ),
                 json.dumps(continuation.get("prompt_snapshot", []), ensure_ascii=False),
                 continuation.get("reasoning_content"),
+                continuation.get("generated_title", ""),
                 json.dumps(continuation.get("agent_artifacts"), ensure_ascii=False)
                 if continuation.get("agent_artifacts")
                 else None,
@@ -991,7 +1015,7 @@ class Storage:
             "parent_id, status, created_by, parameters_snapshot, preset_id, "
             "preset_snapshot, regex_script_ids_snapshot, "
             "extracted_context_snapshot, prompt_snapshot, reasoning_content, "
-            "agent_artifacts, volume_artifacts, highlights "
+            "generated_title, agent_artifacts, volume_artifacts, highlights "
             "FROM continuations WHERE chapter_id = ? ORDER BY created_at ASC",
             (chapter_id,),
         ) as cursor:
@@ -1025,9 +1049,10 @@ class Storage:
             "extracted_context_snapshot": json.loads(row[13]) if len(row) > 13 and row[13] else [],
             "prompt_snapshot": json.loads(row[14]) if len(row) > 14 and row[14] else [],
             "reasoning_content": row[15] if len(row) > 15 else None,
-            "agent_artifacts": json.loads(row[16]) if len(row) > 16 and row[16] else None,
-            "volume_artifacts": json.loads(row[17]) if len(row) > 17 and row[17] else None,
-            "highlights": json.loads(row[18]) if len(row) > 18 and row[18] else [],
+            "generated_title": row[16] if len(row) > 16 else "",
+            "agent_artifacts": json.loads(row[17]) if len(row) > 17 and row[17] else None,
+            "volume_artifacts": json.loads(row[18]) if len(row) > 18 and row[18] else None,
+            "highlights": json.loads(row[19]) if len(row) > 19 and row[19] else [],
         }
 
     # ===== 历史日志操作 =====

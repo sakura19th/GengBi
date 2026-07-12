@@ -388,12 +388,18 @@ class PromptAssembler:
         result.count_mode = self.token_counter.get_count_mode(model)
         context_entries = context_entries or []
 
+        # 构建前文章节标题列表（供 {{previous_chapter_titles}} 宏替换）
+        previous_chapter_titles = self._build_previous_chapter_titles(
+            chapters, current_chapter, exclude_current=exclude_current,
+        )
+
         # 构建宏替换上下文
         macro_context = self._build_macro_context(
             current_chapter, novel_profile, target_words,
             project_id=project_id, chapter_metadata=chapter_metadata,
             world_ontology=world_ontology, protagonist_profile=protagonist_profile,
             custom_audit_rules=custom_audit_rules,
+            previous_chapter_titles=previous_chapter_titles,
         )
 
         # M3: 构建模板渲染上下文（局部变量，线程安全；供 _process_content 使用）
@@ -593,6 +599,60 @@ class PromptAssembler:
 
         return result
 
+    def _build_previous_chapter_titles(
+        self,
+        chapters: list[Any],
+        current_chapter: Any,
+        exclude_current: bool = False,
+        max_titles: int = 20,
+    ) -> str:
+        """构建前文章节标题列表文本，供 {{previous_chapter_titles}} 宏替换。
+
+        Args:
+            chapters: 所有章节列表
+            current_chapter: 当前续写章节
+            exclude_current: True 时不含当前章节（重写模式），
+                False 时含当前章节（续写模式，新章节在当前章节之后）
+            max_titles: 最多包含的标题数（取最近 N 章）
+
+        Returns:
+            格式化的标题列表文本，如 "1. 初入江湖\\n2. 暗流涌动"；
+            无前文章节时返回空串
+        """
+        if not chapters:
+            return ""
+
+        def _get(ch: Any, attr: str, default: Any = "") -> Any:
+            if isinstance(ch, dict):
+                return ch.get(attr, default)
+            return getattr(ch, attr, default)
+
+        # 获取当前章节 index
+        current_idx = _get(current_chapter, "index", -1) if current_chapter is not None else -1
+
+        # 按序排序
+        sorted_chapters = sorted(chapters, key=lambda c: _get(c, "index", 0))
+
+        # 筛选前文章节
+        if exclude_current:
+            prev = [ch for ch in sorted_chapters if _get(ch, "index", -1) < current_idx]
+        else:
+            prev = [ch for ch in sorted_chapters if _get(ch, "index", -1) <= current_idx]
+
+        # 取最后 max_titles 章
+        if len(prev) > max_titles:
+            prev = prev[-max_titles:]
+
+        if not prev:
+            return ""
+
+        lines: list[str] = []
+        for i, ch in enumerate(prev, 1):
+            title = _get(ch, "title", "")
+            lines.append(f"{i}. {title}" if title else f"{i}.（无标题）")
+
+        return "\n".join(lines)
+
     def _build_macro_context(
         self,
         current_chapter: Any,
@@ -603,6 +663,7 @@ class PromptAssembler:
         world_ontology: Any = None,
         protagonist_profile: Any = None,
         custom_audit_rules: Any = None,
+        previous_chapter_titles: str = "",
     ) -> MacroContext:
         """构建宏替换上下文。"""
         # 获取章节标题和序号
@@ -680,6 +741,12 @@ class PromptAssembler:
                     )
             except Exception as e:
                 logger.debug("custom_audit_rules 序列化失败: %s", e)
+        # 注入 previous_chapter_titles 到 extra（供 {{previous_chapter_titles}} 宏替换）
+        ctx.extra["previous_chapter_titles"] = (
+            previous_chapter_titles
+            if previous_chapter_titles
+            else "（无前文章节，请根据小说整体风格生成合适的章节标题）"
+        )
         return ctx
 
     def _stage1_sort(

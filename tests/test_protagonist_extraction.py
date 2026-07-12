@@ -48,12 +48,12 @@ def _make_extractor() -> Any:
 
     config_manager = MagicMock()
     config_manager.get_context_extract_settings.return_value = {
-        "extractor_model": "gpt-4o-mini",
         "cache_enabled": True,
         "cache_ttl_hours": 24,
         "extractor_prompt_override": None,
         "lookback_chapters": 5,
     }
+    config_manager.get_flow_model.return_value = "gpt-4o-mini"
     config_manager.get_default_endpoint.return_value = {
         "id": "ep1",
         "base_url": "https://api.test.com/v1",

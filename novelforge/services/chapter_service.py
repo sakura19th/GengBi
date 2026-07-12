@@ -255,7 +255,7 @@ class ChapterService:
         before_snapshot = self._snapshot_chapter(chapter)
         old_title = chapter.title
         chapter.title = new_title
-        self.storage.save_chapter(chapter)
+        self.storage.update_chapter_title(chapter.id, new_title)
 
         op = ChapterOperation(
             action="rename",
@@ -403,12 +403,12 @@ class ChapterService:
         for ch in later_chapters:
             self.storage.update_chapter_index(ch.id, ch.index + 1)
 
-        # 创建新章节
+        # 创建新章节（优先使用 LLM 生成的标题，回退到默认"第N章"）
         new_chapter = Chapter(
             id=_generate_id("ch_"),
             project_id=project_id,
             index=new_index,
-            title=f"第{new_index + 1}章",
+            title=continuation.generated_title or f"第{new_index + 1}章",
             content=continuation.content,
             word_count=len(continuation.content),
         )

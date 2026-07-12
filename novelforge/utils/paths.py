@@ -143,6 +143,21 @@ def get_volume_prompt_path(phase: str) -> Path:
     return get_resource_path("defaults", "agent", f"phase_{phase}.txt")
 
 
+def get_default_flow_plugin_path(plugin_id: str) -> Path:
+    """获取内置流程插件默认 JSON 路径。
+
+    内置插件 JSON 存放于 ``resources/defaults/flow_plugins/{id}.json``，
+    首次启动时由 FlowPluginService 复制到用户目录。
+
+    Args:
+        plugin_id: 插件 ID（如 single/volume/rewrite_current）
+
+    Returns:
+        内置插件 JSON 文件路径
+    """
+    return get_resource_path("defaults", "flow_plugins", f"{plugin_id}.json")
+
+
 def load_text_resource(path: Path) -> str:
     """加载文本资源文件内容。
 

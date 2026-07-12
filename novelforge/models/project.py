@@ -66,8 +66,8 @@ class Project(BaseModel):
     - ``preset_id``：绑定的写作预设 ID
     - ``regex_script_ids``：绑定的正则脚本 ID 列表
     - ``extract_config``：上下文提取配置覆盖（null 时用全局配置），
-      字段结构：extractor_model/cache_enabled/cache_ttl_hours/
-      extractor_prompt_override/lookback_chapters
+      字段结构：cache_enabled/cache_ttl_hours/
+      extractor_prompt_override/lookback_chapters/token_limit
     - ``chapter_split_rule``：章节拆分规则
     - ``worldbook_id``：项目专属世界书 ID（存储世界观底层条目，由 OntologyExtractor 创建）
     - ``world_ontology``：底层世界观元描述（全文提取一次固化，不随章节变化；

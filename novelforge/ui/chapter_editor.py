@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMenu,
     QPlainTextEdit,
     QPushButton,
@@ -52,6 +53,7 @@ class ChapterEditor(QWidget):
     """
 
     content_changed = Signal(str)
+    title_changed = Signal(str)
     saved = Signal()
     save_requested = Signal()
     split_requested = Signal(int)
@@ -87,9 +89,16 @@ class ChapterEditor(QWidget):
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setContentsMargins(8, 4, 8, 4)
 
-        self._title_label = QLabel("未选择章节")
-        self._title_label.setObjectName("panelTitle")
-        toolbar_layout.addWidget(self._title_label)
+        self._chapter_num_label = QLabel("未选择章节")
+        self._chapter_num_label.setObjectName("panelTitle")
+        toolbar_layout.addWidget(self._chapter_num_label)
+
+        # 章节标题编辑框
+        self._title_edit = QLineEdit()
+        self._title_edit.setObjectName("chapterTitleEdit")
+        self._title_edit.setPlaceholderText("章节标题")
+        self._title_edit.setReadOnly(True)  # 默认只读（预览模式）
+        toolbar_layout.addWidget(self._title_edit)
 
         toolbar_layout.addStretch()
 
@@ -123,6 +132,7 @@ class ChapterEditor(QWidget):
         """连接信号。"""
         self._edit_btn.toggled.connect(self._on_edit_toggled)
         self._editor.textChanged.connect(self._on_text_changed)
+        self._title_edit.textChanged.connect(self._on_title_changed)
         self._save_btn.clicked.connect(self.save_requested.emit)
 
     def _set_save_status(self, text: str, state: str) -> None:
@@ -144,6 +154,7 @@ class ChapterEditor(QWidget):
             return
         self._is_edit_mode = checked
         self._editor.setReadOnly(not checked)
+        self._title_edit.setReadOnly(not checked)
         self._edit_btn.setText("完成编辑" if checked else "编辑")
         logger.debug("切换模式: %s", "编辑" if checked else "预览")
 
@@ -157,7 +168,8 @@ class ChapterEditor(QWidget):
         self,
         chapter_id: str,
         project_id: str,
-        title: str,
+        chapter_index: int,
+        chapter_title: str,
         content: str,
     ) -> None:
         """加载章节内容到编辑器。
@@ -165,7 +177,8 @@ class ChapterEditor(QWidget):
         Args:
             chapter_id: 章节 ID
             project_id: 项目 ID
-            title: 章节标题
+            chapter_index: 章节序号（从 0 开始）
+            chapter_title: 章节标题
             content: 章节正文
         """
         # 如果有未保存的修改，先保存
@@ -182,7 +195,11 @@ class ChapterEditor(QWidget):
         self._editor.setPlainText(content)
         self._editor.blockSignals(False)
 
-        self._title_label.setText(title)
+        self._chapter_num_label.setText(f"第{chapter_index + 1}章")
+        self._title_edit.blockSignals(True)
+        self._title_edit.setText(chapter_title)
+        self._title_edit.blockSignals(False)
+
         self._update_word_count()
         self._set_save_status("已保存", "textSecondary")
 
@@ -197,7 +214,10 @@ class ChapterEditor(QWidget):
         self._editor.blockSignals(True)
         self._editor.clear()
         self._editor.blockSignals(False)
-        self._title_label.setText("未选择章节")
+        self._chapter_num_label.setText("未选择章节")
+        self._title_edit.blockSignals(True)
+        self._title_edit.clear()
+        self._title_edit.blockSignals(False)
         self._word_count_label.setText("字数: 0")
 
     # ===== 内容变更与自动保存 =====
@@ -216,6 +236,19 @@ class ChapterEditor(QWidget):
 
         content = self._editor.toPlainText()
         self.content_changed.emit(content)
+
+    def _on_title_changed(self) -> None:
+        """标题变更处理。"""
+        if not self._is_edit_mode or self._is_streaming:
+            return
+
+        self._has_unsaved_changes = True
+        self._set_save_status("未保存修改", "textWarning")
+
+        # 重置自动保存定时器
+        self._autosave_timer.start(AUTOSAVE_DELAY_MS)
+
+        self.title_changed.emit(self._title_edit.text())
 
     def _do_autosave(self) -> None:
         """执行自动保存。"""
@@ -251,6 +284,7 @@ class ChapterEditor(QWidget):
         self._is_streaming = locked
         if locked:
             self._editor.setReadOnly(True)
+            self._title_edit.setReadOnly(True)
             self._edit_btn.setEnabled(False)
             self._save_btn.setEnabled(False)
             self._set_save_status("续写中...", "textInfo")
@@ -258,6 +292,7 @@ class ChapterEditor(QWidget):
             self._edit_btn.setEnabled(True)
             self._save_btn.setEnabled(True)
             self._editor.setReadOnly(not self._is_edit_mode)
+            self._title_edit.setReadOnly(not self._is_edit_mode)
             if self._has_unsaved_changes:
                 self._set_save_status("未保存修改", "textWarning")
             else:
@@ -305,6 +340,11 @@ class ChapterEditor(QWidget):
     def content(self) -> str:
         """当前编辑器内容。"""
         return self._editor.toPlainText()
+
+    @property
+    def title(self) -> str:
+        """当前章节标题。"""
+        return self._title_edit.text()
 
     @property
     def chapter_id(self) -> str | None:
