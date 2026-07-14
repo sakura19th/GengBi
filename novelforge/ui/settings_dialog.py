@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from typing import Any
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QSizePolicy,
     QLineEdit,
     QListWidget,
@@ -246,6 +248,25 @@ class EndpointEditDialog(QDialog):
         )
         form.addRow("思考强度:", self._reasoning_effort_combo)
 
+        # 自定义请求体字段（JSON，deep merge 到 payload，如 zenmux provider_routing_strategy）
+        self._extra_payload_edit = QPlainTextEdit()
+        self._extra_payload_edit.setPlaceholderText(
+            '填入 JSON，发送时 deep merge 到请求体。如：\n'
+            '{"provider_routing_strategy": {"type": "specified_providers", '
+            '"providers": ["anthropic/anthropic_endpoint"]}}'
+        )
+        self._extra_payload_edit.setMinimumHeight(70)
+        form.addRow("自定义请求体字段:", self._extra_payload_edit)
+
+        # 自定义 HTTP 头（JSON，update 到 headers，可覆盖默认头）
+        self._extra_headers_edit = QPlainTextEdit()
+        self._extra_headers_edit.setPlaceholderText(
+            '填入 JSON，发送时合并到 HTTP 头。如：\n'
+            '{"X-Custom-Header": "value"}'
+        )
+        self._extra_headers_edit.setMinimumHeight(70)
+        form.addRow("自定义 HTTP 头:", self._extra_headers_edit)
+
         self._default_check = QCheckBox("设为默认端点")
         form.addRow("", self._default_check)
 
@@ -286,6 +307,17 @@ class EndpointEditDialog(QDialog):
         select_combo_by_id(
             self._reasoning_effort_combo, self._endpoint.get("reasoning_effort", "")
         )
+        # 自定义请求体字段 / HTTP 头：dict → JSON 文本回填
+        extra_payload = self._endpoint.get("extra_payload") or {}
+        if extra_payload:
+            self._extra_payload_edit.setPlainText(
+                json.dumps(extra_payload, ensure_ascii=False, indent=2)
+            )
+        extra_headers = self._endpoint.get("extra_headers") or {}
+        if extra_headers:
+            self._extra_headers_edit.setPlainText(
+                json.dumps(extra_headers, ensure_ascii=False, indent=2)
+            )
         # 若已有 base_url 和解密的 API key，自动拉取模型列表
         if self._endpoint.get("base_url", "").strip() and self._decrypted_key:
             self._on_fetch_models()
@@ -477,6 +509,32 @@ class EndpointEditDialog(QDialog):
                 enabled_models.append(m)
         default_model = sorted(enabled_models)[0] if enabled_models else ""
 
+        # 解析自定义请求体字段 JSON（deep merge 到 payload）
+        extra_payload_text = self._extra_payload_edit.toPlainText().strip()
+        extra_payload: dict = {}
+        if extra_payload_text:
+            try:
+                parsed = json.loads(extra_payload_text)
+                if not isinstance(parsed, dict):
+                    raise ValueError("JSON 顶层必须是对象")
+                extra_payload = parsed
+            except (json.JSONDecodeError, ValueError) as e:
+                QMessageBox.warning(self, "提示", f"自定义请求体字段 JSON 格式错误：{e}")
+                return
+
+        # 解析自定义 HTTP 头 JSON（update 到 headers）
+        extra_headers_text = self._extra_headers_edit.toPlainText().strip()
+        extra_headers: dict = {}
+        if extra_headers_text:
+            try:
+                parsed = json.loads(extra_headers_text)
+                if not isinstance(parsed, dict):
+                    raise ValueError("JSON 顶层必须是对象")
+                extra_headers = parsed
+            except (json.JSONDecodeError, ValueError) as e:
+                QMessageBox.warning(self, "提示", f"自定义 HTTP 头 JSON 格式错误：{e}")
+                return
+
         self._result = {
             "id": self._endpoint.get("id", f"ep_{os.urandom(4).hex()}"),
             "name": name,
@@ -486,6 +544,8 @@ class EndpointEditDialog(QDialog):
             "models": models,
             "enabled_models": enabled_models,
             "reasoning_effort": self._reasoning_effort_combo.currentData(),
+            "extra_payload": extra_payload,
+            "extra_headers": extra_headers,
             "is_default": self._default_check.isChecked(),
         }
         self.accept()

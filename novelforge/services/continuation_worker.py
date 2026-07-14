@@ -182,6 +182,8 @@ class ContinuationWorker(QThread):
         parent_continuation_id: str | None = None,
         endpoint_id: str = "",
         debug_mode: bool = False,
+        extra_payload: dict | None = None,
+        extra_headers: dict | None = None,
         parent=None,
     ) -> None:
         """初始化续写工作线程。
@@ -206,6 +208,8 @@ class ContinuationWorker(QThread):
             parent_continuation_id: 链式续写父续写 id（None=章节直接子节点）
             endpoint_id: 当前端点 ID（调试模式覆盖回传时供 dialog 默认选中）
             debug_mode: 是否开启调试模式（开启后每次 LLM 调用前弹窗确认）
+            extra_payload: 自定义请求体字段（deep merge 到 payload）
+            extra_headers: 自定义 HTTP 头（update 到 headers）
             parent: 父 QObject
         """
         super().__init__(parent)
@@ -214,6 +218,9 @@ class ContinuationWorker(QThread):
         self.model = model
         self.messages = messages
         self.parameters = parameters
+        # 自定义请求扩展（透传给 LLMClient）
+        self.extra_payload: dict = extra_payload or {}
+        self.extra_headers: dict = extra_headers or {}
         self.chapter_id = chapter_id
         self.created_by = created_by
         self.preset_id = preset_id
@@ -336,6 +343,8 @@ class ContinuationWorker(QThread):
                 self._debug_override_endpoint.get("base_url", ""),
                 self._debug_override_api_key,
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
+                extra_payload=self._debug_override_endpoint.get("extra_payload") or {},
+                extra_headers=self._debug_override_endpoint.get("extra_headers") or {},
             )
             if ep_id:
                 self._debug_clients[ep_id] = client
@@ -438,6 +447,8 @@ class ContinuationWorker(QThread):
                 self.base_url,
                 self.api_key,
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
+                extra_payload=self.extra_payload,
+                extra_headers=self.extra_headers,
             )
         client = self._effective_client()
 

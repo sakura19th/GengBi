@@ -39,6 +39,7 @@ FLOW_DEFINITIONS: list[tuple[str, str]] = [
     ("context_extraction", "上下文提取"),
     ("ontology_extraction", "世界观底层提取"),
     ("protagonist_extraction", "主角形象提取"),
+    ("style_extraction", "文风档案提取"),
     ("custom_rule_parsing", "自定义设定解析"),
     ("writing_element_analysis", "写作要素分析"),
     ("writing_element_refinement", "写作要素深化"),

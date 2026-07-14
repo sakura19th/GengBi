@@ -1,5 +1,208 @@
 # 更新日志
 
+## 2026-07-13：统一【写作风格】与【文风档案】+ 修复单章生成未组装文风档案
+
+### 背景
+
+用户反馈两个问题：①【写作风格】（NovelProfile.writing_style 字符串）与【文风档案】（Project.style_profile 九维量化档案）概念重叠，主提示词模板中并列出现导致模型困惑；②有文风档案时单章续写生成未成功组装——发送的 messages 中 `{{style_profile}}` 未被替换为档案内容。
+
+### 根因
+
+- **核心 bug**：`main_window.py` L1846 单章续写生成 `prompt_assembler.assemble()` 调用漏传 `style_profile` 参数（对比 L5486 重写生成已正确传参），导致 `{{style_profile}}` 宏未注入 `ctx.extra`，宏替换后保留占位符或被替换为空
+- **预览不一致**：L3453 续写预览 `assemble` 调用 4 个档案参数全缺，预览结果与实际发送不一致
+- **概念混乱**：`writing_style`（文字描述）与 `style_profile`（量化档案）在主提示词模板中并列分节，概念重叠
+- **空值处理不统一**：4 个档案 None 时未注入占位文本，`{{style_profile}}` 被替换为空字符串而非"（无文风档案）"，与审计模板"若为'（无文风档案）'则..."逻辑不匹配
+
+### 核心改动
+
+- **单章续写生成补 style_profile 参数**（`novelforge/ui/main_window.py` L1865）：在 `assemble` 调用补 `style_profile=project.style_profile if project else None,`，修复文风档案未组装 bug
+- **续写预览补齐 4 个档案参数**（`novelforge/ui/main_window.py` L3468-3473）：补 `world_ontology`/`protagonist_profile`/`custom_audit_rules`/`style_profile`，确保预览与实际发送一致
+- **主提示词模板统一**（`novelforge/resources/defaults/default_preset.json` L9）：【写作风格】分节改名【写作风格补充说明】并移到【文风档案】正下方，明确量化档案为主、文字描述为辅的主次关系（保留 `{{writing_style}}` 宏向后兼容，不删字段）
+- **4 个档案空值占位文本统一**（`novelforge/core/prompt_assembler.py` L700-766）：`_build_macro_context` 中 4 个档案 None 时注入占位文本（"（无世界观底层）"/"（无主角形象档案）"/"（无文风档案）"/"（无自定义设定）"）；新增 `_serialize_profile_or_placeholder`/`_serialize_rules_or_placeholder` 静态辅助方法封装序列化+占位逻辑
+- **补 StyleProfile 导出**（`novelforge/models/__init__.py`）：补 `StyleProfile` 到 import 与 `__all__`，与 `WorldOntology`/`ProtagonistProfile` 导出一致
+
+### 测试
+
+- 导入验证：`from novelforge.models import StyleProfile` + `import novelforge.ui.main_window` + `import novelforge.core.prompt_assembler` OK
+- 既有测试无回归：`test_m2_prompt_assembly.py` + `test_rewrite_current_mode.py` + `test_style_extractor.py` 共 39 passed
+- 组装验证：构造带 style_profile 的 project 调 assemble，确认有档案时 `{{style_profile}}` 被替换为 JSON 内容（含 `language_texture` 等字段），None 时被替换为"（无文风档案）"
+
+### 文档同步
+
+- `agent.md`：prompt_assembler.py 描述补空值占位文本统一 + 辅助方法；default_preset.json 描述补【写作风格】改名与位置调整；main_window.py 描述补 3 处 assemble 调用点修复
+- `update.md`：本条目
+
+## 2026-07-13：端点配置增加自定义请求扩展（payload 字段 + HTTP 头）
+
+### 背景
+
+用户在端点配置中想增加自定义请求扩展能力，主要用例是 zenmux 的 `provider_routing_strategy`（详见 https://zenmux.ai/docs/about/provider-routing.html#specify-provider-list ）。经查阅文档，该字段是请求体（payload）字段而非 HTTP header。用户同时要求支持自定义其它内容，因此实现为通用扩展机制：自定义 payload 字段（deep merge）+ 自定义 HTTP 头（update）。
+
+### 核心改动
+
+- **配置层**（`novelforge/core/config.py`）：`add_endpoint` 默认字段追加 `extra_payload: {}` / `extra_headers: {}`（与 `reasoning_effort` 同级，作为端点级扩展字段）
+- **LLM 客户端**（`novelforge/services/llm_client.py`）：
+  - 构造函数追加 `extra_payload` / `extra_headers` 参数，存为实例属性
+  - `stream_chat_completion` / `chat_completion`：在 `_filter_unsupported_params` 后 deep merge `extra_payload` 到 payload（确保自定义字段不被模型过滤逻辑误删）；headers 构建后 `update` `extra_headers`（可覆盖默认 `Authorization`/`Content-Type`）
+  - `fetch_models`：headers 也合并 `extra_headers`（GET /models 可能需要自定义头）
+  - 新增模块级辅助函数 `_deep_merge_dict`：dict 递归合并，list/scalar 覆盖
+- **UI 层**（`novelforge/ui/settings_dialog.py` `EndpointEditDialog`）：
+  - `_setup_ui`：在「思考强度」后、「设为默认端点」前增加两个 `QPlainTextEdit`——「自定义请求体字段」(JSON) + 「自定义 HTTP 头」(JSON)，含 placeholder 示例（zenmux provider_routing_strategy）
+  - `_load_data`：从 endpoint dict 读取 `extra_payload`/`extra_headers`，`json.dumps(indent=2)` 序列化回填
+  - `_on_accept`：解析两个 JSON 文本框，格式错误弹提示阻止保存；JSON 顶层非 object 报错；成功放入 `_result`
+- **Worker 透传**（4 个 worker 构造函数追加 `extra_payload`/`extra_headers` 参数 + 存实例属性 + 所有 LLMClient 调用点透传）：
+  - `continuation_worker.py`：构造函数 + `_effective_client` 覆盖端点 + `_run` 主 client（2 处 LLMClient）
+  - `audit_worker.py`：构造函数 + `_effective_client` 覆盖端点 + `_run` 主 client（2 处 LLMClient）
+  - `volume_orchestrator.py`：构造函数 + `_effective_client` 覆盖端点 + `run` 主 client（2 处 LLMClient）
+  - 覆盖端点场景从 `_debug_override_endpoint` dict 直接 `.get("extra_payload")` 读取
+- **Extractor 透传**（4 个 `_get_llm_client` 从 endpoint dict 读取传入 LLMClient）：
+  - `context_extractor.py` / `ontology_extractor.py` / `style_extractor.py` / `custom_audit_rule_service.py`
+- **主窗口接线**（`novelforge/ui/main_window.py` 7 处 worker 创建点）：从 endpoint dict 读取 `extra_payload`/`extra_headers` 传入 worker 构造函数（ContinuationWorker×3 + AuditWorker×3 + VolumeOrchestrator×1；L5570 处变量名为 `single_endpoint`）
+
+### 使用示例
+
+端点编辑对话框「自定义请求体字段」填入：
+```json
+{"provider_routing_strategy": {"type": "specified_providers", "providers": ["anthropic/anthropic_endpoint"]}}
+```
+发送时该字段会 deep merge 到请求体，实现 zenmux 自定义路由策略。
+
+### 测试
+
+- 导入验证：`import novelforge.services.llm_client; import novelforge.ui.settings_dialog; import novelforge.services.continuation_worker; import novelforge.services.audit_worker; import novelforge.services.volume_orchestrator; import novelforge.ui.main_window` OK
+- `_deep_merge_dict` 单元验证：`{'a':1,'b':{'c':2}}` + `{'b':{'d':3},'e':4,'f':[5]}` → `{'a': 1, 'b': {'c': 2, 'd': 3}, 'e': 4, 'f': [5]}` ✓
+- 既有测试无回归：`test_m2_prompt_assembly.py` + `test_rewrite_current_mode.py` + `test_style_extractor.py` 共 39 passed
+
+### 文档同步
+
+- `agent.md`：config.py 描述补 `extra_payload/extra_headers`；llm_client.py 描述补构造函数扩展参数 + deep merge 逻辑 + `_deep_merge_dict` 辅助函数
+- `update.md`：本条目
+
+## 2026-07-13：修复提取文风档案后无法查看的问题（存储层持久化遗漏）
+
+### 背景
+
+用户反馈：提取文风档案后点击「查看文风档案」按钮始终提示「尚未提取文风档案」。经排查根因为**存储层 `novelforge/core/storage.py` 完全遗漏了 `style_profile` 字段的持久化**，导致提取完成后数据从未真正写入数据库，重新加载项目后 `project.style_profile` 恒为 `None`。
+
+### 根因
+
+`storage.py` 中 `projects` 表的 `style_profile` 字段在 4 处全部缺失（对比 `world_ontology` 同级字段均有处理）：
+1. 建表 `CREATE TABLE` 语句无 `style_profile TEXT` 列
+2. `_migrate_projects_columns` 无 `style_profile` 列幂等迁移
+3. `save_project` INSERT/UPDATE 语句无 `style_profile` 字段写入
+4. `_row_to_project` 无 `style_profile` 字段读取
+
+链路：提取流程 `style_extractor.py` 调 `save_project` 时 `style_profile` 被丢弃 → 查看流程 `load_project` 返回的 dict 无此键 → `Project.model_validate` 取默认值 `None` → 弹「尚未提取」提示。
+
+### 核心改动
+
+- `novelforge/core/storage.py`（4 处）：
+  - 建表语句追加 `style_profile TEXT` 列
+  - `_migrate_projects_columns` 追加 `style_profile` 列幂等迁移（docstring 同步更新）
+  - `save_project` INSERT 列名/VALUES 占位符/ON CONFLICT UPDATE SET/参数元组四处同步追加 `style_profile`
+  - `_row_to_project` 追加 `style_profile` 反序列化读取
+- `novelforge/services/storage_service.py`（1 处）：
+  - `load_project` 追加 `style_profile` 的 dict→StyleProfile 显式模型还原（镜像 `world_ontology` 模式，含失败日志）
+
+### 测试
+
+- `python -m pytest tests/test_style_extractor.py -q --tb=short`：9 passed（无回归）
+- 导入验证：`import novelforge.core.storage; import novelforge.services.storage_service` OK
+- **端到端持久化验证**：构造带 `style_profile` 的 Project → `save_project` → `load_project` → 确认 `style_profile` 字段存在且 `language_texture`/`source_chapter_range` 数据完整 → `PERSISTENCE OK`
+
+### 文档同步
+
+- `agent.md`：storage.py / storage_service.py 描述为通用层描述（列迁移函数已涵盖），无需单字段更新
+- `update.md`：本条目
+
+## 2026-07-13：新增文风档案提取功能（StyleProfile 全链路）
+
+### 背景
+
+参照【世界观底层 WorldOntology】和【主角形象 ProtagonistProfile】模式，新增项目级固化的文风档案 StyleProfile，含 9 维度文笔风格量化参数（语言质感/叙事节奏/画面构建/人物塑造/情感调动/创新辨识度/主角配角配比/视角运用/时间与过渡）。全文提取一次固化到 `Project.style_profile`，不入世界书。审计阶段对照九维量化参数检查文风一致性。
+
+### 核心改动
+
+- **数据模型**（`novelforge/models/style_profile.py` 新增）：StyleProfile 含 9 维度 dict 字段 + extracted_at/source_chapter_range 元数据；`ConfigDict(populate_by_name=True)` 向后兼容
+- **Project 字段**（`novelforge/models/project.py`）：新增 `style_profile: StyleProfile | None = None`
+- **路径函数**（`novelforge/utils/paths.py`）：`get_extract_style_prompt_path` / `get_extract_style_merge_prompt_path`
+- **提取提示词**（`novelforge/resources/defaults/extract_style_prompt.txt` 新增）：8 占位符（title/author/protagonist/synopsis/world_setting/writing_style/accumulated_style/chapters_text）
+- **合并提示词**（`novelforge/resources/defaults/extract_style_merge_prompt.txt` 新增）：多批次提取结果合并
+- **破限模板**（`novelforge/resources/defaults/jailbreaks/jb_style_extraction.txt` 新增）：LOW/MID/HIGH 三档
+- **流程配置**：
+  - `novelforge/ui/flow_endpoint_dialog.py`：`FLOW_DEFINITIONS` 追加 `("style_extraction", "文风档案提取")`（总数 10→11）
+  - `novelforge/core/config.py`：`FLOW_DEFAULT_JAILBREAKS` 追加 `"style_extraction": "low"`
+- **提取服务**（`novelforge/services/style_extractor.py` 新增）：StyleExtractor 镜像 OntologyExtractor 三段式架构（拆批/增量合并/语义整合）；`extract_style_streaming` 主方法；`STYLE_DIMENSIONS` 9 字段名常量；`STYLE_EXTRACT_MAX_TOKENS=8000`/`STYLE_EXTRACT_TEMPERATURE=0.2`；固化到 `Project.style_profile` 不入世界书；try/finally 关闭 LLMClient
+- **UI 按钮**（`novelforge/ui/context_preview_panel.py`）：新增「提取文风档案」(primaryBtn) + 「查看文风档案」(secondaryBtn) 按钮，放在主角按钮后、自定义设定按钮前；新增 `extract_style_requested` / `view_style_requested` 信号；三态方法组 `start_style_extraction` / `update_style_progress` / `update_style_batch` / `finish_style_extraction` / `fail_style_extraction`；所有现有 start/finish/fail 方法的按钮启用/禁用列表同步追加
+- **主窗口接线**（`novelforge/ui/main_window.py`）：导入 StyleProfile + StyleExtractor；实例化 `self.style_extractor`；新增信号 `_style_chunk_received` / `_style_done` / `_style_batch_done` + 状态 `_style_extracting` / `_style_stream_text`；连接 `extract_style_requested` / `view_style_requested` 信号；处理器 `_on_extract_style_requested` / `_on_style_done` / `_on_view_style_requested` / `_on_style_chunk_received` / `_on_style_batch_done`；`_format_style_profile` 静态方法；`_prompt_continue_without_extraction` 追加 style_profile 参数（5 处调用点同步）；5 处 assemble 调用追加 `style_profile=` 参数
+- **上下文注入**（`novelforge/core/prompt_assembler.py`）：`assemble` 方法签名追加 `style_profile: Any = None` 参数；`_build_macro_context` 追加 `style_profile` 参数与序列化注入逻辑（兼容 model_dump/dict），供 `{{style_profile}}` 宏替换
+- **模板注入**（16 个模板文件）：`phase_single_audit` / `phase_verify` / `phase_rewrite_analysis` / `phase_audit_rewrite` / `phase_volume_outline` / `phase_outline_final` / `phase_outline_audit` / `phase_revise` / `phase_chapter_outline` / `phase_chapter_rewrite` / `phase_custom_rule_parse` / `phase_deep_analysis` / `phase_deep_analysis_merge` / `phase_writing_element_analysis` / `phase_writing_element_refinement` / `default_preset.json` 全部追加 `{{style_profile}}` 占位符
+- **审计维度增强**：
+  - `phase_single_audit.txt` 维度 2 `style`：追加九维量化参数对照检查项（当文风档案存在时）；summary 输出格式追加 `【文风一致性审计】` 标记段落；「五个固定标记段落」改为「六个」；缺失检查与验证规则同步
+  - `phase_verify.txt` 维度 8 `style`：同步九维量化参数对照检查
+
+### 测试
+
+- `tests/test_style_extractor.py`（新增）：9 个测试用例，镜像 `test_ontology_extractor.py` 结构
+  - `_split_chapters_by_token_limit` 单批次/多批次
+  - `_build_style_prompt` 8 占位符替换
+  - `_merge_style_fields` 序列化长度启发式合并 / 空字段取另一侧
+  - `extract_style_streaming` 单批次提取返回 StyleProfile / 多批次触发合并
+  - `StyleProfile` 模型 9 维度校验（默认空 dict / 接受数据）
+- `tests/test_rewrite_current_mode.py`：`test_flow_definitions_count_is_10` 更新为 `test_flow_definitions_count_is_11`（FLOW_DEFINITIONS 总数 10→11）
+- **修复 `prompt_assembler.py` bug**：`_build_macro_context` 方法签名漏了 `style_profile` 参数 + `assemble` 调用点未传参，导致 `NameError: name 'style_profile' is not defined`；已补齐签名参数与调用点传参
+- 既有测试无回归：`test_ontology_extractor.py` / `test_protagonist_extraction.py`（40 passed）/ `test_m2_prompt_assembly.py`（10 passed）/ `test_rewrite_current_mode.py`（20 passed）全部通过
+
+### 文档同步
+
+- `agent.md`：models/ 新增 `style_profile.py` 行；services/ 新增 `style_extractor.py` 行；project.py 描述补 `Project.style_profile`；设计决策第 3 条新增「文风档案提取（StyleExtractor）」要点；设计决策第 10 条 `{{style_profile}}` 宏；设计决策第 11/14 条模板占位符；模板描述同步
+- `update.md`：本条目
+
+## 2026-07-13：重写需求分析强调保全原剧情排布与检查开头结尾连贯性
+
+### 背景
+
+「重写当前章节」的需求分析阶段（phase_rewrite_analysis.txt）虽已有「重写边界最高优先」与「用户需求优先」原则，但未明确点出「保全原剧情排布是满足用户诉求的前提」这一核心取向；开头结尾连贯性检查薄弱——具体要求清单 #7 仅提「开头结尾衔接（不得为下一章铺垫）」，未覆盖开头与前一章结尾的衔接、结尾性质保全。期望着重强调：在不影响原来剧情排布发展的情况下满足用户诉求，检查开头结尾连贯性。
+
+### 核心改动
+
+- `novelforge/resources/defaults/agent/phase_rewrite_analysis.txt`：4 处强化
+  - 分析原则新增「剧情排布保全」：在不影响原剧情排布发展前提下满足用户诉求，原章节事件序列/场景顺序/转折点/伏笔布局/人物登场退场节奏为须保全的剧情骨架，冲突时建议改用续写模式
+  - 「当前章节分析」分节追加：须专门审视开头连贯性（承接前一章结尾的过渡方式）与结尾连贯性（结尾性质开放/封闭+过渡下一章+伏笔），作为重写须保全的衔接骨架
+  - 「重写要点」分节追加「开头结尾连贯性保全」要点：开头与前一章结尾自然衔接，结尾保持原性质不变（除非用户明确要求改）
+  - 「具体要求清单」#7 结构类强化：开头连贯性（与前一章结尾自然衔接，过渡方式不得因重写破坏）+ 结尾连贯性（保持原结尾性质开放/封闭不变，不得破坏与下一章衔接，不得为下一章铺垫）
+
+### 测试
+
+- `python -m pytest tests/test_rewrite_current_mode.py -q --tb=short`（20 passed，6 占位符校验通过）
+
+### 文档同步
+
+- `agent.md`：phase_rewrite_analysis.txt 描述 + 设计决策第 14 条「分析模板」描述同步
+- `update.md`：本条目
+
+## 2026-07-13：重写按钮使用续写控制面板选择的模型
+
+### 背景
+
+点击「重写」按钮时，`_on_rewrite` 方法用 `get_parameters()` 重新获取参数，但该方法不包含 `model` 字段，导致下游所有分支（缓存重写分析直接生成、缓存写作模式精炼直接生成、无缓存完整流程）回退到 `get_flow_model()` 而非使用面板当前选中的模型。期望行为：使用【重写】功能时应当使用【续写控制】面板选择的模型。
+
+### 核心改动
+
+- `novelforge/ui/main_window.py`：`_on_rewrite` 在 `params = self.continuation_panel.get_parameters()` 之后补回 `params["model"] = self.continuation_panel.get_selected_model()`，与面板自身 `_on_start_clicked` / `_on_rewrite_clicked` 的模式一致。修复覆盖三个分支：
+  - rewrite_current + 缓存分析 → `_on_rewrite_analysis_accepted` 用面板 model
+  - writing_mode + 缓存精炼 → `_on_start_writing_mode_continuation` 用面板 model
+  - 无缓存 → `_on_start_continuation_routed` → `_on_start_rewrite_current` 用面板 model
+
+### 测试
+
+- `python -m pytest tests/test_rewrite_current_mode.py tests/test_flow_plugin.py tests/test_flow_endpoint_config.py -q --tb=short`（66 passed）
+
+### 文档同步
+
+- `agent.md`：main_window.py 描述补充 `_on_rewrite` 补回 model 的说明
+- `update.md`：本条目
+
 ## 2026-07-12：v0.2.10 文档同步——补全发版后改动的文档记录
 
 ### 背景

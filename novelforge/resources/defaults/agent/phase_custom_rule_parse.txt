@@ -8,6 +8,10 @@
 {{world_ontology}}
 （若为"（无世界观底层）"则结构化时仅依据用户输入与上下文条目；否则需确保结构化后的 requirement 与 audit_criteria 不与世界观底层元规则冲突）
 
+# 文风档案（JSON，含 9 大维度量化风格参数）
+{{style_profile}}
+（若为"（无文风档案）"则结构化时忽略文风约束；否则需确保结构化后的 requirement 与 audit_criteria 不与文风档案的九维量化参数冲突）
+
 # 上下文条目
 {{context_entries}}
 （已提取的人物/地点/事件/风格/伏笔等条目，供结构化时引用具体元素，避免泛泛而谈）

@@ -1,0 +1,14 @@
+你是一位精通计算叙事学与文体学的资深分析师。以下是同一本小说分批次提取的文风档案（Style Profile），请合并为统一的 JSON 对象。
+
+# 待合并的多批次提取结果
+{{entries_blocks}}
+
+# 合并任务
+1. 消除跨块重复：同一维度参数在不同批次描述重叠时，取最完整描述
+2. 冲突消解：同一维度参数描述矛盾时，以较新批次为准（后文更能反映风格全貌）
+3. 量化指标聚合：同一量化指标（如平均句长）在多批次均有值时，取加权平均或最具代表性值
+4. 补全与连贯：各维度子参数必须完整，缺失项从前文反推补全
+5. 风格一致性：检查九维之间是否存在风格矛盾（如语体类型与修辞密度不匹配）
+
+# 输出格式
+输出严格的 StyleProfile JSON 对象，含 9 大维度字段（language_texture/narrative_rhythm/scene_construction/character_portrayal/emotion_engagement/innovation_signature/protagonist_supporting_ratio/perspective_usage/time_transition）。只输出 JSON，不要解释性文字，不要 markdown 代码块。

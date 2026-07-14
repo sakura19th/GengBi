@@ -1747,11 +1747,15 @@ class ContextExtractor:
             return None
 
         reasoning_effort = ep.get("reasoning_effort", "") or ""
+        extra_payload = ep.get("extra_payload") or {}
+        extra_headers = ep.get("extra_headers") or {}
         client = LLMClient(
             base_url=base_url,
             api_key=api_key,
             timeout=300,
             reasoning_effort=reasoning_effort,
+            extra_payload=extra_payload,
+            extra_headers=extra_headers,
         )
         model = self.config_manager.get_flow_model(flow_key) or DEFAULT_EXTRACTOR_MODEL
         return client, model

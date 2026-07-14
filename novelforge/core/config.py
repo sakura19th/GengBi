@@ -75,6 +75,7 @@ FLOW_DEFAULT_JAILBREAKS: dict[str, str] = {
     "context_extraction": "low",
     "ontology_extraction": "low",
     "protagonist_extraction": "low",
+    "style_extraction": "low",
     "custom_rule_parsing": "off",
     "writing_element_analysis": "low",
     "writing_element_refinement": "low",
@@ -317,6 +318,8 @@ class ConfigManager:
             endpoint.setdefault("models", [])
             endpoint.setdefault("enabled_models", [])
             endpoint.setdefault("reasoning_effort", "")
+            endpoint.setdefault("extra_payload", {})
+            endpoint.setdefault("extra_headers", {})
 
             self.config.setdefault("api_endpoints", []).append(endpoint)
             # 若无默认端点，设为第一个

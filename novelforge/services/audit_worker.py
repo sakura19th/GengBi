@@ -74,6 +74,8 @@ class AuditWorker(QThread):
         endpoint_id: str = "",
         debug_mode: bool = False,
         phase_name: str = "审计",
+        extra_payload: dict | None = None,
+        extra_headers: dict | None = None,
         parent=None,
     ) -> None:
         """初始化审计工作线程。
@@ -89,6 +91,8 @@ class AuditWorker(QThread):
             endpoint_id: 当前端点 ID（调试模式覆盖回传时供 dialog 默认选中）
             debug_mode: 是否开启调试模式（开启后每次 LLM 调用前弹窗确认）
             phase_name: 阶段名（用于调试弹窗标题，如「单章审计」「重写需求分析」）
+            extra_payload: 自定义请求体字段（deep merge 到 payload）
+            extra_headers: 自定义 HTTP 头（update 到 headers）
             parent: 父 QObject
         """
         super().__init__(parent)
@@ -99,6 +103,9 @@ class AuditWorker(QThread):
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort or ""
+        # 自定义请求扩展（透传给 LLMClient）
+        self.extra_payload: dict = extra_payload or {}
+        self.extra_headers: dict = extra_headers or {}
 
         # 线程安全停止标志
         self._stop_event = threading.Event()
@@ -205,6 +212,8 @@ class AuditWorker(QThread):
                 self._debug_override_endpoint.get("base_url", ""),
                 self._debug_override_api_key,
                 reasoning_effort=self.reasoning_effort,
+                extra_payload=self._debug_override_endpoint.get("extra_payload") or {},
+                extra_headers=self._debug_override_endpoint.get("extra_headers") or {},
             )
             if ep_id:
                 self._debug_clients[ep_id] = client
@@ -294,6 +303,8 @@ class AuditWorker(QThread):
                 self.base_url,
                 self.api_key,
                 reasoning_effort=self.reasoning_effort,
+                extra_payload=self.extra_payload,
+                extra_headers=self.extra_headers,
             )
         client = self._effective_client()
 

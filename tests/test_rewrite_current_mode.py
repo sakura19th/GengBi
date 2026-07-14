@@ -590,12 +590,12 @@ class TestFlowEndpointRewriteAnalysis:
             "FLOW_DEFINITIONS 应包含 rewrite_analysis 流程端点"
         )
 
-    def test_flow_definitions_count_is_10(self) -> None:
-        """FLOW_DEFINITIONS 含 10 个流程（原 7 个 + rewrite_analysis + writing_element_analysis + writing_element_refinement）。"""
+    def test_flow_definitions_count_is_11(self) -> None:
+        """FLOW_DEFINITIONS 含 11 个流程（原 7 个 + rewrite_analysis + writing_element_analysis + writing_element_refinement + style_extraction）。"""
         from novelforge.ui.flow_endpoint_dialog import FLOW_DEFINITIONS
 
-        assert len(FLOW_DEFINITIONS) == 10, (
-            f"FLOW_DEFINITIONS 应有 10 项，实际: {len(FLOW_DEFINITIONS)}"
+        assert len(FLOW_DEFINITIONS) == 11, (
+            f"FLOW_DEFINITIONS 应有 11 项，实际: {len(FLOW_DEFINITIONS)}"
         )
 
 

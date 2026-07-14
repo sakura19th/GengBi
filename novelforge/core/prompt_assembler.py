@@ -360,6 +360,7 @@ class PromptAssembler:
         world_ontology: Any = None,
         protagonist_profile: Any = None,
         custom_audit_rules: Any = None,
+        style_profile: Any = None,
         exclude_current: bool = False,
     ) -> AssembleResult:
         """组装提示词 messages。
@@ -400,6 +401,7 @@ class PromptAssembler:
             world_ontology=world_ontology, protagonist_profile=protagonist_profile,
             custom_audit_rules=custom_audit_rules,
             previous_chapter_titles=previous_chapter_titles,
+            style_profile=style_profile,
         )
 
         # M3: 构建模板渲染上下文（局部变量，线程安全；供 _process_content 使用）
@@ -664,6 +666,7 @@ class PromptAssembler:
         protagonist_profile: Any = None,
         custom_audit_rules: Any = None,
         previous_chapter_titles: str = "",
+        style_profile: Any = None,
     ) -> MacroContext:
         """构建宏替换上下文。"""
         # 获取章节标题和序号
@@ -694,53 +697,20 @@ class PromptAssembler:
             target_words=target_words,
             variable_funcs=variable_funcs,
         )
-        # 注入 world_ontology / protagonist_profile 到 extra（供 {{world_ontology}} / {{protagonist_profile}} 宏替换）
-        if world_ontology is not None:
-            try:
-                if hasattr(world_ontology, "model_dump"):
-                    ctx.extra["world_ontology"] = json.dumps(
-                        world_ontology.model_dump(mode="json"),
-                        ensure_ascii=False, indent=2,
-                    )
-                elif isinstance(world_ontology, dict):
-                    ctx.extra["world_ontology"] = json.dumps(
-                        world_ontology, ensure_ascii=False, indent=2,
-                    )
-            except Exception as e:
-                logger.debug("world_ontology 序列化失败: %s", e)
-        if protagonist_profile is not None:
-            try:
-                if hasattr(protagonist_profile, "model_dump"):
-                    ctx.extra["protagonist_profile"] = json.dumps(
-                        protagonist_profile.model_dump(mode="json"),
-                        ensure_ascii=False, indent=2,
-                    )
-                elif isinstance(protagonist_profile, dict):
-                    ctx.extra["protagonist_profile"] = json.dumps(
-                        protagonist_profile, ensure_ascii=False, indent=2,
-                    )
-            except Exception as e:
-                logger.debug("protagonist_profile 序列化失败: %s", e)
-        # 注入 custom_audit_rules 到 extra（供 {{custom_audit_rules}} 宏替换）
-        if custom_audit_rules is not None:
-            try:
-                if isinstance(custom_audit_rules, list):
-                    items = []
-                    for r in custom_audit_rules:
-                        if hasattr(r, "model_dump"):
-                            items.append(r.model_dump(mode="json"))
-                        elif isinstance(r, dict):
-                            items.append(r)
-                    ctx.extra["custom_audit_rules"] = json.dumps(
-                        items, ensure_ascii=False, indent=2,
-                    )
-                elif hasattr(custom_audit_rules, "model_dump"):
-                    ctx.extra["custom_audit_rules"] = json.dumps(
-                        custom_audit_rules.model_dump(mode="json"),
-                        ensure_ascii=False, indent=2,
-                    )
-            except Exception as e:
-                logger.debug("custom_audit_rules 序列化失败: %s", e)
+        # 注入 world_ontology / protagonist_profile / style_profile / custom_audit_rules 到 extra
+        # None 时注入占位文本（与审计模板"若为'（无XX档案）'则..."逻辑匹配）
+        ctx.extra["world_ontology"] = self._serialize_profile_or_placeholder(
+            world_ontology, "（无世界观底层）"
+        )
+        ctx.extra["protagonist_profile"] = self._serialize_profile_or_placeholder(
+            protagonist_profile, "（无主角形象档案）"
+        )
+        ctx.extra["style_profile"] = self._serialize_profile_or_placeholder(
+            style_profile, "（无文风档案）"
+        )
+        ctx.extra["custom_audit_rules"] = self._serialize_rules_or_placeholder(
+            custom_audit_rules, "（无自定义设定）"
+        )
         # 注入 previous_chapter_titles 到 extra（供 {{previous_chapter_titles}} 宏替换）
         ctx.extra["previous_chapter_titles"] = (
             previous_chapter_titles
@@ -748,6 +718,52 @@ class PromptAssembler:
             else "（无前文章节，请根据小说整体风格生成合适的章节标题）"
         )
         return ctx
+
+    @staticmethod
+    def _serialize_profile_or_placeholder(profile: Any, placeholder: str) -> str:
+        """序列化档案对象为 JSON 字符串，None 或空时返回占位文本。
+
+        与审计模板"若为'（无XX档案）'则..."逻辑匹配，确保宏替换为有意义文本。
+        """
+        if profile is None:
+            return placeholder
+        try:
+            if hasattr(profile, "model_dump"):
+                return json.dumps(
+                    profile.model_dump(mode="json"),
+                    ensure_ascii=False, indent=2,
+                )
+            if isinstance(profile, dict):
+                return json.dumps(profile, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.debug("档案序列化失败: %s", e)
+            return placeholder
+        return placeholder
+
+    @staticmethod
+    def _serialize_rules_or_placeholder(rules: Any, placeholder: str) -> str:
+        """序列化自定义规则列表为 JSON 字符串，None 或空时返回占位文本。"""
+        if rules is None:
+            return placeholder
+        try:
+            if isinstance(rules, list):
+                items = []
+                for r in rules:
+                    if hasattr(r, "model_dump"):
+                        items.append(r.model_dump(mode="json"))
+                    elif isinstance(r, dict):
+                        items.append(r)
+                if not items:
+                    return placeholder
+                return json.dumps(items, ensure_ascii=False, indent=2)
+            if hasattr(rules, "model_dump"):
+                return json.dumps(
+                    rules.model_dump(mode="json"),
+                    ensure_ascii=False, indent=2,
+                )
+        except Exception as e:
+            logger.debug("自定义规则序列化失败: %s", e)
+        return placeholder
 
     def _stage1_sort(
         self, preset: WritingPreset

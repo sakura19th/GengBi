@@ -150,6 +150,8 @@ class VolumeOrchestrator(QThread):
         custom_audit_rules: list[Any] | None = None,
         phase: str = "all",
         phase_inputs: dict[str, Any] | None = None,
+        extra_payload: dict | None = None,
+        extra_headers: dict | None = None,
         parent=None,
     ) -> None:
         """初始化卷级编排器。
@@ -180,6 +182,8 @@ class VolumeOrchestrator(QThread):
             phase: 执行阶段（"all"=完整流程，"deep_analysis"/"volume_outline"/
                 "outline_audit"/"chapter_writing"=单阶段，供 volume_phase agent 使用）
             phase_inputs: 单阶段模式的输入产物（如 {"deep_analysis": DeepAnalysis对象}）
+            extra_payload: 自定义请求体字段（deep merge 到 payload）
+            extra_headers: 自定义 HTTP 头（update 到 headers）
             parent: 父 QObject
         """
         super().__init__(parent)
@@ -187,6 +191,9 @@ class VolumeOrchestrator(QThread):
         self.api_key = api_key
         self.model = model
         self.parameters = parameters
+        # 自定义请求扩展（透传给 LLMClient）
+        self.extra_payload: dict = extra_payload or {}
+        self.extra_headers: dict = extra_headers or {}
         self.preset = preset
         self.chapters = chapters
         self.current_chapter = current_chapter
@@ -365,6 +372,8 @@ class VolumeOrchestrator(QThread):
                 self._debug_override_endpoint.get("base_url", ""),
                 self._debug_override_api_key,
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
+                extra_payload=self._debug_override_endpoint.get("extra_payload") or {},
+                extra_headers=self._debug_override_endpoint.get("extra_headers") or {},
             )
             if ep_id:
                 self._debug_clients[ep_id] = client
@@ -443,6 +452,8 @@ class VolumeOrchestrator(QThread):
                 self.base_url,
                 self.api_key,
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
+                extra_payload=self.extra_payload,
+                extra_headers=self.extra_headers,
             )
 
         try:

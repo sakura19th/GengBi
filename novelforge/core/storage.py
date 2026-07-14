@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS projects (
     chapter_split_rule TEXT DEFAULT '{}',
     world_ontology TEXT,
     worldbook_id TEXT DEFAULT '',
-    custom_audit_rules TEXT
+    custom_audit_rules TEXT,
+    style_profile TEXT
 );
 
 -- 章节元数据表（正文存文件系统）
@@ -424,7 +425,7 @@ class Storage:
         )
 
     async def _migrate_projects_columns(self) -> None:
-        """幂等迁移：为 projects 表补充 world_ontology / worldbook_id / custom_audit_rules 列。
+        """幂等迁移：为 projects 表补充 world_ontology / worldbook_id / custom_audit_rules / style_profile 列。
 
         SQLite 不支持 ADD COLUMN IF NOT EXISTS，需先查 PRAGMA table_info
         检测列是否存在，再决定是否 ALTER TABLE。
@@ -449,6 +450,11 @@ class Storage:
                 "ALTER TABLE projects ADD COLUMN custom_audit_rules TEXT"
             )
             logger.info("已为 projects 表添加 custom_audit_rules 列")
+        if "style_profile" not in column_names:
+            await self._conn.execute(
+                "ALTER TABLE projects ADD COLUMN style_profile TEXT"
+            )
+            logger.info("已为 projects 表添加 style_profile 列")
 
     async def _migrate_chapters_columns(self) -> None:
         """幂等迁移：为旧版 chapters 表补充 protagonist_profile 列。
@@ -507,8 +513,8 @@ class Storage:
             """INSERT INTO projects
                (id, name, created_at, updated_at, source_file, novel_profile,
                 preset_id, regex_script_ids, extract_config, chapter_split_rule,
-                world_ontology, worldbook_id, custom_audit_rules)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                world_ontology, worldbook_id, custom_audit_rules, style_profile)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
                    name=excluded.name,
                    created_at=excluded.created_at,
@@ -521,7 +527,8 @@ class Storage:
                    chapter_split_rule=excluded.chapter_split_rule,
                    world_ontology=excluded.world_ontology,
                    worldbook_id=excluded.worldbook_id,
-                   custom_audit_rules=excluded.custom_audit_rules""",
+                   custom_audit_rules=excluded.custom_audit_rules,
+                   style_profile=excluded.style_profile""",
             (
                 project["id"],
                 project.get("name", ""),
@@ -541,6 +548,9 @@ class Storage:
                 project.get("worldbook_id", ""),
                 json.dumps(project.get("custom_audit_rules"), ensure_ascii=False, default=str)
                 if project.get("custom_audit_rules")
+                else None,
+                json.dumps(project.get("style_profile"), ensure_ascii=False, default=str)
+                if project.get("style_profile") is not None
                 else None,
             ),
         )
@@ -601,6 +611,7 @@ class Storage:
             "world_ontology": json.loads(row["world_ontology"]) if row["world_ontology"] else None,
             "worldbook_id": row["worldbook_id"] if row["worldbook_id"] else "",
             "custom_audit_rules": json.loads(row["custom_audit_rules"]) if row["custom_audit_rules"] else [],
+            "style_profile": json.loads(row["style_profile"]) if row["style_profile"] else None,
         }
 
     # ===== 章节操作 =====

@@ -125,6 +125,14 @@ class StorageService:
                 else:
                     restored.append(item)
             data["custom_audit_rules"] = restored
+        # style_profile 从 DB 加载为 dict，还原为 StyleProfile 实例
+        sp = data.get("style_profile")
+        if isinstance(sp, dict):
+            try:
+                from novelforge.models.style_profile import StyleProfile
+                data["style_profile"] = StyleProfile.model_validate(sp)
+            except Exception:
+                logger.warning("style_profile 还原失败，保留 dict")
         return Project.model_validate(data)
 
     def list_projects(self) -> list[Project]:

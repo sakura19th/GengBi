@@ -27,6 +27,10 @@
 {{world_ontology}}
 （若为"（无世界观底层）"则跳过世界观一致性维度审计；否则请严格对照此元规则审计大纲中的事件/设定是否符合因果架构、时空规则、守恒律）
 
+# 文风档案（JSON，含 9 大维度量化风格参数）
+{{style_profile}}
+（若为"（无文风档案）"则跳过文风一致性维度审计；否则请严格对照此九维量化参数审计大纲中的文风规划是否符合前文风格特征）
+
 # 自定义设定/审计必查项
 {{custom_audit_rules}}
 （若为"（无自定义设定）"则跳过 custom_rules_compliance 维度审计；否则**必须严格对照每条规则的 audit_criteria 逐条检查**，违反 severity=critical 的规则时该维度 score ≤ 3，整体 passed=false）

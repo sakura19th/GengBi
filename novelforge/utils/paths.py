@@ -98,6 +98,23 @@ def get_extract_protagonist_merge_prompt_path() -> Path:
     return get_resource_path("defaults", "extract_protagonist_merge_prompt.txt")
 
 
+def get_extract_style_prompt_path() -> Path:
+    """获取文风档案提取提示词路径。
+
+    提取 StyleProfile 9 大维度文笔风格参数，
+    支持 token 拆分 + 增量更新（含 ``{{accumulated_style}}`` 占位符）。
+    """
+    return get_resource_path("defaults", "extract_style_prompt.txt")
+
+
+def get_extract_style_merge_prompt_path() -> Path:
+    """获取文风档案合并提示词路径。
+
+    多批次提取后，由该模板指导 LLM 合并为统一的 StyleProfile JSON 对象。
+    """
+    return get_resource_path("defaults", "extract_style_merge_prompt.txt")
+
+
 def get_default_regex_scripts_path() -> Path:
     """获取默认正则脚本文件路径。"""
     return get_resource_path("defaults", "default_regex_scripts.json")

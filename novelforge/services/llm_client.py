@@ -85,6 +85,20 @@ class StreamResult:
     interrupt_reason: str = ""
 
 
+def _deep_merge_dict(base: dict, extra: dict) -> None:
+    """将 extra deep merge 到 base（原地修改）。
+
+    - extra 中的标量值覆盖 base 同名键
+    - extra 中的 dict 值与 base 同名 dict 递归合并
+    - extra 中的 list 值直接覆盖 base 同名键
+    """
+    for k, v in extra.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_merge_dict(base[k], v)
+        else:
+            base[k] = v
+
+
 class LLMClient:
     """LLM 流式调用客户端。
 
@@ -104,6 +118,8 @@ class LLMClient:
         api_key: str,
         timeout: float = 300.0,
         reasoning_effort: str | None = None,
+        extra_payload: dict | None = None,
+        extra_headers: dict | None = None,
     ) -> None:
         """初始化 LLM 客户端。
 
@@ -113,6 +129,9 @@ class LLMClient:
             timeout: 超时秒数（非流式=total 总超时；流式=sock_read 分块间超时）
             reasoning_effort: 思考强度（OpenAI o 系列/DeepSeek V4 等 OpenAI 兼容网关
                 支持，取值 auto/minimal/low/medium/high/max；空串/none/off 表示不发送）
+            extra_payload: 自定义请求体字段（deep merge 到 payload，如 zenmux
+                的 provider_routing_strategy）
+            extra_headers: 自定义 HTTP 头（update 到 headers，可覆盖默认头）
         """
         # 参数校验
         if not (base_url.startswith("http://") or base_url.startswith("https://")):
@@ -132,6 +151,9 @@ class LLMClient:
         self.api_key = api_key
         # 思考强度：非空且不属于禁用集合时写入 payload
         self.reasoning_effort = reasoning_effort or ""
+        # 自定义扩展：payload 字段 deep merge，HTTP 头 update
+        self.extra_payload: dict = extra_payload or {}
+        self.extra_headers: dict = extra_headers or {}
         # 非流式：total 总超时
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         # 流式：无 total 限制，sock_read 控制分块间超时（检测死连接，不杀长流）
@@ -267,12 +289,18 @@ class LLMClient:
             payload["reasoning_effort"] = effort
         # 按模型类型过滤不支持的参数（Grok 等）
         self._filter_unsupported_params(payload, model)
+        # 自定义 payload 字段 deep merge（如 zenmux provider_routing_strategy）
+        if self.extra_payload:
+            _deep_merge_dict(payload, self.extra_payload)
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }
+        # 自定义 HTTP 头合并（可覆盖默认头）
+        if self.extra_headers:
+            headers.update(self.extra_headers)
 
         retry_count = 0
         last_error: Exception | None = None
@@ -526,12 +554,18 @@ class LLMClient:
             payload["reasoning_effort"] = effort
         # 按模型类型过滤不支持的参数（Grok 等）
         self._filter_unsupported_params(payload, model)
+        # 自定义 payload 字段 deep merge（如 zenmux provider_routing_strategy）
+        if self.extra_payload:
+            _deep_merge_dict(payload, self.extra_payload)
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        # 自定义 HTTP 头合并（可覆盖默认头）
+        if self.extra_headers:
+            headers.update(self.extra_headers)
 
         retry_count = 0
         last_error: Exception | None = None
@@ -623,6 +657,9 @@ class LLMClient:
         """
         url = f"{self.base_url}/models"
         headers = {"Authorization": f"Bearer {self.api_key}"}
+        # 自定义 HTTP 头合并（GET /models 也可能需要自定义头）
+        if self.extra_headers:
+            headers.update(self.extra_headers)
 
         try:
             session = await self._get_session()

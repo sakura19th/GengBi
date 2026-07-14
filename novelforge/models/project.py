@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from novelforge.models.custom_audit_rule import CustomAuditRule
 from novelforge.models.ontology import WorldOntology
+from novelforge.models.style_profile import StyleProfile
 
 
 class ManualOverride(BaseModel):
@@ -90,6 +91,7 @@ class Project(BaseModel):
     chapter_split_rule: ChapterSplitRule = Field(default_factory=ChapterSplitRule)
     worldbook_id: str = ""  # 项目专属世界书 ID（存储世界观底层条目）
     world_ontology: WorldOntology | None = None  # WorldOntology 模型实例（全文提取一次固化）
+    style_profile: StyleProfile | None = None  # StyleProfile 模型实例（全文提取一次固化，九维文笔风格参数）
     custom_audit_rules: list[CustomAuditRule] = Field(default_factory=list)  # 自定义设定全局共享
 
     @field_validator("id", "preset_id", "worldbook_id")

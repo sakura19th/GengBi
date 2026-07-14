@@ -39,6 +39,7 @@ from novelforge.models.project import (
     Project,
 )
 from novelforge.models.protagonist import ProtagonistProfile
+from novelforge.models.style_profile import StyleProfile
 from novelforge.models.regex import (
     PLACEMENT_AI_OUTPUT,
     PLACEMENT_USER_INPUT,
@@ -98,6 +99,7 @@ __all__ = [
     # 底层世界观与主角形象
     "WorldOntology",
     "ProtagonistProfile",
+    "StyleProfile",
     # 预设
     "Prompt",
     "PromptOrderEntry",

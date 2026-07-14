@@ -50,6 +50,7 @@ from novelforge.core.template_engine import TemplateEngine
 from novelforge.core.token_counter import TokenCounter
 from novelforge.core.variable_store import VariableStore
 from novelforge.models import Chapter, Continuation, ProtagonistProfile, VolumeRunConfig, WritingPreset
+from novelforge.models.style_profile import StyleProfile
 from novelforge.services.chapter_service import ChapterOperation, ChapterService
 from novelforge.services.context_extractor import ContextExtractor, ExtractResult
 from novelforge.services.continuation_worker import (
@@ -66,6 +67,7 @@ from novelforge.services.history_service import HistoryService
 from novelforge.services.importer import TxtImporter
 from novelforge.services.jailbreak_provider import JailbreakProvider
 from novelforge.services.ontology_extractor import OntologyExtractor
+from novelforge.services.style_extractor import StyleExtractor
 from novelforge.services.preset_service import PresetService
 from novelforge.services.regex_service import RegexService
 from novelforge.services.storage_service import StorageService
@@ -189,6 +191,9 @@ class MainWindow(QMainWindow):
     _ontology_chunk_received = Signal(str)  # 世界观提取 chunk（跨线程）
     _ontology_done = Signal(object, str)    # 世界观提取完成（跨线程）：ontology, status
     _ontology_batch_done = Signal(int, int) # 世界观提取批次完成（跨线程）
+    _style_chunk_received = Signal(str)     # 文风档案提取 chunk（跨线程）
+    _style_done = Signal(object, str)       # 文风档案提取完成（跨线程）：style_profile, status
+    _style_batch_done = Signal(int, int)    # 文风档案提取批次完成（跨线程）
     _protagonist_chunk_received = Signal(str)  # 主角形象提取 chunk（跨线程）
     _protagonist_done = Signal(object, str)    # 主角形象提取完成（跨线程）：profile, status
     _protagonist_batch_done = Signal(int, int) # 主角形象提取批次完成（跨线程）
@@ -232,6 +237,10 @@ class MainWindow(QMainWindow):
         )
         # 世界观底层提取器（全文拆分分析提取 7 维度 WorldOntology）
         self.ontology_extractor = OntologyExtractor(
+            self.storage_service, config_manager, token_counter=self.token_counter
+        )
+        # 文风档案提取器（全文拆分分析提取 9 维度 StyleProfile）
+        self.style_extractor = StyleExtractor(
             self.storage_service, config_manager, token_counter=self.token_counter
         )
         # 自定义设定/审计必查项 AI 结构化服务（用户输入 → AI 结构化为 CustomAuditRule）
@@ -302,6 +311,8 @@ class MainWindow(QMainWindow):
         self._extract_stream_text_by_chapter: dict[str, str] = {}  # 上下文提取流式文本
         self._ontology_extracting: bool = False  # 世界观提取中标志（项目级）
         self._ontology_stream_text: str = ""  # 世界观提取流式文本缓冲
+        self._style_extracting: bool = False  # 文风档案提取中标志（项目级）
+        self._style_stream_text: str = ""  # 文风档案提取流式文本缓冲
         self._protagonist_extracting: bool = False  # 主角形象提取中标志（章节级）
         self._protagonist_stream_text: str = ""  # 主角形象提取流式文本缓冲
         self._protagonist_stream_text_by_chapter: dict[str, str] = {}  # 按章节缓冲主角提取流式文本
@@ -340,6 +351,10 @@ class MainWindow(QMainWindow):
         self._ontology_chunk_received.connect(self._on_ontology_chunk_received)
         self._ontology_done.connect(self._on_ontology_done)
         self._ontology_batch_done.connect(self._on_ontology_batch_done)
+        # 连接文风档案提取信号（跨线程安全传递）
+        self._style_chunk_received.connect(self._on_style_chunk_received)
+        self._style_done.connect(self._on_style_done)
+        self._style_batch_done.connect(self._on_style_batch_done)
         # 连接主角形象提取信号（跨线程安全传递）
         self._protagonist_chunk_received.connect(self._on_protagonist_chunk_received)
         self._protagonist_done.connect(self._on_protagonist_done)
@@ -498,6 +513,8 @@ class MainWindow(QMainWindow):
         context_panel.extract_requested.connect(self._on_extract_requested)
         context_panel.extract_ontology_requested.connect(self._on_extract_ontology_requested)
         context_panel.view_ontology_requested.connect(self._on_view_ontology_requested)
+        context_panel.extract_style_requested.connect(self._on_extract_style_requested)
+        context_panel.view_style_requested.connect(self._on_view_style_requested)
         context_panel.extract_protagonist_requested.connect(self._on_extract_protagonist_requested)
         context_panel.view_protagonist_requested.connect(self._on_view_protagonist_requested)
         context_panel.add_custom_rule_requested.connect(self._on_add_custom_rule_requested)
@@ -1146,8 +1163,9 @@ class MainWindow(QMainWindow):
         entries: list,
         world_ontology,
         protagonist_profile,
+        style_profile=None,
     ) -> bool:
-        """检查上下文/世界观/主角是否未提取，弹合并提示对话框。
+        """检查上下文/世界观/主角/文风是否未提取，弹合并提示对话框。
 
         返回 True 表示用户选择继续不提取生成，False 表示取消。
         """
@@ -1158,6 +1176,8 @@ class MainWindow(QMainWindow):
             missing.append("世界观底层")
         if protagonist_profile is None:
             missing.append("主角形象")
+        if style_profile is None:
+            missing.append("文风档案")
 
         if not missing:
             return True  # 全部已提取，直接放行
@@ -1782,7 +1802,8 @@ class MainWindow(QMainWindow):
             project = self.storage_service.load_project(self._current_project_id)
         wo_for_check = project.world_ontology if project else None
         pp_for_check = self._protagonist_profile_by_chapter.get(self._current_chapter.id) if self._current_chapter else None
-        if not self._prompt_continue_without_extraction(entries, wo_for_check, pp_for_check):
+        sp_for_check = project.style_profile if project else None
+        if not self._prompt_continue_without_extraction(entries, wo_for_check, pp_for_check, sp_for_check):
             return
 
         # 确保章节正文已加载（list_chapters 只加载元数据）
@@ -1841,6 +1862,7 @@ class MainWindow(QMainWindow):
                     self._current_chapter.id if self._current_chapter else ""
                 ),
                 custom_audit_rules=project.custom_audit_rules if project else None,
+                style_profile=project.style_profile if project else None,
             )
         except Exception as e:
             logger.error("提示词组装失败: %s", e, exc_info=True)
@@ -1938,6 +1960,8 @@ class MainWindow(QMainWindow):
             extracted_context_snapshot=context_snapshot,
             endpoint_id=endpoint.get("id", ""),
             debug_mode=self._debug_mode,
+            extra_payload=endpoint.get("extra_payload") or {},
+            extra_headers=endpoint.get("extra_headers") or {},
             parent=self,
         )
 
@@ -2204,7 +2228,8 @@ class MainWindow(QMainWindow):
             project = self.storage_service.load_project(self._current_project_id)
         wo_for_check = project.world_ontology if project else None
         pp_for_check = self._protagonist_profile_by_chapter.get(self._current_chapter.id) if self._current_chapter else None
-        if not self._prompt_continue_without_extraction(entries, wo_for_check, pp_for_check):
+        sp_for_check = project.style_profile if project else None
+        if not self._prompt_continue_without_extraction(entries, wo_for_check, pp_for_check, sp_for_check):
             return None
 
         # 确保章节正文已加载（list_chapters 只加载元数据）
@@ -2348,6 +2373,8 @@ class MainWindow(QMainWindow):
             custom_audit_rules=project.custom_audit_rules if project else None,
             phase=phase,
             phase_inputs=self._volume_state,
+            extra_payload=endpoint.get("extra_payload") or {},
+            extra_headers=endpoint.get("extra_headers") or {},
             parent=self,
         )
         self._volume_orchestrator.debug_mode = self._debug_mode
@@ -3438,6 +3465,12 @@ class MainWindow(QMainWindow):
                 chapter_metadata=chapter_metadata,
                 user_input=user_input,
                 lookback_chapters=lookback_chapters,
+                world_ontology=project.world_ontology if project else None,
+                protagonist_profile=self._protagonist_profile_by_chapter.get(
+                    self._current_chapter.id if self._current_chapter else ""
+                ),
+                custom_audit_rules=project.custom_audit_rules if project else None,
+                style_profile=project.style_profile if project else None,
             )
         except Exception as e:
             logger.error("提示词组装失败: %s", e, exc_info=True)
@@ -3633,6 +3666,167 @@ class MainWindow(QMainWindow):
         text = self._format_ontology_for_display(wo)
         dialog = QDialog(self)
         dialog.setWindowTitle("世界观底层")
+        dialog.resize(800, 600)
+        layout = QVBoxLayout(dialog)
+        edit = QPlainTextEdit()
+        edit.setReadOnly(True)
+        edit.setPlainText(text)
+        layout.addWidget(edit)
+        btn = QPushButton("关闭")
+        btn.clicked.connect(dialog.accept)
+        layout.addWidget(btn)
+        dialog.exec()
+
+    def _on_extract_style_requested(self) -> None:
+        """提取文风档案（非阻塞，流式进度）。
+
+        用户在上下文预览面板点击"提取文风档案"按钮时触发。
+        全文拆分分析提取 9 维度 StyleProfile，固化到 Project.style_profile。
+        """
+        if not self._current_chapter:
+            QMessageBox.warning(self, "提示", "请先选择章节")
+            return
+
+        # 确保章节正文已加载（list_chapters 只加载元数据）
+        self._ensure_chapter_contents()
+
+        endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            self._on_open_settings()
+            return
+
+        if not self._current_chapters:
+            QMessageBox.warning(self, "提示", "无章节可提取文风档案")
+            return
+
+        # 加载项目对象
+        project = None
+        if self._current_project_id:
+            project = self.storage_service.load_project(self._current_project_id)
+        if project is None:
+            QMessageBox.warning(self, "提示", "项目加载失败")
+            return
+
+        # 读取 token_limit 配置（与上下文提取一致）
+        config = self.continuation_panel.context_preview_panel.get_lookback_config()
+        token_limit_override = config.get("token_limit", 0)
+
+        # 禁用按钮防止重复点击 + 启动流式进度展示
+        context_panel = self.continuation_panel.context_preview_panel
+        # 标记文风档案提取进行中（项目级，章节切换后切回任意章节均恢复 UI）
+        self._style_extracting = True
+        self._style_stream_text = ""
+        context_panel.start_style_extraction()
+        self._set_status_message("正在提取文风档案（流式）...")
+
+        # 非阻塞提交：用 run_coroutine_threadsafe + 回调
+        from novelforge.services.async_runner import AsyncLoopRunner
+
+        runner = AsyncLoopRunner.instance()
+        loop = runner._loop
+
+        def on_chunk(text: str) -> None:
+            self._style_chunk_received.emit(text)
+
+        def on_batch_complete(batch_idx: int, total_batches: int) -> None:
+            self._style_batch_done.emit(batch_idx, total_batches)
+
+        future = asyncio.run_coroutine_threadsafe(
+            self.style_extractor.extract_style_streaming(
+                project=project,
+                chapters=self._current_chapters,
+                token_limit=token_limit_override,
+                on_chunk=on_chunk,
+                on_batch_complete=on_batch_complete,
+                jailbreak_text=self._get_flow_jailbreak_text("style_extraction"),
+            ),
+            loop,
+        )
+
+        def on_done(fut) -> None:
+            try:
+                style_profile, status = fut.result()
+                self._style_done.emit(style_profile, status)
+            except Exception as e:
+                logger.error("文风档案提取异常: %s", e, exc_info=True)
+                self._style_done.emit(None, f"failed: {e}")
+
+        future.add_done_callback(on_done)
+
+    @Slot(str)
+    def _on_style_chunk_received(self, text: str) -> None:
+        """文风档案提取 chunk 回调：缓冲，面板处于提取态时更新 UI。
+
+        文风档案为项目级，章节切换后面板 _is_extracting 被重置；切回任意章节时
+        由 _load_context_entries_for_chapter 调 restore_extraction_state 恢复，
+        此处仅当面板仍处于提取态时更新 UI，避免污染新章节视图。
+        """
+        self._style_stream_text += text
+        context_panel = self.continuation_panel.context_preview_panel
+        if context_panel._is_extracting:
+            context_panel.update_style_progress(text)
+
+    @Slot(int, int)
+    def _on_style_batch_done(self, batch_idx: int, total_batches: int) -> None:
+        """文风档案提取批次完成回调（UI 线程执行，由 Signal 触发）。"""
+        context_panel = self.continuation_panel.context_preview_panel
+        context_panel.update_style_batch(batch_idx, total_batches)
+        self._set_status_message(
+            f"文风档案提取进度: 第 {batch_idx}/{total_batches} 批次完成"
+        )
+
+    @Slot(object, str)
+    def _on_style_done(self, style_profile, status: str) -> None:
+        """文风档案提取完成回调：清理状态标记，面板处于提取态时更新 UI。"""
+        context_panel = self.continuation_panel.context_preview_panel
+        # 面板处于提取态（用户未切走，或切回发起章节已恢复）时更新 UI
+        panel_active = context_panel._is_extracting
+
+        if style_profile is None:
+            if panel_active:
+                context_panel.fail_style_extraction(status)
+            self._set_status_message(f"文风档案提取失败: {status}")
+            QMessageBox.critical(self, "提取失败", f"文风档案提取失败: {status}")
+        else:
+            # 协程内已通过 await 异步存储直连保存（避免重入死锁）
+            if panel_active:
+                context_panel.finish_style_extraction(status)
+            if "保存失败" in status:
+                self._set_status_message(f"文风档案提取完成但保存失败: {status}")
+                QMessageBox.warning(self, "保存警告", f"文风档案已提取但保存失败: {status}")
+            else:
+                self._set_status_message("文风档案提取完成，已固化到项目")
+
+        # 清理状态标记与缓冲（所有分支均清理）
+        self._style_extracting = False
+        self._style_stream_text = ""
+
+    def _on_view_style_requested(self) -> None:
+        """查看已提取的文风档案。"""
+        if not self._current_project_id:
+            QMessageBox.warning(self, "提示", "请先选择项目")
+            return
+        try:
+            project = self.storage_service.load_project(self._current_project_id)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"加载项目失败: {e}")
+            return
+        if project is None or project.style_profile is None:
+            QMessageBox.information(
+                self, "提示", "尚未提取文风档案，请先点击「提取文风档案」按钮"
+            )
+            return
+        # 格式化展示：兼容 dict 与 StyleProfile 实例
+        sp = project.style_profile
+        if isinstance(sp, dict):
+            try:
+                sp = StyleProfile.model_validate(sp)
+            except Exception:
+                pass
+        text = self._format_style_profile(sp)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("文风档案")
         dialog.resize(800, 600)
         layout = QVBoxLayout(dialog)
         edit = QPlainTextEdit()
@@ -4180,6 +4374,9 @@ class MainWindow(QMainWindow):
             # 移除缓存键后设置参数（避免缓存键污染面板参数）
             self.continuation_panel.set_parameters(last_params)
             params = self.continuation_panel.get_parameters()
+            # 补回面板当前选中的模型（get_parameters 不含 model，需显式补充，
+            # 与 _on_start_clicked / _on_rewrite_clicked 模式一致）
+            params["model"] = self.continuation_panel.get_selected_model()
 
         mode = self.continuation_panel.get_mode()
 
@@ -4360,6 +4557,20 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         return "（无主角形象档案）"
+
+    @staticmethod
+    def _format_style_profile(sp) -> str:
+        """格式化文风档案为 JSON 字符串。"""
+        if sp is None:
+            return "（无文风档案）"
+        try:
+            if hasattr(sp, "model_dump"):
+                return json.dumps(sp.model_dump(mode="json"), ensure_ascii=False, indent=2)
+            if isinstance(sp, dict):
+                return json.dumps(sp, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return "（无文风档案）"
 
     @staticmethod
     def _format_custom_audit_rules(rules: list) -> str:
@@ -4592,12 +4803,16 @@ class MainWindow(QMainWindow):
             else self._protagonist_profile_by_chapter.get(self._current_chapter.id)
         )
         protagonist_profile_str = self._format_protagonist_profile(protagonist_profile)
+        style_profile_str = self._format_style_profile(
+            project.style_profile if project else None
+        )
 
         # 简单字符串替换（与 VolumeOrchestrator 一致，不用 MacroEngine）
         rendered = template.replace("{{user_input}}", user_input)
         rendered = rendered.replace("{{written_text}}", swipe.content)
         rendered = rendered.replace("{{world_ontology}}", world_ontology_str)
         rendered = rendered.replace("{{protagonist_profile}}", protagonist_profile_str)
+        rendered = rendered.replace("{{style_profile}}", style_profile_str)
         custom_rules_str = self._format_custom_audit_rules(
             project.custom_audit_rules if project else None
         )
@@ -4639,6 +4854,8 @@ class MainWindow(QMainWindow):
             endpoint_id=endpoint.get("id", ""),
             debug_mode=self._debug_mode,
             phase_name="单章审计",
+            extra_payload=endpoint.get("extra_payload") or {},
+            extra_headers=endpoint.get("extra_headers") or {},
             parent=self,
         )
 
@@ -4780,6 +4997,9 @@ class MainWindow(QMainWindow):
                     self._current_chapter.id
                 )
         protagonist_profile_str = self._format_protagonist_profile(protagonist_profile)
+        style_profile_str = self._format_style_profile(
+            project.style_profile if project else None
+        )
         custom_rules_str = self._format_custom_audit_rules(
             project.custom_audit_rules if project else None
         )
@@ -4789,6 +5009,7 @@ class MainWindow(QMainWindow):
         rendered = rendered.replace("{{critique}}", audit_text)
         rendered = rendered.replace("{{world_ontology}}", world_ontology_str)
         rendered = rendered.replace("{{protagonist_profile}}", protagonist_profile_str)
+        rendered = rendered.replace("{{style_profile}}", style_profile_str)
         rendered = rendered.replace("{{custom_audit_rules}}", custom_rules_str)
         rendered = rendered.replace("{{previous_chapters_text}}", "")
         rendered = rendered.replace("{{chapter_plan}}", "（无卷大纲章节规划）")
@@ -4875,6 +5096,8 @@ class MainWindow(QMainWindow):
             regex_script_ids=regex_script_ids,
             endpoint_id=endpoint.get("id", ""),
             debug_mode=self._debug_mode,
+            extra_payload=endpoint.get("extra_payload") or {},
+            extra_headers=endpoint.get("extra_headers") or {},
             parent=self,
         )
 
@@ -5025,7 +5248,8 @@ class MainWindow(QMainWindow):
             project = self.storage_service.load_project(self._current_project_id)
         wo_for_check = project.world_ontology if project else None
         pp_for_check = self._protagonist_profile_by_chapter.get(self._current_chapter.id) if self._current_chapter else None
-        if not self._prompt_continue_without_extraction(entries, wo_for_check, pp_for_check):
+        sp_for_check = project.style_profile if project else None
+        if not self._prompt_continue_without_extraction(entries, wo_for_check, pp_for_check, sp_for_check):
             return
 
         # 确保章节正文已加载
@@ -5054,6 +5278,9 @@ class MainWindow(QMainWindow):
                     self._current_chapter.id
                 )
         protagonist_profile_str = self._format_protagonist_profile(protagonist_profile)
+        style_profile_str = self._format_style_profile(
+            project.style_profile if project else None
+        )
         custom_rules_str = self._format_custom_audit_rules(
             project.custom_audit_rules if project else None
         )
@@ -5064,6 +5291,7 @@ class MainWindow(QMainWindow):
         rendered = rendered.replace("{{user_input}}", user_input)
         rendered = rendered.replace("{{world_ontology}}", world_ontology_str)
         rendered = rendered.replace("{{protagonist_profile}}", protagonist_profile_str)
+        rendered = rendered.replace("{{style_profile}}", style_profile_str)
         rendered = rendered.replace("{{custom_audit_rules}}", custom_rules_str)
         rendered = rendered.replace("{{context_entries}}", context_entries_str)
 
@@ -5103,6 +5331,8 @@ class MainWindow(QMainWindow):
             endpoint_id=endpoint.get("id", ""),
             debug_mode=self._debug_mode,
             phase_name="重写需求分析",
+            extra_payload=endpoint.get("extra_payload") or {},
+            extra_headers=endpoint.get("extra_headers") or {},
             parent=self,
         )
 
@@ -5221,7 +5451,8 @@ class MainWindow(QMainWindow):
         entries = self._merge_worldbook_entries(raw_entries)
         wo_for_check = project.world_ontology if project else None
         pp_for_check = self._protagonist_profile_by_chapter.get(rewrite_cid) if rewrite_cid else None
-        if not self._prompt_continue_without_extraction(entries, wo_for_check, pp_for_check):
+        sp_for_check = project.style_profile if project else None
+        if not self._prompt_continue_without_extraction(entries, wo_for_check, pp_for_check, sp_for_check):
             self._rewrite_current_chapter_id = None
             return
 
@@ -5276,6 +5507,7 @@ class MainWindow(QMainWindow):
                 world_ontology=project.world_ontology if project else None,
                 protagonist_profile=self._protagonist_profile_by_chapter.get(rewrite_cid),
                 custom_audit_rules=project.custom_audit_rules if project else None,
+                style_profile=project.style_profile if project else None,
                 exclude_current=True,
             )
         except Exception as e:
@@ -5371,6 +5603,8 @@ class MainWindow(QMainWindow):
             extracted_context_snapshot=context_snapshot,
             endpoint_id=single_endpoint.get("id", ""),
             debug_mode=self._debug_mode,
+            extra_payload=single_endpoint.get("extra_payload") or {},
+            extra_headers=single_endpoint.get("extra_headers") or {},
             parent=self,
         )
 
@@ -5460,8 +5694,9 @@ class MainWindow(QMainWindow):
             if self._current_chapter
             else None
         )
+        sp_for_check = project.style_profile if project else None
         if not self._prompt_continue_without_extraction(
-            entries, wo_for_check, pp_for_check
+            entries, wo_for_check, pp_for_check, sp_for_check
         ):
             return
 
@@ -5491,6 +5726,9 @@ class MainWindow(QMainWindow):
                     self._current_chapter.id
                 )
         protagonist_profile_str = self._format_protagonist_profile(protagonist_profile)
+        style_profile_str = self._format_style_profile(
+            project.style_profile if project else None
+        )
         custom_rules_str = self._format_custom_audit_rules(
             project.custom_audit_rules if project else None
         )
@@ -5502,6 +5740,7 @@ class MainWindow(QMainWindow):
         rendered = template.replace("{{user_input}}", user_input)
         rendered = rendered.replace("{{world_ontology}}", world_ontology_str)
         rendered = rendered.replace("{{protagonist_profile}}", protagonist_profile_str)
+        rendered = rendered.replace("{{style_profile}}", style_profile_str)
         rendered = rendered.replace("{{custom_audit_rules}}", custom_rules_str)
         rendered = rendered.replace("{{context_entries}}", context_entries_str)
         rendered = rendered.replace("{{previous_chapters_text}}", previous_chapters_text)
@@ -5542,6 +5781,8 @@ class MainWindow(QMainWindow):
             endpoint_id=endpoint.get("id", ""),
             debug_mode=self._debug_mode,
             phase_name=phase_name,
+            extra_payload=endpoint.get("extra_payload") or {},
+            extra_headers=endpoint.get("extra_headers") or {},
             parent=self,
         )
 
