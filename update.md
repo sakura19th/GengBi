@@ -1,5 +1,45 @@
 # 更新日志
 
+## 2026-07-16：修复上下文提取 JSON 被 max_tokens 截断问题
+
+### 背景
+
+用户反馈上下文提取报错 `Unterminated string starting at: line 293 column 16 (char 9959), content=\`\`\`json`。日志中 `content=` 后的 ` ```json ` 是原始 LLM 响应前 200 字符（用于调试），实际解析流程会先 `strip_markdown_fences` 去除围栏再 `json.loads`。
+
+### 根因
+
+- `EXTRACT_MAX_TOKENS = 5000` 限制 LLM 单次响应最多 5000 token（发送给 API 的 `max_tokens` 参数，与 UI 的 `token_limit` 控制输入批次不同）
+- 报错位置 char 9959 约 5000 token，正好撞上 5000 上限
+- 当单批章节包含大量角色/地点/事件时，LLM 生成的 JSON 在中间被截断（`finish_reason="length"`），字符串未闭合 → "Unterminated string"
+- 其他提取器（ontology/style）max_tokens 已是 8000，唯 context_extractor 偏低
+
+### 核心改动
+
+- **调高 max_tokens 常量**（`novelforge/services/context_extractor.py`）：
+  - `EXTRACT_MAX_TOKENS`：5000 → 16000
+  - `PROTAGONIST_EXTRACT_MAX_TOKENS`：6000 → 16000
+- **非流式路径增加 `finish_reason == "length"` 截断检测**（4 处：批次提取/信息汇总/主角形象批次/主角形象汇总）：检测到截断时记录 warning 日志，不影响后续解析流程
+- **流式路径增加 `finish_reason == "length"` 诊断**（4 处对应）：break 前识别是正常结束还是截断，截断时记录 warning
+- **JSON 解析失败日志增加 `finish_reason` 字段**（2 处：批次提取/信息汇总）：便于诊断是截断还是其他原因
+- **`_parse_extract_response` / `_parse_protagonist_response` 增加第三层宽松回退**：镜像 `json_utils.parse_json_response` 模式，提取第一个 `[`/`{` 到最后一个 `]`/`}` 之间子串重试（对截断无效，但能处理 LLM 输出前后多余文本的情况）
+
+### 不影响功能的保证
+
+- 所有诊断增强仅记录日志，不改变重试逻辑、不改变返回值、不改变 ExtractResult 结构
+- 第三层宽松回退仅在两层解析失败时增加一次尝试，失败仍抛出原 `JSONDecodeError`
+- 未应用到 ontology_extractor / style_extractor（max_tokens 已是 8000）
+
+### 测试
+
+- 常量验证：`python -c "from novelforge.services.context_extractor import EXTRACT_MAX_TOKENS, PROTAGONIST_EXTRACT_MAX_TOKENS; print(EXTRACT_MAX_TOKENS, PROTAGONIST_EXTRACT_MAX_TOKENS)"` 输出 `16000 16000`
+- 解析函数单元测试：`python -m pytest tests/test_m4_context_extraction.py tests/test_protagonist_extraction.py -q`
+- 全量测试：`python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"`
+
+### 文档同步
+
+- `agent.md`：context_extractor 描述补充 max_tokens 调整、finish_reason 检测、第三层宽松回退
+- `update.md`：本条目
+
 ## 2026-07-14：版本号提升至 v0.2.11
 
 ### 背景

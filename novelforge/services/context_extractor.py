@@ -60,8 +60,9 @@ DEFAULT_EXTRACTOR_MODEL = "gpt-4o-mini"
 # 默认缓存有效期（小时）
 DEFAULT_CACHE_TTL_HOURS = 24
 
-# 提取请求的 max_tokens（足够返回完整 JSON 数组）
-EXTRACT_MAX_TOKENS = 5000
+# 提取请求的 max_tokens（足够返回完整 JSON 数组；从 5000 调高到 16000，
+# 避免大批量章节提取时 JSON 被 max_tokens 截断导致 Unterminated string）
+EXTRACT_MAX_TOKENS = 16000
 
 # 提取温度（低温保证稳定输出）
 EXTRACT_TEMPERATURE = 0.2
@@ -83,8 +84,8 @@ PROTAGONIST_CACHE_KEY_PREFIX = "protagonist"
 
 # ===== 主角形象提取常量（镜像 OntologyExtractor 模式）=====
 
-# 主角形象提取请求的 max_tokens（足够返回 8 维度 JSON）
-PROTAGONIST_EXTRACT_MAX_TOKENS = 6000
+# 主角形象提取请求的 max_tokens（足够返回 8 维度 JSON；与 EXTRACT_MAX_TOKENS 对齐）
+PROTAGONIST_EXTRACT_MAX_TOKENS = 16000
 
 # 主角形象提取温度（低温保证稳定输出）
 PROTAGONIST_EXTRACT_TEMPERATURE = 0.2
@@ -175,7 +176,8 @@ def _compute_chapters_hash(chapters: list[Chapter]) -> str:
 def _parse_extract_response(content: str) -> list[dict[str, Any]]:
     """解析 LLM 提取响应为字典列表。
 
-    尝试直接 ``json.loads``，失败时去除 markdown 代码块标记后重试。
+    尝试直接 ``json.loads``，失败时去除 markdown 代码块标记后重试，
+    再失败时提取第一个 ``[`` 到最后一个 ``]`` 之间子串重试。
 
     Args:
         content: LLM 返回的文本内容
@@ -203,13 +205,31 @@ def _parse_extract_response(content: str) -> list[dict[str, Any]]:
 
     # 第二次尝试：去除 markdown 代码块标记
     cleaned = strip_markdown_fences(content)
-    data = json.loads(cleaned)
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        return [data]
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            return [data]
+        raise json.JSONDecodeError(
+            f"期望 JSON 数组，实际类型: {type(data).__name__}", content, 0
+        )
+    except json.JSONDecodeError:
+        pass
+
+    # 第三次尝试：提取第一个 [ 到最后一个 ] 之间子串（宽松回退，处理 LLM 输出前后多余文本）
+    start = cleaned.find("[")
+    end = cleaned.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            data = json.loads(cleaned[start : end + 1])
+            if isinstance(data, list):
+                return data
+        except json.JSONDecodeError:
+            pass
+
     raise json.JSONDecodeError(
-        f"期望 JSON 数组，实际类型: {type(data).__name__}", content, 0
+        "期望 JSON 数组，解析失败", content, 0
     )
 
 
@@ -252,7 +272,8 @@ def _safe_serialize_dim(value: Any) -> str:
 def _parse_protagonist_response(content: str) -> dict[str, Any]:
     """解析 LLM 提取响应为 ProtagonistProfile 字典。
 
-    尝试直接 ``json.loads``，失败时去除 markdown 代码块标记后重试。
+    尝试直接 ``json.loads``，失败时去除 markdown 代码块标记后重试，
+    再失败时提取第一个 ``{`` 到最后一个 ``}`` 之间子串重试。
     仅保留 8 大维度字段，忽略其他字段。
 
     Args:
@@ -278,11 +299,29 @@ def _parse_protagonist_response(content: str) -> dict[str, Any]:
 
     # 第二次尝试：去除 markdown 代码块标记
     cleaned = strip_markdown_fences(content)
-    data = json.loads(cleaned)
-    if isinstance(data, dict):
-        return _filter_protagonist_dimensions(data)
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict):
+            return _filter_protagonist_dimensions(data)
+        raise json.JSONDecodeError(
+            f"期望 JSON 对象，实际类型: {type(data).__name__}", content, 0
+        )
+    except json.JSONDecodeError:
+        pass
+
+    # 第三次尝试：提取第一个 { 到最后一个 } 之间子串（宽松回退，处理 LLM 输出前后多余文本）
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            data = json.loads(cleaned[start : end + 1])
+            if isinstance(data, dict):
+                return _filter_protagonist_dimensions(data)
+        except json.JSONDecodeError:
+            pass
+
     raise json.JSONDecodeError(
-        f"期望 JSON 对象，实际类型: {type(data).__name__}", content, 0
+        "期望 JSON 对象，解析失败", content, 0
     )
 
 
@@ -664,6 +703,14 @@ class ContextExtractor:
                                 except Exception as e:
                                     logger.warning("on_chunk 回调异常: %s", e)
                         if chunk.finish_reason:
+                            # 检测 max_tokens 截断（诊断用，不影响 break 行为）
+                            if chunk.finish_reason == "length":
+                                logger.warning(
+                                    "%s信息汇总流式响应被 max_tokens 截断 "
+                                    "(finish_reason=length, EXTRACT_MAX_TOKENS=%d)，"
+                                    "JSON 可能不完整",
+                                    log_prefix, EXTRACT_MAX_TOKENS,
+                                )
                             break
                 else:
                     response = await client.chat_completion(
@@ -673,6 +720,15 @@ class ContextExtractor:
                         max_tokens=EXTRACT_MAX_TOKENS,
                         stop_event=self._cancel_event,
                     )
+                    # 检测 max_tokens 截断（诊断用，不影响后续解析流程）
+                    _fr = response.get("choices", [{}])[0].get("finish_reason")
+                    if _fr == "length":
+                        logger.warning(
+                            "%s信息汇总响应被 max_tokens 截断 "
+                            "(finish_reason=length, EXTRACT_MAX_TOKENS=%d)，"
+                            "JSON 可能不完整",
+                            log_prefix, EXTRACT_MAX_TOKENS,
+                        )
                 break
             except asyncio.CancelledError:
                 logger.info("%s信息汇总被取消", log_prefix)
@@ -717,13 +773,15 @@ class ContextExtractor:
             message = choices[0].get("message", {})
             content = message.get("content", "") or ""
 
+        # 获取 finish_reason 用于诊断日志（流式为 "stream"，非流式从 response 取）
+        _fr_diag = "stream" if stream else response.get("choices", [{}])[0].get("finish_reason", "unknown")
         # 解析响应
         try:
             raw_entries = _parse_extract_response(content)
         except json.JSONDecodeError as e:
             logger.error(
-                "%s信息汇总 JSON 解析失败: %s, content=%s",
-                log_prefix, e, content[:200],
+                "%s信息汇总 JSON 解析失败: %s, finish_reason=%s, content=%s",
+                log_prefix, e, _fr_diag, content[:200],
             )
             return None
 
@@ -1054,6 +1112,14 @@ class ContextExtractor:
                                 except Exception as e:
                                     logger.warning("on_chunk 回调异常: %s", e)
                         if chunk.finish_reason:
+                            # 检测 max_tokens 截断（诊断用，不影响 break 行为）
+                            if chunk.finish_reason == "length":
+                                logger.warning(
+                                    "主角形象汇总第 %d 次尝试流式响应被 max_tokens 截断 "
+                                    "(finish_reason=length, PROTAGONIST_EXTRACT_MAX_TOKENS=%d)，"
+                                    "JSON 可能不完整",
+                                    attempt + 1, PROTAGONIST_EXTRACT_MAX_TOKENS,
+                                )
                             break
                     content = "".join(content_parts)
                 else:
@@ -1064,6 +1130,15 @@ class ContextExtractor:
                         max_tokens=PROTAGONIST_EXTRACT_MAX_TOKENS,
                         stop_event=self._cancel_event,
                     )
+                    # 检测 max_tokens 截断（诊断用，不影响后续解析流程）
+                    _fr = response.get("choices", [{}])[0].get("finish_reason")
+                    if _fr == "length":
+                        logger.warning(
+                            "主角形象汇总第 %d 次尝试响应被 max_tokens 截断 "
+                            "(finish_reason=length, PROTAGONIST_EXTRACT_MAX_TOKENS=%d)，"
+                            "JSON 可能不完整",
+                            attempt + 1, PROTAGONIST_EXTRACT_MAX_TOKENS,
+                        )
                     batch_usage = response.get("usage", {})
                     if isinstance(batch_usage, dict):
                         for k, v in batch_usage.items():
@@ -1249,6 +1324,15 @@ class ContextExtractor:
                                     except Exception as e:
                                         logger.warning("on_chunk 回调异常: %s", e)
                             if chunk.finish_reason:
+                                # 检测 max_tokens 截断（诊断用，不影响 break 行为）
+                                if chunk.finish_reason == "length":
+                                    logger.warning(
+                                        "主角形象批次 %d/%d 第 %d 次尝试流式响应被 max_tokens 截断 "
+                                        "(finish_reason=length, PROTAGONIST_EXTRACT_MAX_TOKENS=%d)，"
+                                        "JSON 可能不完整",
+                                        batch_idx + 1, batch_count, attempt + 1,
+                                        PROTAGONIST_EXTRACT_MAX_TOKENS,
+                                    )
                                 break
                         content = "".join(content_parts)
                     else:
@@ -1259,6 +1343,16 @@ class ContextExtractor:
                             max_tokens=PROTAGONIST_EXTRACT_MAX_TOKENS,
                             stop_event=self._cancel_event,
                         )
+                        # 检测 max_tokens 截断（诊断用，不影响后续解析流程）
+                        _fr = response.get("choices", [{}])[0].get("finish_reason")
+                        if _fr == "length":
+                            logger.warning(
+                                "主角形象批次 %d/%d 第 %d 次尝试响应被 max_tokens 截断 "
+                                "(finish_reason=length, PROTAGONIST_EXTRACT_MAX_TOKENS=%d)，"
+                                "JSON 可能不完整",
+                                batch_idx + 1, batch_count, attempt + 1,
+                                PROTAGONIST_EXTRACT_MAX_TOKENS,
+                            )
                     # 取消信号检查
                     if self._cancel_event.is_set():
                         return None, batch_count, False
@@ -2062,6 +2156,15 @@ class ContextExtractor:
                                     except Exception as e:
                                         logger.warning("on_chunk 回调异常: %s", e)
                             if chunk.finish_reason:
+                                # 检测 max_tokens 截断（诊断用，不影响 break 行为）
+                                if chunk.finish_reason == "length":
+                                    logger.warning(
+                                        "%s批次 %d/%d 第 %d 次尝试流式响应被 max_tokens 截断 "
+                                        "(finish_reason=length, EXTRACT_MAX_TOKENS=%d)，"
+                                        "JSON 可能不完整",
+                                        log_prefix, batch_idx + 1, batch_count, attempt + 1,
+                                        EXTRACT_MAX_TOKENS,
+                                    )
                                 break
                     else:
                         response = await client.chat_completion(
@@ -2071,6 +2174,16 @@ class ContextExtractor:
                             max_tokens=EXTRACT_MAX_TOKENS,
                             stop_event=self._cancel_event,
                         )
+                        # 检测 max_tokens 截断（诊断用，不影响后续解析流程）
+                        _fr = response.get("choices", [{}])[0].get("finish_reason")
+                        if _fr == "length":
+                            logger.warning(
+                                "%s批次 %d/%d 第 %d 次尝试响应被 max_tokens 截断 "
+                                "(finish_reason=length, EXTRACT_MAX_TOKENS=%d)，"
+                                "JSON 可能不完整",
+                                log_prefix, batch_idx + 1, batch_count, attempt + 1,
+                                EXTRACT_MAX_TOKENS,
+                            )
                     # 检查取消信号
                     if self._cancel_event.is_set():
                         return ExtractResult(
@@ -2110,14 +2223,17 @@ class ContextExtractor:
                         message = choices[0].get("message", {})
                         content = message.get("content", "") or ""
 
+                    # 获取 finish_reason 用于诊断日志（流式为 "stream"，非流式从 response 取）
+                    _fr_diag = "stream" if stream else response.get("choices", [{}])[0].get("finish_reason", "unknown")
                     # 解析响应
                     try:
                         raw_entries = _parse_extract_response(content)
                     except json.JSONDecodeError as e:
                         logger.warning(
-                            "%s批次 %d/%d 第 %d 次尝试 JSON 解析失败: %s, content=%s",
+                            "%s批次 %d/%d 第 %d 次尝试 JSON 解析失败: %s, "
+                            "finish_reason=%s, content=%s",
                             log_prefix, batch_idx + 1, batch_count, attempt + 1,
-                            e, content[:200],
+                            e, _fr_diag, content[:200],
                         )
                         if attempt < len(extract_temperatures) - 1:
                             continue
