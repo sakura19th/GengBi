@@ -3071,12 +3071,22 @@ class MainWindow(QMainWindow):
             #   该方法为递归同步函数（返回 entries/None），调用方依赖同步返回值，
             #   转换需重构整个续写流程为异步驱动（回调链/状态机），风险较高，
             #   暂保留同步实现。原 timeout=120 在重试场景最长阻塞 UI 2 分钟。
+            def on_chunk(text: str) -> None:
+                self._extract_chunk_received.emit(text)
+
+            def on_batch_complete(
+                entries: list, batch_idx: int, total_batches: int
+            ) -> None:
+                self._extract_batch_done.emit(entries, batch_idx, total_batches)
+
             extract_result: ExtractResult = runner.run(
-                self.context_extractor.extract(
+                self.context_extractor.extract_streaming(
                     project=project,
                     chapters=self._current_chapters,
                     current_chapter=self._current_chapter,
                     force_refresh=True,
+                    on_chunk=on_chunk,
+                    on_batch_complete=on_batch_complete,
                 ),
                 timeout=120,
             )
@@ -3198,14 +3208,24 @@ class MainWindow(QMainWindow):
         runner = AsyncLoopRunner.instance()
         loop = runner._loop
 
+        def on_chunk(text: str) -> None:
+            self._extract_chunk_received.emit(text)
+
+        def on_batch_complete(
+            entries: list, batch_idx: int, total_batches: int
+        ) -> None:
+            self._extract_batch_done.emit(entries, batch_idx, total_batches)
+
         future = asyncio.run_coroutine_threadsafe(
-            self.context_extractor.extract(
+            self.context_extractor.extract_streaming(
                 project=project,
                 chapters=self._current_chapters,
                 current_chapter=self._current_chapter,
                 force_refresh=True,
                 lookback_override=lookback_override,
                 token_limit_override=token_limit_override,
+                on_chunk=on_chunk,
+                on_batch_complete=on_batch_complete,
             ),
             loop,
         )
@@ -3546,9 +3566,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "项目加载失败")
             return
 
-        # 读取 token_limit 配置（与上下文提取一致）
+        # 读取 token_limit 与 lookback 配置（与上下文提取一致）
         config = self.continuation_panel.context_preview_panel.get_lookback_config()
         token_limit_override = config.get("token_limit", 0)
+        lookback_override = config.get("lookback", 0)
 
         # 禁用按钮防止重复点击 + 启动流式进度展示
         context_panel = self.continuation_panel.context_preview_panel
@@ -3578,6 +3599,8 @@ class MainWindow(QMainWindow):
                 on_chunk=on_chunk,
                 on_batch_complete=on_batch_complete,
                 jailbreak_text=self._get_flow_jailbreak_text("ontology_extraction"),
+                current_chapter=self._current_chapter,
+                lookback=lookback_override,
             ),
             loop,
         )
@@ -3708,9 +3731,10 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "项目加载失败")
             return
 
-        # 读取 token_limit 配置（与上下文提取一致）
+        # 读取 token_limit 与 lookback 配置（与上下文提取一致）
         config = self.continuation_panel.context_preview_panel.get_lookback_config()
         token_limit_override = config.get("token_limit", 0)
+        lookback_override = config.get("lookback", 0)
 
         # 禁用按钮防止重复点击 + 启动流式进度展示
         context_panel = self.continuation_panel.context_preview_panel
@@ -3740,6 +3764,8 @@ class MainWindow(QMainWindow):
                 on_chunk=on_chunk,
                 on_batch_complete=on_batch_complete,
                 jailbreak_text=self._get_flow_jailbreak_text("style_extraction"),
+                current_chapter=self._current_chapter,
+                lookback=lookback_override,
             ),
             loop,
         )

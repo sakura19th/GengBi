@@ -84,6 +84,14 @@ def make_project(
     )
 
 
+class _StreamChunk:
+    """模拟 stream_chat_completion 产出的 chunk。"""
+
+    def __init__(self, content: str, finish_reason: str | None = "stop") -> None:
+        self.content = content
+        self.finish_reason = finish_reason
+
+
 # ===== 1. _get_lookback_chapters exclude_current =====
 
 
@@ -240,14 +248,13 @@ class TestExtractExcludeCurrent:
         """exclude_current=True 时提取 prompt 不含当前章节正文。"""
         extractor = self._make_extractor()
 
-        # mock LLM 返回空数组（仅验证 prompt 内容）
+        # mock LLM 流式返回空数组（仅验证 prompt 内容）
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            return_value={
-                "choices": [{"message": {"content": "[]"}}],
-                "usage": {},
-            }
-        )
+
+        async def _mock_stream(**kwargs):
+            yield _StreamChunk("[]")
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         project = make_project()
@@ -269,7 +276,7 @@ class TestExtractExcludeCurrent:
         )
 
         # 验证 prompt 中含前文，不含当前章节正文
-        call_args = mock_client.chat_completion.call_args
+        call_args = mock_client.stream_chat_completion.call_args
         prompt = call_args.kwargs["messages"][0]["content"]
         assert "前文0" in prompt
         assert "前文1" in prompt

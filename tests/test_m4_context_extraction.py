@@ -88,6 +88,13 @@ def make_project(
     )
 
 
+class _StreamChunk:
+    """模拟 stream_chat_completion 产出的 chunk。"""
+    def __init__(self, content: str, finish_reason: str | None = "stop") -> None:
+        self.content = content
+        self.finish_reason = finish_reason
+
+
 # ===== 1. ContextEntry 模型字段测试 =====
 
 
@@ -817,12 +824,11 @@ class TestContextExtractor:
 
         # mock LLM client
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            return_value={
-                "choices": [{"message": {"content": "[]"}}],
-                "usage": {"total_tokens": 100},
-            }
-        )
+
+        async def _mock_stream(**kwargs):
+            yield _StreamChunk("[]")
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         chapters = [make_chapter(index=0, content="内容1")]
@@ -837,7 +843,7 @@ class TestContextExtractor:
         )
         assert result.status == "completed"
         # 1 次 8 维度提取（主角形象已解耦为独立链路）
-        assert mock_client.chat_completion.call_count == 1
+        assert mock_client.stream_chat_completion.call_count == 1
 
     def test_extract_cache_hit(self) -> None:
         """测试缓存命中。"""
@@ -868,7 +874,7 @@ class TestContextExtractor:
 
         # mock LLM client（不应被调用）
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock()
+        mock_client.stream_chat_completion = MagicMock()
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         result = asyncio.run(
@@ -883,7 +889,7 @@ class TestContextExtractor:
         assert len(result.entries) == 1
         assert result.entries[0].uid == "cached_1"
         # LLM 不应被调用
-        mock_client.chat_completion.assert_not_called()
+        mock_client.stream_chat_completion.assert_not_called()
 
     def test_extract_force_refresh_skips_cache(self) -> None:
         """测试 force_refresh 跳过缓存。"""
@@ -900,12 +906,11 @@ class TestContextExtractor:
         extractor = self._make_extractor(storage_service=storage_service)
 
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            return_value={
-                "choices": [{"message": {"content": "[]"}}],
-                "usage": {},
-            }
-        )
+
+        async def _mock_stream(**kwargs):
+            yield _StreamChunk("[]")
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         chapters = [make_chapter(index=0, content="内容")]
@@ -922,7 +927,7 @@ class TestContextExtractor:
         # 缓存不应被读取
         storage_service.storage.get_cache.assert_not_called()
         # LLM 应被调用：1 次 8 维度提取（主角形象已解耦为独立链路）
-        assert mock_client.chat_completion.call_count == 1
+        assert mock_client.stream_chat_completion.call_count == 1
 
     def test_extract_llm_failure(self) -> None:
         """测试 LLM 调用失败。"""
@@ -931,7 +936,7 @@ class TestContextExtractor:
         extractor = self._make_extractor()
 
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(side_effect=LLMError("API error"))
+        mock_client.stream_chat_completion = MagicMock(side_effect=LLMError("API error"))
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         chapters = [make_chapter(index=0, content="内容")]
@@ -966,12 +971,11 @@ class TestContextExtractor:
         extractor = self._make_extractor()
 
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            return_value={
-                "choices": [{"message": {"content": "not a json"}}],
-                "usage": {},
-            }
-        )
+
+        async def _mock_stream(**kwargs):
+            yield _StreamChunk("not a json")
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         chapters = [make_chapter(index=0, content="内容")]
@@ -1009,12 +1013,11 @@ class TestContextExtractor:
             },
         ])
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            return_value={
-                "choices": [{"message": {"content": response_content}}],
-                "usage": {"total_tokens": 200, "prompt_tokens": 150, "completion_tokens": 50},
-            }
-        )
+
+        async def _mock_stream(**kwargs):
+            yield _StreamChunk(response_content)
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         chapters = [make_chapter(index=0, content="内容")]
@@ -1034,8 +1037,8 @@ class TestContextExtractor:
         assert result.entries[1].position == "after"
         # 验证 source_chapter_range 被设置
         assert all(e.source_chapter_range == (0, 0) for e in result.entries)
-        # 验证 token_usage 被记录
-        assert result.token_usage.get("total_tokens") == 200
+        # 流式路径 stream_chat_completion 的 StreamChunk 不携带 usage，token_usage 为空
+        assert result.token_usage == {}
 
     def test_extract_batch_retry_on_llm_error(self) -> None:
         """单批次首次 LLM 调用失败，第二次成功 → status 非 failed，call_count==2。"""
@@ -1057,20 +1060,21 @@ class TestContextExtractor:
             },
         ])
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            side_effect=[
-                LLMError("首次调用网络错误"),
-                {
-                    "choices": [{"message": {"content": response_content}}],
-                    "usage": {"total_tokens": 200},
-                },
-                # 主角形象提取响应（合法 dict，第 1 次尝试即成功）
-                {
-                    "choices": [{"message": {"content": '{"basic_anchors": {}}'}}],
-                    "usage": {},
-                },
-            ]
-        )
+        responses = [
+            LLMError("首次调用网络错误"),
+            response_content,
+            # 主角形象提取响应（合法 dict，第 1 次尝试即成功）
+            '{"basic_anchors": {}}',
+        ]
+
+        async def _mock_stream(**kwargs):
+            idx = mock_client.stream_chat_completion.call_count - 1
+            item = responses[min(idx, len(responses) - 1)]
+            if isinstance(item, BaseException):
+                raise item
+            yield _StreamChunk(item)
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         chapters = [make_chapter(index=0, content="内容")]
@@ -1086,7 +1090,7 @@ class TestContextExtractor:
         assert len(result.entries) == 1
         assert result.entries[0].uid == "char_1"
         # 8 维度首次失败+第二次成功（2 次）= 2 次 LLM 调用（主角形象已解耦为独立链路）
-        assert mock_client.chat_completion.call_count == 2
+        assert mock_client.stream_chat_completion.call_count == 2
 
     def test_extract_batch_retry_exhausted_fails(self) -> None:
         """单批次 2 次均抛 LLMError → status failed，call_count==2。"""
@@ -1095,7 +1099,7 @@ class TestContextExtractor:
         extractor = self._make_extractor()
 
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
+        mock_client.stream_chat_completion = MagicMock(
             side_effect=[
                 LLMError("第一次失败"),
                 LLMError("第二次失败"),
@@ -1114,7 +1118,7 @@ class TestContextExtractor:
         )
         assert result.status == "failed"
         # 2 次均失败 = 2 次 LLM 调用
-        assert mock_client.chat_completion.call_count == 2
+        assert mock_client.stream_chat_completion.call_count == 2
 
     def test_extract_lookback_chapters_override(self) -> None:
         """测试 lookback_chapters 配置覆盖。"""
@@ -1122,12 +1126,11 @@ class TestContextExtractor:
 
         # mock LLM
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            return_value={
-                "choices": [{"message": {"content": "[]"}}],
-                "usage": {},
-            }
-        )
+
+        async def _mock_stream(**kwargs):
+            yield _StreamChunk("[]")
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         # 项目级覆盖 lookback_chapters=2
@@ -1150,7 +1153,7 @@ class TestContextExtractor:
         )
         assert result.status == "completed"
         # 验证 prompt 中只包含最后 2 章内容
-        call_args = mock_client.chat_completion.call_args
+        call_args = mock_client.stream_chat_completion.call_args
         prompt = call_args.kwargs["messages"][0]["content"]
         assert "内容2" in prompt
         assert "内容3" in prompt
@@ -1167,12 +1170,11 @@ class TestContextExtractor:
         extractor = self._make_extractor(storage_service=storage_service)
 
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            return_value={
-                "choices": [{"message": {"content": '[{"uid": "1", "content": "test"}]'}}],
-                "usage": {},
-            }
-        )
+
+        async def _mock_stream(**kwargs):
+            yield _StreamChunk('[{"uid": "1", "content": "test"}]')
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         chapters = [make_chapter(index=0, content="内容")]
@@ -1198,7 +1200,7 @@ class TestContextExtractor:
         extractor = self._make_extractor()
 
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
+        mock_client.stream_chat_completion = MagicMock(
             side_effect=asyncio_mod.CancelledError("cancelled")
         )
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
@@ -1234,12 +1236,14 @@ class TestContextExtractor:
         ])
 
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(side_effect=[
-            {"choices": [{"message": {"content": batch1_resp}}], "usage": {"total_tokens": 100}},
-            {"choices": [{"message": {"content": batch2_resp}}], "usage": {"total_tokens": 100}},
-            {"choices": [{"message": {"content": batch3_resp}}], "usage": {"total_tokens": 100}},
-            {"choices": [{"message": {"content": merge_resp}}], "usage": {"total_tokens": 200}},
-        ])
+        responses = [batch1_resp, batch2_resp, batch3_resp, merge_resp]
+
+        async def _mock_stream(**kwargs):
+            idx = mock_client.stream_chat_completion.call_count - 1
+            content = responses[min(idx, len(responses) - 1)]
+            yield _StreamChunk(content)
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         long_content = "这是一段测试用的章节内容用于触发多批次拆分。" * 3
@@ -1265,9 +1269,9 @@ class TestContextExtractor:
         assert result.batch_count == 3
         assert len(result.entries) == 3
         # 3 批 8 维度 + 1 次汇总 = 4 次 LLM 调用（主角形象已解耦为独立链路）
-        assert mock_client.chat_completion.call_count == 4
+        assert mock_client.stream_chat_completion.call_count == 4
         # 验证第 4 次调用（汇总）的 prompt 含批次标记
-        merge_call = mock_client.chat_completion.call_args_list[3]
+        merge_call = mock_client.stream_chat_completion.call_args_list[3]
         merge_prompt = merge_call.kwargs["messages"][0]["content"]
         assert "## 批次 1/3" in merge_prompt
         assert "## 批次 2/3" in merge_prompt
@@ -1285,9 +1289,11 @@ class TestContextExtractor:
             {"uid": "loc_1", "category": "locations", "content": "地点", "position": "after"},
         ])
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            return_value={"choices": [{"message": {"content": response_content}}], "usage": {}}
-        )
+
+        async def _mock_stream(**kwargs):
+            yield _StreamChunk(response_content)
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         chapters = [
@@ -1311,7 +1317,7 @@ class TestContextExtractor:
         assert result.batch_count == 1
         assert len(result.entries) == 2
         # 1 次 8 维度提取（主角形象已解耦为独立链路）
-        assert mock_client.chat_completion.call_count == 1
+        assert mock_client.stream_chat_completion.call_count == 1
 
     def test_merge_failure_degrades_to_all_entries(self) -> None:
         """测试【信息汇总】失败时降级使用 best-effort uid 替换合并结果。
@@ -1328,12 +1334,16 @@ class TestContextExtractor:
         batch3_resp = json.dumps([{"uid": "loc_2", "category": "locations", "content": "地点B", "position": "after"}])
 
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(side_effect=[
-            {"choices": [{"message": {"content": batch1_resp}}], "usage": {}},
-            {"choices": [{"message": {"content": batch2_resp}}], "usage": {}},
-            {"choices": [{"message": {"content": batch3_resp}}], "usage": {}},
-            LLMError("merge failed"),
-        ])
+        responses = [batch1_resp, batch2_resp, batch3_resp, LLMError("merge failed")]
+
+        async def _mock_stream(**kwargs):
+            idx = mock_client.stream_chat_completion.call_count - 1
+            item = responses[min(idx, len(responses) - 1)]
+            if isinstance(item, BaseException):
+                raise item
+            yield _StreamChunk(item)
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         long_content = "这是一段测试用的章节内容用于触发多批次拆分。" * 3
@@ -1360,7 +1370,7 @@ class TestContextExtractor:
         # best-effort uid 替换合并：dup_1 被更新（2 次），loc_2 新增 → 2 条
         assert len(result.entries) == 2
         # 3 批 8 维度 + 1 次汇总失败 = 4 次 LLM 调用（主角形象已解耦为独立链路）
-        assert mock_client.chat_completion.call_count == 4
+        assert mock_client.stream_chat_completion.call_count == 4
 
     def test_extract_result_merged_field(self) -> None:
         """测试 ExtractResult.merged 字段默认值与赋值。"""
@@ -1695,12 +1705,11 @@ class TestIntegration:
             {"uid": "evt_1", "category": "events", "content": "事件信息", "position": "at_depth", "depth": 2},
         ])
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            return_value={
-                "choices": [{"message": {"content": response_content}}],
-                "usage": {"total_tokens": 300, "prompt_tokens": 200, "completion_tokens": 100},
-            }
-        )
+
+        async def _mock_stream(**kwargs):
+            yield _StreamChunk(response_content)
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         chapters = [
@@ -1726,8 +1735,8 @@ class TestIntegration:
         assert result.entries[2].depth == 2
         # source_chapter_range 应为 (0, 2)
         assert all(e.source_chapter_range == (0, 2) for e in result.entries)
-        # token_usage 应被记录
-        assert result.token_usage["total_tokens"] == 300
+        # 流式路径 stream_chat_completion 的 StreamChunk 不携带 usage，token_usage 为空
+        assert result.token_usage == {}
         # 缓存应被保存
         storage_service.storage.set_cache.assert_called_once()
 
@@ -1754,12 +1763,11 @@ class TestIntegration:
         # LLM 返回带 markdown 标记的 JSON
         response_content = '```json\n[{"uid": "1", "category": "characters", "content": "test"}]\n```'
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            return_value={
-                "choices": [{"message": {"content": response_content}}],
-                "usage": {},
-            }
-        )
+
+        async def _mock_stream(**kwargs):
+            yield _StreamChunk(response_content)
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(return_value=(mock_client, "gpt-4o-mini"))
 
         chapters = [make_chapter(index=0, content="内容")]

@@ -2418,7 +2418,7 @@ class ContextExtractor:
         exclude_current: bool = False,
         jailbreak_text: str = "",
     ) -> ExtractResult:
-        """提取上下文条目（非流式）。
+        """提取上下文条目（默认流式，on_chunk=None 时不推送 chunk 但仍用 stream_chat_completion）。
 
         Args:
             project: 项目对象（可为 None）
@@ -2439,7 +2439,7 @@ class ContextExtractor:
             force_refresh=force_refresh,
             lookback_override=lookback_override,
             token_limit_override=token_limit_override,
-            stream=False,
+            stream=True,
             exclude_current=exclude_current,
             jailbreak_text=jailbreak_text,
         )

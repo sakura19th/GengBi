@@ -336,6 +336,43 @@ class OntologyExtractor:
 
     # ===== Token 拆分 =====
 
+    def _get_lookback_chapters(
+        self,
+        chapters: list[Chapter],
+        current_chapter: Chapter | None,
+        lookback: int,
+    ) -> list[Chapter]:
+        """获取前 N 章正文（含当前章节）。
+
+        镜像 ContextExtractor._get_lookback_chapters 逻辑（不含 exclude_current）。
+
+        Args:
+            chapters: 项目所有章节（按 index 排序）
+            current_chapter: 当前续写章节（None 时返回全部章节，兼容旧调用）
+            lookback: 回溯章节数（0 或负数=全部前文）
+
+        Returns:
+            待提取的章节列表（旧→新，最后一条为当前章节）
+        """
+        # current_chapter 为 None 或 lookback <= 0：返回全部章节（兼容旧调用）
+        if current_chapter is None or lookback <= 0:
+            return sorted(chapters, key=lambda c: c.index)
+
+        sorted_chapters = sorted(chapters, key=lambda c: c.index)
+        current_idx = -1
+        for i, ch in enumerate(sorted_chapters):
+            if ch.id == current_chapter.id:
+                current_idx = i
+                break
+
+        if current_idx == -1:
+            # 当前章节不在列表中：返回最后 N 章
+            return sorted_chapters[-lookback:] if lookback > 0 else sorted_chapters
+
+        # 取前 lookback 章（含当前章节）
+        start = max(0, current_idx - lookback + 1)
+        return sorted_chapters[start : current_idx + 1]
+
     def _split_chapters_by_token_limit(
         self, chapters: list[Chapter], token_limit: int, model: str
     ) -> list[list[Chapter]]:
@@ -586,30 +623,27 @@ class OntologyExtractor:
                 return accumulated_ontology
 
             try:
-                response = await llm_client.chat_completion(
+                # 流式调用：逐 chunk 接收并推送 UI
+                content_parts: list[str] = []
+                async for chunk in llm_client.stream_chat_completion(
                     messages=messages,
                     model=model,
                     temperature=temperature,
                     max_tokens=ONTOLOGY_EXTRACT_MAX_TOKENS,
                     stop_event=stop_event,
-                )
-                # 解析响应
-                choices = response.get("choices", [])
-                if not choices:
-                    last_error = "LLM 响应无 choices"
-                    logger.warning(
-                        "底层世界观汇总第 %d 次尝试无 choices", attempt + 1
-                    )
-                    continue
-                message = choices[0].get("message", {})
-                content = message.get("content", "") or ""
-
-                # 推送汇总内容到 on_chunk
-                if on_chunk is not None and content:
-                    try:
-                        on_chunk(content)
-                    except Exception as e:
-                        logger.warning("on_chunk 回调异常: %s", e)
+                ):
+                    if stop_event is not None and stop_event.is_set():
+                        return accumulated_ontology
+                    if chunk.content:
+                        content_parts.append(chunk.content)
+                        if on_chunk is not None:
+                            try:
+                                on_chunk(chunk.content)
+                            except Exception as e:
+                                logger.warning("on_chunk 回调异常: %s", e)
+                    if chunk.finish_reason:
+                        break
+                content = "".join(content_parts)
 
                 # 解析 JSON
                 merged_ontology = _parse_ontology_response(content)
@@ -731,18 +765,21 @@ class OntologyExtractor:
         on_batch_complete: Callable[[int, int], None] | None = None,
         stop_event: threading.Event | None = None,
         jailbreak_text: str = "",
+        current_chapter: Chapter | None = None,
+        lookback: int = 0,
     ) -> tuple[WorldOntology | None, str]:
         """流式提取世界观底层。
 
         流程：
-        1. 按 token_limit 拆分章节为多批次
-        2. 逐批：构建含 ``{{accumulated_ontology}}`` 的提示词
+        1. 按 lookback 过滤章节（current_chapter 为 None 或 lookback<=0 时取全部）
+        2. 按 token_limit 拆分章节为多批次
+        3. 逐批：构建含 ``{{accumulated_ontology}}`` 的提示词
            （首批注入"（首批提取，无前序参考）"），调用 LLM，解析 JSON → dict，
            通过 ``_merge_ontology_fields`` 合并到 accumulated_ontology
-        3. 若 batch_count > 1：调用 ``_run_ontology_merge`` 语义整合
-        4. 构建 WorldOntology（含 extracted_at 与 source_chapter_range）
-        5. 保存到 ``Project.world_ontology`` + 世界书条目
-        6. 返回 (WorldOntology, 状态消息)
+        4. 若 batch_count > 1：调用 ``_run_ontology_merge`` 语义整合
+        5. 构建 WorldOntology（含 extracted_at 与 source_chapter_range）
+        6. 保存到 ``Project.world_ontology`` + 世界书条目
+        7. 返回 (WorldOntology, 状态消息)
 
         Args:
             project: 项目对象
@@ -751,6 +788,9 @@ class OntologyExtractor:
             on_chunk: 状态/进度文本回调（批次分隔标记、汇总内容等）
             on_batch_complete: 批次完成回调（当前批次序号, 总批次数）
             stop_event: 取消事件（threading.Event 跨线程安全）
+            jailbreak_text: 破限文本（作为 system 消息前置到 messages 开头）
+            current_chapter: 当前续写章节（None 时取全部章节，兼容旧调用）
+            lookback: 回溯章节数（0=全部前文，>0=取前 N 章含当前章节）
 
         Returns:
             (WorldOntology | None, 状态消息) 元组：
@@ -770,8 +810,10 @@ class OntologyExtractor:
         client, model = client_info
 
         try:
-            # 按章节 index 排序，确保批次顺序正确
-            sorted_chapters = sorted(chapters, key=lambda c: c.index)
+            # 按 lookback 过滤章节（current_chapter 为 None 或 lookback<=0 时取全部）
+            sorted_chapters = self._get_lookback_chapters(
+                chapters, current_chapter, lookback
+            )
 
             # 按 token 限制拆分批次
             batches = self._split_chapters_by_token_limit(
@@ -779,8 +821,8 @@ class OntologyExtractor:
             )
             batch_count = len(batches)
             logger.info(
-                "底层世界观提取: %d 章拆分为 %d 批 (token_limit=%d)",
-                len(sorted_chapters), batch_count, token_limit,
+                "底层世界观提取: %d 章过滤为 %d 章 (lookback=%d), 拆分为 %d 批 (token_limit=%d)",
+                len(chapters), len(sorted_chapters), lookback, batch_count, token_limit,
             )
 
             # 逐批调用 LLM，每批携带前批累积的 WorldOntology
@@ -838,38 +880,27 @@ class OntologyExtractor:
                     if stop_event is not None and stop_event.is_set():
                         return None, "用户取消提取"
                     try:
-                        response = await client.chat_completion(
+                        # 流式调用：逐 chunk 接收并推送 UI
+                        content_parts: list[str] = []
+                        async for chunk in client.stream_chat_completion(
                             messages=messages,
                             model=model,
                             temperature=temperature,
                             max_tokens=ONTOLOGY_EXTRACT_MAX_TOKENS,
                             stop_event=stop_event,
-                        )
-                        # 取消信号检查
-                        if stop_event is not None and stop_event.is_set():
-                            return None, "用户取消提取"
-                        # 解析响应
-                        choices = response.get("choices", [])
-                        if not choices:
-                            last_error = (
-                                f"批次 {batch_idx + 1}/{batch_count} 响应无 choices"
-                            )
-                            logger.warning(
-                                "批次 %d/%d 第 %d 次尝试无 choices",
-                                batch_idx + 1, batch_count, attempt + 1,
-                            )
-                            if attempt < len(extract_temperatures) - 1:
-                                continue
-                            return None, last_error
-                        message = choices[0].get("message", {})
-                        content = message.get("content", "") or ""
-
-                        # 推送本批次内容到 on_chunk（供 UI 显示）
-                        if on_chunk is not None and content:
-                            try:
-                                on_chunk(content)
-                            except Exception as e:
-                                logger.warning("on_chunk 回调异常: %s", e)
+                        ):
+                            if stop_event is not None and stop_event.is_set():
+                                return None, "用户取消提取"
+                            if chunk.content:
+                                content_parts.append(chunk.content)
+                                if on_chunk is not None:
+                                    try:
+                                        on_chunk(chunk.content)
+                                    except Exception as e:
+                                        logger.warning("on_chunk 回调异常: %s", e)
+                            if chunk.finish_reason:
+                                break
+                        content = "".join(content_parts)
 
                         # 解析 JSON → dict（仅保留 7 大维度字段）
                         batch_ontology = _parse_ontology_response(content)

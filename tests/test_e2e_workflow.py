@@ -263,6 +263,14 @@ def sample_project(temp_storage: StorageService, tmp_path: Path) -> tuple[Projec
     return result.project, chapters
 
 
+class _StreamChunk:
+    """模拟 stream_chat_completion 产出的 chunk。"""
+
+    def __init__(self, content: str, finish_reason: str | None = "stop") -> None:
+        self.content = content
+        self.finish_reason = finish_reason
+
+
 # ===== 测试用例 =====
 
 
@@ -625,31 +633,27 @@ class TestE2EContextExtraction:
 
         extractor = ContextExtractor(temp_storage, config_manager)
 
-        # Mock LLM 返回的 JSON
-        mock_response = {
-            "choices": [
-                {
-                    "message": {
-                        "content": json.dumps([
-                            {
-                                "uid": "char_1",
-                                "category": "characters",
-                                "key": ["林风"],
-                                "comment": "主角",
-                                "content": "林风：少年剑客",
-                                "order": 10,
-                                "position": "before",
-                            }
-                        ])
-                    }
-                }
-            ]
-        }
+        # Mock LLM 流式返回的 JSON
+        mock_content = json.dumps([
+            {
+                "uid": "char_1",
+                "category": "characters",
+                "key": ["林风"],
+                "comment": "主角",
+                "content": "林风：少年剑客",
+                "order": 10,
+                "position": "before",
+            }
+        ])
 
-        # Mock LLMClient.chat_completion
+        # Mock LLMClient.stream_chat_completion
         with patch("novelforge.services.context_extractor.LLMClient") as MockLLM:
             mock_client = MockLLM.return_value
-            mock_client.chat_completion = AsyncMock(return_value=mock_response)
+
+            async def _mock_stream(**kwargs):
+                yield _StreamChunk(mock_content)
+
+            mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
 
             loop = asyncio.new_event_loop()
             try:
@@ -691,17 +695,15 @@ class TestE2EContextExtraction:
         extractor = ContextExtractor(temp_storage, config_manager)
 
         # 使用非空响应（空列表可能不被缓存）
-        mock_response = {
-            "choices": [{"message": {"content": json.dumps([
-                {
-                    "uid": "char_1",
-                    "category": "characters",
-                    "key": ["林风"],
-                    "content": "林风：少年剑客",
-                    "position": "before",
-                }
-            ])}}]
-        }
+        mock_content = json.dumps([
+            {
+                "uid": "char_1",
+                "category": "characters",
+                "key": ["林风"],
+                "content": "林风：少年剑客",
+                "position": "before",
+            }
+        ])
 
         # 使用内存缓存模拟（避免跨事件循环的 aiosqlite 问题）
         cache_store: dict = {}
@@ -719,7 +721,11 @@ class TestE2EContextExtraction:
 
         with patch("novelforge.services.context_extractor.LLMClient") as MockLLM:
             mock_client = MockLLM.return_value
-            mock_client.chat_completion = AsyncMock(return_value=mock_response)
+
+            async def _mock_stream(**kwargs):
+                yield _StreamChunk(mock_content)
+
+            mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
 
             loop = asyncio.new_event_loop()
             try:
@@ -740,7 +746,7 @@ class TestE2EContextExtraction:
         assert result2.status == "completed"
         assert result2.from_cache is True
         # LLM 应只被调用一次（第二次命中缓存）（主角形象已解耦为独立链路）
-        assert mock_client.chat_completion.call_count == 1
+        assert mock_client.stream_chat_completion.call_count == 1
 
 
 class TestE2EExport:

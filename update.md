@@ -1,5 +1,111 @@
 # 更新日志
 
+## 2026-07-16：全部提取器改为默认流式输出
+
+### 背景
+
+4 个提取器的流式支持不一致：上下文/主角形象已真流式，但世界观/文风虽方法名带 `_streaming` 实际用 `chat_completion`（假流式）；context_extractor.extract 默认 stream=False；main_window 有 2 处调用非流式 extract。用户要求全部改为默认流式输出。
+
+### 核心改动
+
+- **OntologyExtractor / StyleExtractor**（`novelforge/services/ontology_extractor.py` / `style_extractor.py`）：批次提取 + 信息汇总内部从 `chat_completion` 改为 `stream_chat_completion` 真流式（逐 chunk 接收并推送 UI，4 处）
+- **ContextExtractor.extract**（`novelforge/services/context_extractor.py`）：`stream` 默认值 `False` → `True`（默认流式，on_chunk=None 时不推送 chunk 但仍用 stream_chat_completion）
+- **main_window**（`novelforge/ui/main_window.py`）：重试提取（L3074）和强制重新提取（L3202）从 `extract` 改为 `extract_streaming` + on_chunk/on_batch_complete Signal 回调
+- **测试 mock 对齐**（6 个测试文件约 36 处）：`mock_client.chat_completion = AsyncMock(return_value={...})` → `stream_chat_completion` async generator mock（`_StreamChunk` + `MagicMock(side_effect=_mock_stream)`）
+
+### 流式路径 token_usage 注意
+
+`stream_chat_completion` 的 `StreamChunk` 不携带 usage 字段，流式路径 `token_usage` 为空 `{}`。2 个 test_m4 测试的 `token_usage` 断言已调整为 `assert result.token_usage == {}`。
+
+### 测试
+
+- 全量测试 673 passed, 7 failed（均为预先存在的 style_profile 占位符和流程数 10→11 问题，与本次改动无关）
+
+### 文档同步
+
+- `agent.md`：context_extractor / ontology_extractor / style_extractor 描述补充默认流式
+- `update.md`：本条目
+
+## 2026-07-16：test_m4_context_extraction.py mock 对齐 extract 流式默认路径
+
+### 背景
+
+`ContextExtractor.extract` 的 `stream` 默认值已从 `False` 改为 `True`（调用 `stream_chat_completion`）。`tests/test_m4_context_extraction.py` 中 16 个测试方法的 mock 仍指向 `chat_completion`，调用 `extractor.extract(...)` 时走流式路径却命中非流式 mock，需对齐为 `stream_chat_completion` mock。本次为同日其他 3 个测试文件（test_e2e_workflow.py / test_protagonist_extraction.py / test_rewrite_current_mode.py）对齐工作的延续。
+
+### 核心改动
+
+- **新增 `_StreamChunk` 类**（import 后、第一个测试类前）：模拟 `stream_chat_completion` 产出的 chunk（`content` + `finish_reason`，默认 `"stop"`）
+- **16 个测试方法 mock 改造**（`TestContextExtractor` + `TestIntegration`）：
+  - 单响应：`async def _mock_stream(**kwargs): yield _StreamChunk(content)` + `MagicMock(side_effect=_mock_stream)`
+  - 多响应（重试/多批次）：`responses` 列表 + `call_count - 1` 索引取值
+  - 混合异常+响应（重试场景）：`responses` 列表含 `BaseException` 项，`isinstance` 判断后 `raise`
+  - 纯异常：`MagicMock(side_effect=LLMError(...))` 或 `MagicMock(side_effect=CancelledError(...))`
+  - 缓存命中不应调用：`MagicMock()` + `assert_not_called()`
+- **断言同步改向**：`call_count` / `call_args` / `call_args_list` / `assert_not_called` 全部从 `chat_completion` 改为 `stream_chat_completion`
+- **未改动**：`TestLLMClientChatCompletion` 类（测试真实 `LLMClient.chat_completion` 方法存在性/签名/payload，非 mock）
+
+### 测试
+
+- `python -m pytest tests/test_m4_context_extraction.py -q` → 84 passed, 2 failed
+- 2 个失败为 `token_usage` 断言（`test_extract_parses_valid_entries` 断言 `total_tokens==200`、`test_full_extraction_flow_with_mock` 断言 `total_tokens==300`）：流式路径不填充 `token_usage`（`context_extractor.py` L2196-2197 仅 `content = "".join(content_parts)`，`token_usage` 仅在非流式 `else` 分支累加 `response["usage"]`）。按任务要求「保持原有测试逻辑不变」未修改这两个断言，需后续单独处理
+
+### 文档同步
+
+- `agent.md`：测试要求章节「流式 mock 约束」补入 `test_m4_context_extraction.py`，并追加流式路径不填充 `token_usage` 的注意事项
+- `update.md`：本条目
+
+## 2026-07-16：测试 mock 对齐 extract 流式默认路径
+
+### 背景
+
+`ContextExtractor.extract` 的 `stream` 默认值已从 `False` 改为 `True`（调用 `stream_chat_completion`）。但 3 个测试文件中 mock 的是 `chat_completion`，导致调用 `extractor.extract(...)` 的测试实际走流式路径却命中非流式 mock，需对齐为 `stream_chat_completion` mock。
+
+### 核心改动
+
+- **tests/test_e2e_workflow.py**：新增 `_StreamChunk` 类；`test_context_extractor_with_mock_llm` / `test_context_extraction_caching` 的 `chat_completion` AsyncMock 改为 `stream_chat_completion` 流式 mock（`_StreamChunk` + 异步生成器 + `MagicMock(side_effect=...)`）；缓存测试断言 `call_count` 同步改向 `stream_chat_completion`
+- **tests/test_protagonist_extraction.py**：复用已有 `_StreamChunk`；`test_extract_common_no_protagonist_in_result` / `test_extract_common_cache_save_no_protagonist` 的 `chat_completion` mock 改为 `stream_chat_completion` 流式 mock
+- **tests/test_rewrite_current_mode.py**：新增 `_StreamChunk` 类；`test_extract_exclude_current_no_current_in_prompt` 的 mock 与 `call_args` 断言改为 `stream_chat_completion`
+- 未改动显式传 `stream=False` 的 `_extract_protagonist` 调用测试（仍用 `chat_completion` mock）
+
+### 测试
+
+- `python -m pytest tests/test_e2e_workflow.py tests/test_protagonist_extraction.py tests/test_rewrite_current_mode.py -q` → 76 passed
+
+### 文档同步
+
+- `agent.md`：测试要求章节新增「流式 mock 约束」说明
+- `update.md`：本条目
+
+## 2026-07-16：世界观/文风提取支持【前文：】控制
+
+### 背景
+
+当前上下文提取和主角形象提取已支持【前文：】下拉框控制（基于当前章节取前 N 章）。但世界观底层提取（`extract_ontology_streaming`）和文风档案提取（`extract_style_streaming`）是项目级提取，没有 lookback 参数，始终取全部章节。用户要求这两个提取器也受【前文：】控制。
+
+### 改动
+
+- **OntologyExtractor / StyleExtractor 各自新增 `_get_lookback_chapters` 方法**（`novelforge/services/ontology_extractor.py` / `style_extractor.py`）：镜像 ContextExtractor 逻辑（简化版，不含 exclude_current），基于当前章节取前 N 章含当前章节，lookback<=0 取全部前文
+- **`extract_ontology_streaming` / `extract_style_streaming` 增加 `current_chapter` 和 `lookback` 参数**：current_chapter 默认 None 保持向后兼容（现有测试不传也能工作），None 时跳过 lookback 过滤返回全部章节
+- **内部 sorted_chapters 后增加 lookback 过滤**：先过滤章节再拆分批次，确保 lookback 限制生效；日志增加 `lookback=N` 和 `过滤为 N 章` 信息
+- **main_window 调用处增加 `lookback_override` 读取和 `current_chapter=self._current_chapter` 传参**：世界观（L3549）和文风（L3714）两处
+- **主角形象提取跳过**：已支持 lookback（context_extractor.py L2501 + main_window.py L3905），无需改动
+
+### 向后兼容保证
+
+- current_chapter=None 默认值保持向后兼容，现有 7 个测试调用（test_ontology_extractor.py 5 处 + test_style_extractor.py 2 处）无需修改
+- lookback<=0 时取全部章节，与原行为一致
+- lookback 过滤在 sorted 之后、token 拆分之前，不影响批次拆分逻辑
+
+### 测试
+
+- 现有测试无回归：`python -m pytest tests/test_ontology_extractor.py tests/test_style_extractor.py -q`
+- 全量测试：`python -m pytest tests/ -q --ignore=tests/test_m5_polish.py -k "not TestUIComponents"`
+
+### 文档同步
+
+- `agent.md`：ontology_extractor / style_extractor 描述补充 lookback 支持
+- `update.md`：本条目
+
 ## 2026-07-16：修复上下文提取 JSON 被 max_tokens 截断问题
 
 ### 背景

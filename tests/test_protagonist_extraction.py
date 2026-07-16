@@ -921,12 +921,11 @@ class TestExtractCommonNoProtagonist:
 
         extractor = _make_extractor()
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            return_value={
-                "choices": [{"message": {"content": "[]"}}],
-                "usage": {},
-            }
-        )
+
+        async def _mock_stream(**kwargs):
+            yield _StreamChunk("[]")
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = lambda flow_key="": (mock_client, "gpt-4o-mini")  # type: ignore[assignment]
 
         profile = NovelProfile(
@@ -969,27 +968,22 @@ class TestExtractCommonNoProtagonist:
 
         extractor = _make_extractor()
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            return_value={
-                "choices": [
-                    {
-                        "message": {
-                            "content": json.dumps(
-                                [
-                                    {
-                                        "uid": "e1",
-                                        "category": "characters",
-                                        "content": "测试条目",
-                                    }
-                                ],
-                                ensure_ascii=False,
-                            )
-                        }
-                    }
-                ],
-                "usage": {},
-            }
+
+        mock_content = json.dumps(
+            [
+                {
+                    "uid": "e1",
+                    "category": "characters",
+                    "content": "测试条目",
+                }
+            ],
+            ensure_ascii=False,
         )
+
+        async def _mock_stream(**kwargs):
+            yield _StreamChunk(mock_content)
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = lambda flow_key="": (mock_client, "gpt-4o-mini")  # type: ignore[assignment]
 
         profile = NovelProfile(

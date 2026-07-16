@@ -33,6 +33,14 @@ from novelforge.services.style_extractor import (
 )
 
 
+class _StreamChunk:
+    """模拟 stream_chat_completion 产出的 chunk。"""
+
+    def __init__(self, content: str, finish_reason: str | None = "stop") -> None:
+        self.content = content
+        self.finish_reason = finish_reason
+
+
 # ===== 测试工具 =====
 
 
@@ -253,12 +261,11 @@ class TestStyleExtractor:
 
         style_json = _make_style_json()
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            return_value={
-                "choices": [{"message": {"content": style_json}}],
-                "usage": {"total_tokens": 100},
-            }
-        )
+
+        async def _mock_stream(**kwargs):
+            yield _StreamChunk(style_json)
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(
             return_value=(mock_client, "gpt-4o-mini")
         )
@@ -278,7 +285,7 @@ class TestStyleExtractor:
         assert style_profile.source_chapter_range == (0, 0)
         assert "完成" in status
         # 单批次仅 1 次 LLM 调用，不触发汇总
-        assert mock_client.chat_completion.call_count == 1
+        assert mock_client.stream_chat_completion.call_count == 1
 
     def test_extract_style_streaming_multi_batch_merge(self) -> None:
         """多批次提取触发【信息汇总】合并环节。"""
@@ -295,15 +302,14 @@ class TestStyleExtractor:
         )
         merge_resp = _make_style_json()
 
+        responses = [batch_resp, batch_resp, batch_resp, merge_resp]
         mock_client = MagicMock()
-        mock_client.chat_completion = AsyncMock(
-            side_effect=[
-                {"choices": [{"message": {"content": batch_resp}}], "usage": {}},
-                {"choices": [{"message": {"content": batch_resp}}], "usage": {}},
-                {"choices": [{"message": {"content": batch_resp}}], "usage": {}},
-                {"choices": [{"message": {"content": merge_resp}}], "usage": {}},
-            ]
-        )
+
+        async def _mock_stream(**kwargs):
+            idx = mock_client.stream_chat_completion.call_count - 1
+            yield _StreamChunk(responses[idx])
+
+        mock_client.stream_chat_completion = MagicMock(side_effect=_mock_stream)
         extractor._get_llm_client = MagicMock(
             return_value=(mock_client, "gpt-4o-mini")
         )
@@ -326,7 +332,7 @@ class TestStyleExtractor:
         assert style_profile is not None
         assert isinstance(style_profile, StyleProfile)
         # 3 批 + 1 次汇总 = 4 次 LLM 调用
-        assert mock_client.chat_completion.call_count == 4
+        assert mock_client.stream_chat_completion.call_count == 4
         # 汇总结果被采纳
         assert style_profile.narrative_rhythm == {"dialogue_ratio": 0.45, "conflict_density": 2.1}
         assert style_profile.time_transition == {"timeline_structure": "线性顺叙", "scene_switch_frequency": 1.5}
