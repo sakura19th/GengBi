@@ -492,6 +492,9 @@ class MainWindow(QMainWindow):
         )
         # 模式切换（单次/智能）
         self.continuation_panel.mode_changed.connect(self._on_mode_changed)
+        self.continuation_panel.worldbook_changed.connect(
+            self._on_panel_worldbook_selection_changed
+        )
         # 卷模式切换时显隐右侧续写输出面板
         self.continuation_panel.output_panel_visibility_requested.connect(
             self._on_output_panel_visibility_requested
@@ -1119,15 +1122,26 @@ class MainWindow(QMainWindow):
                 for wb in worldbooks
                 if wb.enabled
             ]
-            # 保留当前多选（若仍存在）
+            # 优先保留面板当前多选；为空则从 config 恢复跨会话选中
             current_ids: list[str] = []
             try:
                 current_ids = self.continuation_panel.get_selected_worldbook_ids()
             except Exception:
                 pass
+            if not current_ids:
+                current_ids = self.config_manager.get_selected_worldbook_ids()
             self.continuation_panel.set_worldbooks(wb_list, default_ids=current_ids)
         except Exception as e:
             logger.error("刷新世界书列表失败: %s", e)
+
+    def _on_panel_worldbook_selection_changed(self, ids: list) -> None:
+        """续写面板世界书多选变化时持久化到 config。"""
+        try:
+            self.config_manager.set_selected_worldbook_ids(
+                [str(i) for i in ids if i]
+            )
+        except Exception as e:
+            logger.error("保存世界书选中状态失败: %s", e)
 
     def _get_enabled_worldbook_entries(self) -> list:
         """获取续写面板当前选中世界书的启用条目列表。

@@ -27,6 +27,7 @@ from novelforge.ui.continuation_panel import ContinuationPanel, USER_INPUT_MAX_L
 from novelforge.ui.helpers import select_combo_by_id
 from novelforge.ui.volume_panel import VolumePanel
 from novelforge.ui.worldbook_panel import WorldBookPanel
+from novelforge.core.config import ConfigManager
 from novelforge.models import (
     ChapterArtifacts,
     ChapterStageArtifact,
@@ -355,6 +356,36 @@ class TestWorldBookPanelMultiSelect:
         )
         assert panel.get_selected_worldbook_ids() == ["a", "c"]
         assert panel.is_enabled() is True
+
+
+class TestSelectedWorldbookPersistence:
+    """世界书选中 ID 持久化（ConfigManager）测试。"""
+
+    def test_config_roundtrip(self, tmp_path) -> None:
+        """set/get selected_worldbook_ids 往返一致，重载后仍保留。"""
+        path = tmp_path / "config.json"
+        cm = ConfigManager(path)
+        cm.load()
+        assert cm.get_selected_worldbook_ids() == []
+
+        cm.set_selected_worldbook_ids(["wb1", "wb2"])
+        assert cm.get_selected_worldbook_ids() == ["wb1", "wb2"]
+
+        cm2 = ConfigManager(path)
+        cm2.load()
+        assert cm2.get_selected_worldbook_ids() == ["wb1", "wb2"]
+
+    def test_default_ids_restore_on_panel(self, qapp) -> None:
+        """模拟 refresh：空面板用持久化 IDs 作为 default_ids 恢复勾选。"""
+        panel = WorldBookPanel()
+        persisted = ["a", "c"]
+        panel.set_worldbooks(
+            [{"id": "a", "name": "书A", "enabled": True},
+             {"id": "b", "name": "书B", "enabled": True},
+             {"id": "c", "name": "书C", "enabled": True}],
+            default_ids=persisted,
+        )
+        assert panel.get_selected_worldbook_ids() == ["a", "c"]
 
 
 # ===== 4. VolumePanel 继续/隐藏继续按钮 =====

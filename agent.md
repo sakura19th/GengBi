@@ -78,7 +78,7 @@ novelforge/
 │   ├── flow_endpoint_dialog.py  # 流程端点配置（10 流程端点映射 + 每流程模型下拉 enabled_models 回退链 + 8 非正文流程破限等级下拉 off/low/mid/high/custom + 自定义文本编辑入口）
 │   ├── jailbreak_custom_dialog.py # 自定义破限文本编辑对话框（QPlainTextEdit + 确定/取消）
 │   ├── checkable_combo.py       # 可勾选多选下拉（世界书用；关闭态摘要文本 + 主题 QSS 箭头）
-│   ├── worldbook_panel.py       # 续写配置内嵌世界书多选（选中即启用；get_selected_worldbook_ids）
+│   ├── worldbook_panel.py       # 续写配置内嵌世界书多选（选中即启用；get_selected_worldbook_ids；选中态由 MainWindow 持久化到 continuation.selected_worldbook_ids）
 │   ├── font_settings.py / history_panel.py / project_panel.py / template_editor.py / dialogs.py / flow_layout.py / wheel_filter.py
 │   └── ...
 └── resources/       # 资源文件
@@ -127,7 +127,7 @@ novelforge/
 - **世界观底层提取**（OntologyExtractor）：全文提取 WorldOntology 7 大维度固化到 Project.world_ontology（全文一次不随章节变）；镜像 ContextExtractor 三大机制；拆 7 维度为 ContextEntry 存入项目世界书
 - **文风档案提取**（StyleExtractor）：全文提取 StyleProfile 9 大维度文笔风格参数固化到 Project.style_profile（全文一次不随章节变）；镜像 OntologyExtractor 三大机制（拆批/增量合并/语义整合）；不入世界书；flow_key="style_extraction"，默认破限等级 low
 - **主角形象提取**（ContextExtractor._extract_protagonist）：8 维度心理学档案，独立链路（extract_protagonist_streaming + 独立缓存 key 前缀 protagonist:），与上下文提取解耦避免互相覆盖；按章节缓存
-- **世界书条目级开关**：`_get_enabled_worldbook_entries` 过滤 enabled=False，单点覆盖 3 处续写入口；续写配置区支持多选世界书（`get_selected_worldbook_ids`），选中即启用，跨书 uid 冲突时先选优先
+- **世界书条目级开关**：`_get_enabled_worldbook_entries` 过滤 enabled=False，单点覆盖 3 处续写入口；续写配置区支持多选世界书（`get_selected_worldbook_ids`），选中即启用，跨书 uid 冲突时先选优先；选中 ID 持久化到 `continuation.selected_worldbook_ids`（`ConfigManager.get/set_selected_worldbook_ids`），启动/刷新时恢复
 
 ### 4. trimStrings 行为
 

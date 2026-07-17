@@ -27,7 +27,8 @@
             "default_temperature": float,
             "default_max_tokens": int,
             "auto_save": bool,
-            "show_token_count": bool
+            "show_token_count": bool,
+            "selected_worldbook_ids": list[str]  # 续写面板多选世界书，跨会话恢复
         },
         "volume": {},  # 卷续写配置持久化（VolumeRunConfig 的 JSON dump）
         "context_extract": {
@@ -104,6 +105,7 @@ def get_default_config() -> dict[str, Any]:
             "default_temperature": 0.8,
             "auto_save": True,
             "show_token_count": True,
+            "selected_worldbook_ids": [],
         },
         "volume": {},
         "context_extract": {
@@ -515,6 +517,21 @@ class ConfigManager:
     def get_continuation_settings(self) -> dict[str, Any]:
         """获取续写配置。"""
         return self.config.get("continuation", {})
+
+    def get_selected_worldbook_ids(self) -> list[str]:
+        """获取续写面板持久化的多选世界书 ID 列表。"""
+        cont = self.config.get("continuation", {})
+        ids = cont.get("selected_worldbook_ids", [])
+        if not isinstance(ids, list):
+            return []
+        return [str(i) for i in ids if i]
+
+    def set_selected_worldbook_ids(self, ids: list[str]) -> None:
+        """设置续写面板多选世界书 ID 并保存。"""
+        with self._lock:
+            cont = self.config.setdefault("continuation", {})
+            cont["selected_worldbook_ids"] = [str(i) for i in ids if i]
+            self.save()
 
     def get_volume_settings(self) -> dict[str, Any]:
         """获取卷续写配置（VolumeRunConfig 的 JSON dump）。"""

@@ -1,5 +1,64 @@
 # 更新日志
 
+## 2026-07-17：加固打包脚本 python -m novelforge.resources.build
+
+### 背景
+
+产物改名后在 `.spec` 内 `import novelforge` 取版本，部分环境下易出问题；需由 `build.py` 统一注入命名并给出明确报错。
+
+### 核心改动
+
+- **build.py**：解析版本 → `GengBi_v{version}`，经环境变量 `GENGBI_BUILD_NAME` 注入；校验 main.py / PyInstaller；成功后打印 `dist/` 路径
+- **build.spec**：优先读 `GENGBI_BUILD_NAME`，否则解析 `__init__.py`，不再 import 包
+
+### 测试
+
+- `tests/test_m5_polish.py::TestBuildConfig` 覆盖命名解析
+
+### 文档同步
+
+- `update.md`：本条目
+
+## 2026-07-17：打包产物命名改为 GengBi_v{版本号}
+
+### 背景
+
+原 PyInstaller 产物名为「赓笔」，不便按版本区分；统一为 `GengBi_v0.2.12` 格式。
+
+### 核心改动
+
+- **build.spec**：从 `novelforge.__version__` 生成 `APP_NAME = f"GengBi_v{__version__}"`
+- **build.py / README**：文档同步产物路径说明
+
+### 测试
+
+- `tests/test_m5_polish.py` 断言 spec 含版本化命名
+
+### 文档同步
+
+- `README.md`、`update.md`：本条目
+
+## 2026-07-17：世界书多选选中状态持久化
+
+### 背景
+
+续写面板世界书多选仅在会话内 `_refresh_worldbooks` 保留，重启后清空，需与温度/回溯等续写偏好一样跨会话恢复。
+
+### 核心改动
+
+- **ConfigManager**（`novelforge/core/config.py`）：`continuation.selected_worldbook_ids` 默认 `[]`；新增 `get_selected_worldbook_ids` / `set_selected_worldbook_ids`
+- **MainWindow**：`_refresh_worldbooks` 面板为空时从 config 恢复；`continuation_panel.worldbook_changed` → 即时写入 config
+- **ContinuationPanel**：转发 `worldbook_changed(list)` 信号
+
+### 测试
+
+- `tests/test_volume_ui.py` 新增 ConfigManager 选中 ID 往返与面板 default_ids 恢复断言
+
+### 文档同步
+
+- `agent.md`：世界书多选持久化说明
+- `update.md`：本条目
+
 ## 2026-07-17：续写控制输入栏自适应 + 世界书多选 + SpinBox 箭头修复
 
 ### 背景

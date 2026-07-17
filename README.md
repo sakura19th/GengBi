@@ -43,7 +43,7 @@ python main.py
 ### 打包为可执行文件
 
 ```bash
-# 当前平台打包（生成 dist/赓笔 可执行文件）
+# 当前平台打包（生成 dist/GengBi_v{版本号} 可执行文件，如 GengBi_v0.2.12.exe）
 python -m novelforge.resources.build
 
 # 或直接调用 PyInstaller

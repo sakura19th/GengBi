@@ -1196,6 +1196,21 @@ class TestBuildConfig:
         assert "tiktoken" in content
         assert "tiktoken_ext.openai_public" in content
 
+    def test_build_spec_app_name_uses_version(self) -> None:
+        """产物名通过 GENGBI_BUILD_NAME 或解析 __version__ 得到 GengBi_v*。"""
+        spec_path = PROJECT_ROOT / "novelforge" / "resources" / "build.spec"
+        content = spec_path.read_text(encoding="utf-8")
+        assert "GENGBI_BUILD_NAME" in content
+        assert "GengBi_v" in content
+
+    def test_build_py_resolves_app_name(self) -> None:
+        """build.py 能解析出版本化产物名。"""
+        from novelforge import __version__
+        from novelforge.resources import build
+
+        assert build._app_name(__version__) == f"GengBi_v{__version__}"
+        assert build._read_version() == __version__
+
     def test_build_py_exists(self) -> None:
         """测试 build.py 文件存在。"""
         build_path = PROJECT_ROOT / "novelforge" / "resources" / "build.py"

@@ -125,6 +125,8 @@ class ContinuationPanel(QWidget):
     # 统一流程启动信号（携带 plugin_id + params），替代 start_continuation/
     # rewrite_current_analysis_requested 的新统一入口，由 FlowExecutor 执行
     start_flow = Signal(str, dict)
+    # 世界书多选变化（ID 列表），供 MainWindow 持久化
+    worldbook_changed = Signal(list)
 
     def __init__(self, parent=None) -> None:
         """初始化续写控制面板。"""
@@ -370,6 +372,8 @@ class ContinuationPanel(QWidget):
         self._model_combo.currentIndexChanged.connect(self._on_model_user_changed)
         # 模式切换
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        # 世界书多选变化向外转发
+        self._worldbook_panel.worldbook_changed.connect(self.worldbook_changed.emit)
 
     # ===== 端点/模型管理 =====
 
