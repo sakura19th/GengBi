@@ -6,7 +6,7 @@
 
 赓笔 (GengBi) 是一个 SillyTavern (ST) 兼容的小说续写工具，提供从 TXT 导入、章节管理、上下文提取、提示词组装到 LLM 流式续写的完整工作流。
 
-**当前版本：v0.2.11**（定义于 `novelforge/__init__.py` 的 `__version__`，由"关于"对话框引用，README 顶部同步标注）
+**当前版本：v0.2.12**（定义于 `novelforge/__init__.py` 的 `__version__`，由"关于"对话框引用，README 顶部同步标注）
 
 **版本更新记录**：维护在 `README.md` 的"更新记录"章节，按版本倒序排列，每次发版须追加新版本小节。
 
@@ -59,7 +59,7 @@ novelforge/
 │   └── storage_service.py       # 存储服务（项目/章节/续写 CRUD；update_chapter_index/update_chapter_title 单列更新不写文件）
 ├── ui/              # UI 组件（PySide6）
 │   ├── main_window.py           # 主窗口（5 栏 QSplitter + 主题管理 + 调试菜单；ont/protagonist/custom_rule 提取信号处理；FlowPluginService+FlowExecutor 流程插件系统接线；start_flow 统一入口 + 5 agent handler + accept_mode 适配；audit handler 按 flow_key 分派（rewrite_analysis 走 _on_start_rewrite_current 原路径，其余走 _on_start_generic_analysis 通用分析路径，采纳后 flow_executor.resume 推进）；continuation handler 新增 created_by=="writing_mode" 分支调 _on_start_writing_mode_continuation（精炼输出前置【写作参考】到 user_input）；_on_start_continuation 新增 user_input_override 参数支持写作模式第 3 步注入；新增 _build_previous_chapters_text(lookback) 构建前 lookback 章正文（含当前章）供写作模式分析注入 {{previous_chapters_text}}；_on_rewrite_analysis_accepted 缓存 analysis_text 到 swipe.parameters_snapshot["_rewrite_analysis_text"]；_on_start_writing_mode_continuation 缓存 refined_output 到 swipe.parameters_snapshot["_writing_mode_refinement"]；_on_rewrite 核心决策——从当前 swipe parameters_snapshot 取缓存键，rewrite_current 有 _rewrite_analysis_text 跳过分析直接调 _on_rewrite_analysis_accepted 生成新 swipe，writing_mode 有 _writing_mode_refinement 跳过阶段 1/2 直接调 _on_start_writing_mode_continuation 生成新 swipe，无缓存走 _on_start_continuation_routed 完整流程；旧 swipe 无缓存键回退原流程；_on_rewrite 在 get_parameters() 重赋值后补回 params["model"]=get_selected_model()（get_parameters 不含 model，需显式补充，确保重写各分支用面板选中模型而非回退 flow_models）；volume_phase 多阶段流程：_prepare_volume_run→_start_volume_phase→phase_output→resume；卷续写暂存节点持久化 ~/.novelforge/volume_states/{chapter_id}.json + 选中章节恢复入口 _check_volume_resume→_resume_volume_state + 阶段失败重试对话框 + 停止/完成/出错清理；逐章子步骤进度 _on_volume_chapter_step_started 累积 _volume_chapter_steps_seen 驱动面板 4 步标签（细纲/写作/验证/修订）+ 状态栏；章节切换状态保留 7 缓冲字段；closeEvent 停止 _continuation_worker/_audit_worker/_volume_orchestrator 三 worker；_on_start_continuation 温度（0.0-2.0）+目标字数（100-50000）范围校验；3 处 prompt_assembler.assemble 调用点（单章续写生成 L1865/续写预览 L3473/重写生成 L5510）均传齐 world_ontology/protagonist_profile/custom_audit_rules/style_profile 4 个档案参数——单章续写生成补 style_profile 修复文风档案未组装 bug，续写预览补齐 4 个档案参数确保预览与实际发送一致；审计 chunk_received 经 _on_audit_chunk_received 中转槽转发到 AuditDialog 防对话框已删除 RuntimeError 崩溃 + _on_audit_cancelled 取消前 disconnect）
-│   ├── continuation_panel.py    # 续写控制面板（动态插件下拉由 set_flow_plugins 填充；start_flow 统一信号替代原 start_continuation/rewrite_current_analysis_requested；rewrite 信号统一入口——_on_rewrite_clicked 统一发射 rewrite(created_by="rewrite") 由 MainWindow 决策是否复用缓存审计结果；端点/模型下拉框 AdjustToContents 自适应宽度；端点切换按 enabled_models 填充模型下拉并按名称排序，会话记忆每端点上次手动选择模型；select_model_by_name 供 _refresh_endpoints 同步流程配置模型；get_selected_model 供调试预览取面板当前模型；输出框右键 4 色高亮 + 备注；highlights_changed 信号持久化）
+│   ├── continuation_panel.py    # 续写控制面板（动态插件下拉由 set_flow_plugins 填充；start_flow 统一信号替代原 start_continuation/rewrite_current_analysis_requested；rewrite 信号统一入口——_on_rewrite_clicked 统一发射 rewrite(created_by="rewrite") 由 MainWindow 决策是否复用缓存审计结果；端点/模型下拉框 AdjustToContents 自适应宽度；端点切换按 enabled_models 填充模型下拉并按名称排序，会话记忆每端点上次手动选择模型；select_model_by_name 供 _refresh_endpoints 同步流程配置模型；get_selected_model 供调试预览取面板当前模型；用户输入区按行数自动增高约 1～6 行并 WidgetWidth 换行；输出框右键 4 色高亮 + 备注；highlights_changed 信号持久化）
 │   ├── volume_panel.py          # 卷续写控制面板（配置/两层进度/五 Tab 产物查看/流式区）
 │   ├── context_preview_panel.py # 上下文提取预览面板（ontology/protagonist/custom_rule 三类提取按钮互斥 + 流式展示）
 │   ├── chapter_list.py          # 章节列表（虚拟滚动/搜索/右键菜单；当前选中章节持续高亮——ChapterHighlightDelegate 自定义 QStyledItemDelegate 在 paint() 中 fillRect 绕开 QSS 选中态覆盖；FullTextSearchWorker.run 通过 read_chapter_content 文件系统直读章节正文不访问 SQLite 跨线程安全；_stop_fulltext_search 非阻塞——worker finished 信号触发 _on_search_worker_finished 自清理替代 wait(3000)，sender() 校验防新搜索误清）
@@ -77,7 +77,9 @@ novelforge/
 │   ├── settings_dialog.py       # 设置对话框（API 端点管理含 models 全部列表 + enabled_models 可勾选多选 QListWidget + 全选/全不选/自定义模型录入、复制端点；default_model 自动取首个已启用供后台流程；reasoning_effort 7 档；EndpointEditDialog._on_accept base_url 校验 http/https scheme + rstrip("/")；ModelFetchWorker 增加 stop() best-effort 标志位 + finished→deleteLater 自清理 + closeEvent/_on_fetch_models 停止前一个 worker wait(2000) + 防御式 isRunning 访问避免 wrapper 失效 RuntimeError；不含上下文提取配置——已统一由流程端点配置+预览面板管理）
 │   ├── flow_endpoint_dialog.py  # 流程端点配置（10 流程端点映射 + 每流程模型下拉 enabled_models 回退链 + 8 非正文流程破限等级下拉 off/low/mid/high/custom + 自定义文本编辑入口）
 │   ├── jailbreak_custom_dialog.py # 自定义破限文本编辑对话框（QPlainTextEdit + 确定/取消）
-│   ├── font_settings.py / history_panel.py / project_panel.py / template_editor.py / worldbook_panel.py / dialogs.py / flow_layout.py / wheel_filter.py
+│   ├── checkable_combo.py       # 可勾选多选下拉（世界书用；关闭态摘要文本 + 主题 QSS 箭头）
+│   ├── worldbook_panel.py       # 续写配置内嵌世界书多选（选中即启用；get_selected_worldbook_ids）
+│   ├── font_settings.py / history_panel.py / project_panel.py / template_editor.py / dialogs.py / flow_layout.py / wheel_filter.py
 │   └── ...
 └── resources/       # 资源文件
     ├── defaults/
@@ -97,7 +99,8 @@ novelforge/
     │       ├── phase_rewrite_analysis.txt # 重写当前章节需求分析（7 占位符含 {{style_profile}}，5 分节输出；分析原则新增「剧情排布保全」——在不影响原剧情排布发展前提下满足用户诉求，原章节事件序列/场景顺序/转折点/伏笔布局/人物登场退场节奏为须保全的剧情骨架；当前章节分析分节须专门审视开头连贯性（承接前一章结尾的过渡方式）与结尾连贯性（结尾性质开放/封闭+过渡下一章+伏笔）；重写要点分节含开头结尾连贯性保全要点；具体要求清单 #7 结构类强化开头连贯性+结尾连贯性）
     │       ├── phase_writing_element_analysis.txt  # 写作模式阶段 1 写作要素分析（7 占位符含 {{previous_chapters_text}}/{{style_profile}}，5 分节输出：出场角色/场所/相关事件/关键伏笔/风格基调）
     │       └── phase_writing_element_refinement.txt # 写作模式阶段 2 写作要素深化（4 占位符含 {{prev_analysis}}/{{style_profile}}，角色形象外貌/心理学形象/语言风格/OOC红线 + 场所精炼 + 其他关键要素）
-    └── themes/          # QSS 主题（light/dark，Apple HIG 风格）
+    ├── icons/           # 主题箭头图标（combo/spin 上下 chevron，亮暗各一套）
+    └── themes/          # QSS 主题（light/dark，Apple HIG 风格；Combo 统一 SVG 箭头；SpinBox 显式 up/down-button 几何校准热区）
 ```
 
 ## 关键设计决策
@@ -124,7 +127,7 @@ novelforge/
 - **世界观底层提取**（OntologyExtractor）：全文提取 WorldOntology 7 大维度固化到 Project.world_ontology（全文一次不随章节变）；镜像 ContextExtractor 三大机制；拆 7 维度为 ContextEntry 存入项目世界书
 - **文风档案提取**（StyleExtractor）：全文提取 StyleProfile 9 大维度文笔风格参数固化到 Project.style_profile（全文一次不随章节变）；镜像 OntologyExtractor 三大机制（拆批/增量合并/语义整合）；不入世界书；flow_key="style_extraction"，默认破限等级 low
 - **主角形象提取**（ContextExtractor._extract_protagonist）：8 维度心理学档案，独立链路（extract_protagonist_streaming + 独立缓存 key 前缀 protagonist:），与上下文提取解耦避免互相覆盖；按章节缓存
-- **世界书条目级开关**：`_get_enabled_worldbook_entries` 过滤 enabled=False，单点覆盖 3 处续写入口
+- **世界书条目级开关**：`_get_enabled_worldbook_entries` 过滤 enabled=False，单点覆盖 3 处续写入口；续写配置区支持多选世界书（`get_selected_worldbook_ids`），选中即启用，跨书 uid 冲突时先选优先
 
 ### 4. trimStrings 行为
 
@@ -142,14 +145,16 @@ novelforge/
 - 窄屏自适应：按钮区用 QFlowLayout 自动换行
 - CollapsiblePanel 添加控件必须用 `add_widget()`
 - 按钮高度统一 28px（全局 QSS 接管）
+- 用户输入区按内容自动增高（约 1～6 行封顶，超出内部滚动），按宽度自动换行
 
 ### 6. 主题系统（Apple HIG 风格）
 
-- 主题文件 `resources/themes/{light,dark}.qss`，由 `main_window._apply_theme()` 全局应用
+- 主题文件 `resources/themes/{light,dark}.qss`，由 `main_window._apply_theme()` 全局应用；箭头图标路径经 `__COMBO_CHEVRON__`/`__SPIN_CHEVRON_UP__`/`__SPIN_CHEVRON_DOWN__` 占位符注入绝对路径
 - 三态：暗色/亮色/跟随系统（监听 colorSchemeChanged 实时重应用）
 - 设计 token：主色 System Blue `#007aff`（亮）/`#0a84ff`（暗）；圆角分级（按钮 8px/主按钮 14px/卡片 10px/列表项 6px）
 - **内联样式禁用**：UI 代码不用 `setStyleSheet`，所有样式通过 `setObjectName` 由全局 QSS 接管
 - 状态色：进行中=橙/成功=绿/错误=红/次要=半透明
+- Combo 统一 SVG 下拉箭头；SpinBox/QDoubleSpinBox 显式 `up/down-button` 几何，避免 padding+圆角导致箭头与点击热区错位
 
 ### 7. Token 预算
 

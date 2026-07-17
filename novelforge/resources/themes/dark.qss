@@ -174,12 +174,21 @@ QPushButton#primaryBtn:disabled {
 }
 
 /* ===== 输入控件 ===== */
-QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {
+QLineEdit, QComboBox {
     background-color: #1c1c1e;
     color: #f5f5f7;
     border: 1px solid rgba(84, 84, 88, 0.6);
     border-radius: 8px;
     padding: 5px 8px;
+    min-height: 20px;
+}
+
+QSpinBox, QDoubleSpinBox {
+    background-color: #1c1c1e;
+    color: #f5f5f7;
+    border: 1px solid rgba(84, 84, 88, 0.6);
+    border-radius: 8px;
+    padding: 5px 22px 5px 8px;
     min-height: 20px;
 }
 
@@ -195,6 +204,40 @@ QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabl
 QComboBox::drop-down {
     border: none;
     width: 22px;
+}
+
+QComboBox::down-arrow {
+    image: url(__COMBO_CHEVRON__);
+    width: 12px;
+    height: 12px;
+}
+
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-origin: border;
+    subcontrol-position: top right;
+    width: 20px;
+    border: none;
+    background: transparent;
+}
+
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-origin: border;
+    subcontrol-position: bottom right;
+    width: 20px;
+    border: none;
+    background: transparent;
+}
+
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url(__SPIN_CHEVRON_UP__);
+    width: 10px;
+    height: 10px;
+}
+
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url(__SPIN_CHEVRON_DOWN__);
+    width: 10px;
+    height: 10px;
 }
 
 QComboBox QAbstractItemView {

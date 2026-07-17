@@ -2,9 +2,9 @@
 
 包含：
 - 顶部模式切换区（QComboBox 选择 single/volume/rewrite_current 模式）
-- 中部垂直 QSplitter：
+- 中部垂直布局：
   - 上半：模式面板区（续写配置区/VolumePanel，按模式显隐），撑满中间空间
-  - 下半：用户输入区（QPlainTextEdit），默认小、可拖动把手调整高度
+  - 下半：用户输入区（QPlainTextEdit），按行数自动增高（约 1~6 行）并自动换行
 - 底部按钮区（流式布局，开始/停止/重写/接受/对比等）
 - 上下文提取预览面板（M4：显示提取结果，支持编辑/禁用/添加）
 - 流式输出区（QPlainTextEdit，QTimer 50ms 节流批量更新）
@@ -46,7 +46,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSpinBox,
-    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -66,6 +65,10 @@ UI_THROTTLE_MS = 50
 
 # 光标闪烁间隔（毫秒）
 CURSOR_BLINK_MS = 500
+
+# 用户输入框行高约束
+USER_INPUT_MIN_HEIGHT = 36
+USER_INPUT_MAX_LINES = 6
 
 # 高亮颜色 4 色（黄/绿/蓝/红），背景半透明
 _HIGHLIGHT_COLORS: dict[str, str] = {
@@ -141,52 +144,61 @@ class ContinuationPanel(QWidget):
         self._setup_connections()
         self._update_button_states()
 
+    def resizeEvent(self, event) -> None:  # noqa: ANN001
+        """宽度变化时按换行结果重算输入框高度。"""
+        super().resizeEvent(event)
+        self._adjust_user_input_height()
+
     def _setup_ui(self) -> None:
         """构建 UI。"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
 
         # ===== 模式切换 =====
         mode_group = QGroupBox("续写模式")
         mode_layout = QHBoxLayout(mode_group)
+        mode_layout.setContentsMargins(4, 4, 4, 4)
+        mode_layout.setSpacing(2)
         self._mode_combo = QComboBox()
+        self._mode_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         # 不再硬编码 3 项，由 set_flow_plugins 动态填充插件注册表
         mode_layout.addWidget(self._mode_combo)
         layout.addWidget(mode_group)
 
-        # ===== 中部 QSplitter：模式面板区（上）+ 用户输入区（下）=====
-        # 上半部分撑满中间空间，下半部分默认小、可拖动调整高度
-        self._content_splitter = QSplitter(Qt.Orientation.Vertical)
-        self._content_splitter.setChildrenCollapsible(False)
-        self._content_splitter.setHandleWidth(6)
-
-        # ----- 上半：模式面板容器 -----
+        # ===== 中部：模式面板区（上，撑满）+ 用户输入区（下，内容驱动高度）=====
         self._mode_content_widget = QWidget()
         mode_content_layout = QVBoxLayout(self._mode_content_widget)
         mode_content_layout.setContentsMargins(0, 0, 0, 0)
-        mode_content_layout.setSpacing(4)
+        mode_content_layout.setSpacing(2)
 
         # ===== 续写配置区 =====
         self._config_group = QGroupBox("续写配置")
         config_form = QFormLayout(self._config_group)
+        config_form.setContentsMargins(4, 4, 4, 4)
+        config_form.setHorizontalSpacing(6)
+        config_form.setVerticalSpacing(2)
+
+        _combo_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        _spin_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         # 预设选择（M2 启用）
         self._preset_combo = QComboBox()
         self._preset_combo.addItem("默认预设", "default")
+        self._preset_combo.setSizePolicy(_combo_policy)
         config_form.addRow("预设:", self._preset_combo)
 
         # 端点选择
         self._endpoint_combo = QComboBox()
         self._endpoint_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self._endpoint_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._endpoint_combo.setSizePolicy(_combo_policy)
         config_form.addRow("API 端点:", self._endpoint_combo)
 
         # 模型选择（不可编辑，自动从端点填充）
         self._model_combo = QComboBox()
         self._model_combo.setEditable(False)
         self._model_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self._model_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._model_combo.setSizePolicy(_combo_policy)
         config_form.addRow("模型:", self._model_combo)
 
         # 温度
@@ -194,6 +206,7 @@ class ContinuationPanel(QWidget):
         self._temp_spin.setRange(0.0, 2.0)
         self._temp_spin.setSingleStep(0.1)
         self._temp_spin.setValue(0.8)
+        self._temp_spin.setSizePolicy(_spin_policy)
         config_form.addRow("温度:", self._temp_spin)
 
         # 目标字数（单章续写目标字数，注入 {{target_words}} 宏）
@@ -202,6 +215,7 @@ class ContinuationPanel(QWidget):
         self._target_words_spin.setValue(2000)
         self._target_words_spin.setSingleStep(500)
         self._target_words_spin.setToolTip("单章目标字数（500-20000）")
+        self._target_words_spin.setSizePolicy(_spin_policy)
         config_form.addRow("目标字数:", self._target_words_spin)
 
         # 回溯章节数（0=全部前文，上限 99999 实际不限制）
@@ -209,6 +223,7 @@ class ContinuationPanel(QWidget):
         self._lookback_spin.setRange(0, 99999)
         self._lookback_spin.setValue(5)
         self._lookback_spin.setSpecialValueText("全部前文")
+        self._lookback_spin.setSizePolicy(_spin_policy)
         config_form.addRow("回溯章节数:", self._lookback_spin)
 
         # 世界书选择（全局加载，与预设并列）
@@ -221,25 +236,34 @@ class ContinuationPanel(QWidget):
         mode_content_layout.addWidget(self._volume_panel, 1)
         self._volume_panel.hide()
 
-        # ----- 下半：用户输入区（贴底，可拖动调整高度）-----
+        # ----- 下半：用户输入区（按行数自动增高，约 1~6 行）-----
         self._user_input_group = QGroupBox("用户输入（续写指令）")
         user_input_layout = QVBoxLayout(self._user_input_group)
         user_input_layout.setContentsMargins(2, 2, 2, 2)
-        user_input_layout.setSpacing(2)
+        user_input_layout.setSpacing(0)
         self._user_input_edit = QPlainTextEdit()
         self._user_input_edit.setPlaceholderText(
             "输入续写指令或额外要求（可选）...\n如：聚焦主角的心理变化，增加环境描写"
         )
-        self._user_input_edit.setMinimumHeight(36)
+        self._user_input_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self._user_input_edit.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._user_input_edit.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._user_input_edit.setMinimumHeight(USER_INPUT_MIN_HEIGHT)
         user_input_layout.addWidget(self._user_input_edit)
+        self._user_input_edit.textChanged.connect(self._adjust_user_input_height)
+        doc_layout = self._user_input_edit.document().documentLayout()
+        if doc_layout is not None:
+            doc_layout.documentSizeChanged.connect(
+                lambda _size: self._adjust_user_input_height()
+            )
 
-        self._content_splitter.addWidget(self._mode_content_widget)
-        self._content_splitter.addWidget(self._user_input_group)
-        self._content_splitter.setStretchFactor(0, 1)  # 模式面板撑满中间
-        self._content_splitter.setStretchFactor(1, 0)  # 用户输入默认小
-        self._content_splitter.setSizes([400, 60])
-
-        layout.addWidget(self._content_splitter, 1)
+        layout.addWidget(self._mode_content_widget, 1)
+        layout.addWidget(self._user_input_group, 0)
+        self._adjust_user_input_height()
 
         # ===== 上下文预览面板（不在本面板布局中，由 MainWindow 放入独立分栏） =====
         self._context_preview_panel = ContextPreviewPanel()
@@ -304,7 +328,13 @@ class ContinuationPanel(QWidget):
 
         # 安装滚轮事件过滤器：未聚焦时不响应滚轮，转发给父级滚动区域
         self._wheel_filter = WheelEventFilter(self)
-        for combo in (self._mode_combo, self._preset_combo, self._endpoint_combo, self._model_combo):
+        for combo in (
+            self._mode_combo,
+            self._preset_combo,
+            self._endpoint_combo,
+            self._model_combo,
+            self._worldbook_panel._worldbook_combo,
+        ):
             combo.installEventFilter(self._wheel_filter)
         for spin in (self._temp_spin, self._target_words_spin, self._lookback_spin):
             spin.installEventFilter(self._wheel_filter)
@@ -511,22 +541,22 @@ class ContinuationPanel(QWidget):
         return "default"
 
     def set_worldbooks(
-        self, worldbooks: list[dict], default_id: str = ""
+        self, worldbooks: list[dict], default_ids: list[str] | None = None
     ) -> None:
         """设置全局世界书列表。
 
         Args:
             worldbooks: 世界书字典列表，每项含 id/name/enabled
-            default_id: 默认选中的世界书 ID
+            default_ids: 默认勾选的世界书 ID 列表
         """
-        self._worldbook_panel.set_worldbooks(worldbooks, default_id)
+        self._worldbook_panel.set_worldbooks(worldbooks, default_ids)
 
-    def get_selected_worldbook_id(self) -> str:
-        """获取选中的世界书 ID（未选择时返回空字符串）。"""
-        return self._worldbook_panel.get_selected_worldbook_id()
+    def get_selected_worldbook_ids(self) -> list[str]:
+        """获取选中的世界书 ID 列表。"""
+        return self._worldbook_panel.get_selected_worldbook_ids()
 
     def is_worldbook_enabled(self) -> bool:
-        """是否启用世界书（已勾选且选了具体世界书）。"""
+        """是否启用世界书（选中至少一本）。"""
         return self._worldbook_panel.is_enabled()
 
     def get_selected_endpoint(self) -> dict | None:
@@ -989,6 +1019,45 @@ class ContinuationPanel(QWidget):
     def clear_user_input(self) -> None:
         """清空用户输入。"""
         self._user_input_edit.clear()
+        self._adjust_user_input_height()
+
+    def _user_input_extra_height(self) -> int:
+        """计算输入框边框与文档边距占用的额外高度。"""
+        edit = self._user_input_edit
+        margins = edit.contentsMargins()
+        doc_margin = int(edit.document().documentMargin() * 2)
+        return (
+            margins.top()
+            + margins.bottom()
+            + 2 * edit.frameWidth()
+            + doc_margin
+        )
+
+    def _user_input_max_height(self) -> int:
+        """约 6 行内容的最大高度。"""
+        line_h = self._user_input_edit.fontMetrics().lineSpacing()
+        return line_h * USER_INPUT_MAX_LINES + self._user_input_extra_height()
+
+    def _adjust_user_input_height(self) -> None:
+        """按文档高度自动调整输入框高度（1~6 行）。"""
+        edit = self._user_input_edit
+        extra = self._user_input_extra_height()
+        line_h = edit.fontMetrics().lineSpacing()
+        doc = edit.document()
+        # 有有效宽度时用文档排版高度（含自动换行）；否则退回按块数估算
+        if edit.viewport().width() > 1:
+            doc_h = int(doc.size().height())
+        else:
+            doc_h = 0
+        doc_h = max(doc_h, doc.blockCount() * line_h)
+        min_h = max(USER_INPUT_MIN_HEIGHT, line_h + extra)
+        max_h = self._user_input_max_height()
+        target = max(min_h, min(doc_h + extra, max_h))
+        # setFixedHeight 会同时锁死 min/max；随后放开 max 到 6 行上限，
+        # minimum 保持为当前内容高度，避免被布局压矮。
+        edit.setFixedHeight(target)
+        edit.setMaximumHeight(max_h)
+        edit.setMinimumHeight(target)
 
     def set_output_text(self, text: str) -> None:
         """设置输出区文本（编辑后接受时用）。"""

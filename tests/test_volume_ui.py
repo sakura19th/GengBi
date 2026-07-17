@@ -3,8 +3,9 @@
 覆盖以下检查点：
 1. VolumePanel.set_presets/get_selected_preset_id 预设选择
 2. parse_token_limit 与 VolumePanel token 切分下拉框联动 get_config
-3. ContinuationPanel 用户输入框高度约束（maxHeight 80 / minHeight 60）
+3. ContinuationPanel 用户输入框高度约束（约 1~6 行自适应）
 4. VolumePanel.show_continue_button/hide_continue_button 显隐与产物 tab 切换
+5. WorldBookPanel 多选下拉与启用语义
 """
 from __future__ import annotations
 
@@ -22,9 +23,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import pytest
 from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton
 
-from novelforge.ui.continuation_panel import ContinuationPanel
+from novelforge.ui.continuation_panel import ContinuationPanel, USER_INPUT_MAX_LINES
 from novelforge.ui.helpers import select_combo_by_id
 from novelforge.ui.volume_panel import VolumePanel
+from novelforge.ui.worldbook_panel import WorldBookPanel
 from novelforge.models import (
     ChapterArtifacts,
     ChapterStageArtifact,
@@ -295,13 +297,64 @@ class TestContinuationPanelInputHeight:
     """ContinuationPanel 用户输入框高度约束测试。"""
 
     def test_user_input_min_height_is_36(self, continuation_panel) -> None:
-        """用户输入框 minHeight 为 36（拖动底线）。"""
-        assert continuation_panel._user_input_edit.minimumHeight() == 36
+        """空内容时输入框高度不低于 36。"""
+        continuation_panel._adjust_user_input_height()
+        assert continuation_panel._user_input_edit.height() >= 36
+        assert continuation_panel._user_input_edit.minimumHeight() >= 36
 
-    def test_user_input_no_max_height_constraint(self, continuation_panel) -> None:
-        """用户输入框无 maxHeight 约束（由 QSplitter 控制高度，可拖动调整）。"""
-        # QWIDGETSIZE_MAX 是 Qt 内部宏常量，值为 16777215
-        assert continuation_panel._user_input_edit.maximumHeight() == 16777215
+    def test_user_input_has_max_height_about_6_lines(self, continuation_panel) -> None:
+        """用户输入框 maxHeight 约为 6 行（内容驱动，超出内部滚动）。"""
+        continuation_panel._adjust_user_input_height()
+        max_h = continuation_panel._user_input_edit.maximumHeight()
+        expected = continuation_panel._user_input_max_height()
+        assert max_h == expected
+        line_h = continuation_panel._user_input_edit.fontMetrics().lineSpacing()
+        assert max_h >= line_h * USER_INPUT_MAX_LINES
+
+    def test_user_input_grows_then_caps(self, continuation_panel, qapp) -> None:
+        """多行输入增高，超过约 6 行后不再继续增高。"""
+        edit = continuation_panel._user_input_edit
+        h0 = edit.height()
+        edit.setPlainText("一行\n二行\n三行")
+        qapp.processEvents()
+        continuation_panel._adjust_user_input_height()
+        h_mid = edit.height()
+        assert h_mid >= h0
+
+        edit.setPlainText("\n".join(f"第{i}行" for i in range(20)))
+        qapp.processEvents()
+        continuation_panel._adjust_user_input_height()
+        assert edit.height() == continuation_panel._user_input_max_height()
+
+
+# ===== 3b. 世界书多选 =====
+
+
+class TestWorldBookPanelMultiSelect:
+    """WorldBookPanel 多选下拉测试。"""
+
+    def test_empty_selection_disabled(self, qapp) -> None:
+        """未选择时 is_enabled 为 False。"""
+        panel = WorldBookPanel()
+        panel.set_worldbooks(
+            [{"id": "a", "name": "书A", "enabled": True},
+             {"id": "b", "name": "书B", "enabled": True}],
+            default_ids=[],
+        )
+        assert panel.get_selected_worldbook_ids() == []
+        assert panel.is_enabled() is False
+
+    def test_multi_select_ids(self, qapp) -> None:
+        """可勾选多本并返回 ID 列表。"""
+        panel = WorldBookPanel()
+        panel.set_worldbooks(
+            [{"id": "a", "name": "书A", "enabled": True},
+             {"id": "b", "name": "书B", "enabled": True},
+             {"id": "c", "name": "书C", "enabled": True}],
+            default_ids=["a", "c"],
+        )
+        assert panel.get_selected_worldbook_ids() == ["a", "c"]
+        assert panel.is_enabled() is True
 
 
 # ===== 4. VolumePanel 继续/隐藏继续按钮 =====

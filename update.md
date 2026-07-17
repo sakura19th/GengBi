@@ -1,5 +1,28 @@
 # 更新日志
 
+## 2026-07-17：续写控制输入栏自适应 + 世界书多选 + SpinBox 箭头修复
+
+### 背景
+
+用户输入栏高度固定、靠 splitter 拖动不直观；世界书仅能单选且需额外勾选启用；温度/目标字数/回溯章节数 SpinBox 因主题未定义按钮几何导致箭头绘制与点击热区错位；世界书多选自绘箭头与其它下拉外观不一致。
+
+### 核心改动
+
+- **输入栏自适应**（`continuation_panel.py`）：去掉垂直 splitter，按文档行数自动增高（约 1～6 行），显式 `WidgetWidth` 换行；收紧配置区 margins/spacing
+- **世界书多选**（`checkable_combo.py` 新增 + `worldbook_panel.py`）：可勾选多选下拉，选中至少一本即启用；去掉「启用世界书」复选框；API 改为 `get_selected_worldbook_ids()`；`main_window` 按多 ID 加载并合并条目（跨书 uid 冲突时先选优先）
+- **主题 SpinBox/Combo 校准**（`light.qss`/`dark.qss` + `resources/icons/chevron_*.svg`）：Spin 独立规则显式 `up/down-button` 与箭头图；Combo 统一 SVG chevron；`_apply_theme` 注入绝对路径占位符
+- **外观统一**：续写区 Combo/Spin 统一 Expanding+Fixed；世界书下拉走主题箭头并安装滚轮过滤
+
+### 测试
+
+- `python -m pytest tests/test_volume_ui.py -q` → 26 passed（含输入高度与世界书多选断言）
+
+### 文档同步
+
+- `agent.md`：版本 → v0.2.12；UI 相关描述同步
+- `README.md`：版本 → v0.2.12；更新记录追加 v0.2.12
+- `update.md`：本条目
+
 ## 2026-07-16：全部提取器改为默认流式输出
 
 ### 背景

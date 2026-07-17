@@ -96,8 +96,12 @@ from novelforge.ui.audit_dialog import AuditDialog
 from novelforge.services.custom_audit_rule_service import CustomAuditRuleService
 from novelforge.ui.custom_rule_dialog import CustomRuleInputDialog, CustomRulesViewDialog
 from novelforge.ui.flow_endpoint_dialog import FlowEndpointDialog
-from novelforge.utils.paths import get_agent_prompt_path, get_theme_path, load_text_resource
-
+from novelforge.utils.paths import (
+    get_agent_prompt_path,
+    get_resource_path,
+    get_theme_path,
+    load_text_resource,
+)
 logger = logging.getLogger(__name__)
 
 # 最小窗口尺寸
@@ -901,6 +905,24 @@ class MainWindow(QMainWindow):
         qss_path = get_theme_path(theme)
         try:
             qss = qss_path.read_text(encoding="utf-8")
+            # 注入箭头图标绝对路径（QSS url 在 setStyleSheet 字符串模式下需绝对路径）
+            is_dark = theme == "dark"
+            combo_chevron = get_resource_path(
+                "icons",
+                "chevron_down_dark.svg" if is_dark else "chevron_down.svg",
+            )
+            spin_up = get_resource_path(
+                "icons",
+                "chevron_up_dark.svg" if is_dark else "chevron_up.svg",
+            )
+            spin_down = get_resource_path(
+                "icons",
+                "chevron_down_dark.svg" if is_dark else "chevron_down.svg",
+            )
+            # Windows 下 Qt QSS 需要正斜杠
+            qss = qss.replace("__COMBO_CHEVRON__", combo_chevron.resolve().as_posix())
+            qss = qss.replace("__SPIN_CHEVRON_UP__", spin_up.resolve().as_posix())
+            qss = qss.replace("__SPIN_CHEVRON_DOWN__", spin_down.resolve().as_posix())
             if app:
                 app.setStyleSheet(qss)
             logger.debug("应用主题: %s", theme)
@@ -1097,35 +1119,48 @@ class MainWindow(QMainWindow):
                 for wb in worldbooks
                 if wb.enabled
             ]
-            # 保留当前选中（若仍存在）
-            current_id = ""
+            # 保留当前多选（若仍存在）
+            current_ids: list[str] = []
             try:
-                current_id = self.continuation_panel.get_selected_worldbook_id()
+                current_ids = self.continuation_panel.get_selected_worldbook_ids()
             except Exception:
                 pass
-            self.continuation_panel.set_worldbooks(wb_list, default_id=current_id)
+            self.continuation_panel.set_worldbooks(wb_list, default_ids=current_ids)
         except Exception as e:
             logger.error("刷新世界书列表失败: %s", e)
 
     def _get_enabled_worldbook_entries(self) -> list:
-        """获取续写面板当前选中且启用的世界书条目列表。
+        """获取续写面板当前选中世界书的启用条目列表。
 
-        仅返回条目级 enabled=True 的条目（条目级开关控制是否注入上下文）。
+        遍历多选世界书，仅返回条目级 enabled=True 的条目；
+        跨书 uid 冲突时先选中的书优先。
 
         Returns:
-            ContextEntry 列表；未启用或未选择时返回空列表
+            ContextEntry 列表；未选择时返回空列表
         """
         try:
             if not self.continuation_panel.is_worldbook_enabled():
                 return []
-            wb_id = self.continuation_panel.get_selected_worldbook_id()
-            if not wb_id:
+            wb_ids = self.continuation_panel.get_selected_worldbook_ids()
+            if not wb_ids:
                 return []
-            wb = self.worldbook_service.load_worldbook(wb_id)
-            if wb is None:
-                logger.warning("世界书 %s 不存在", wb_id)
-                return []
-            return [e for e in wb.entries if e.enabled]
+            merged: list = []
+            seen_uids: set[str] = set()
+            for wb_id in wb_ids:
+                wb = self.worldbook_service.load_worldbook(wb_id)
+                if wb is None:
+                    logger.warning("世界书 %s 不存在", wb_id)
+                    continue
+                for e in wb.entries:
+                    if not e.enabled:
+                        continue
+                    uid = getattr(e, "uid", "") or ""
+                    if uid and uid in seen_uids:
+                        continue
+                    if uid:
+                        seen_uids.add(uid)
+                    merged.append(e)
+            return merged
         except Exception as e:
             logger.error("获取启用世界书条目失败: %s", e)
             return []
