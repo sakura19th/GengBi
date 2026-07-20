@@ -127,6 +127,10 @@ class ContinuationPanel(QWidget):
     start_flow = Signal(str, dict)
     # 世界书多选变化（ID 列表），供 MainWindow 持久化
     worldbook_changed = Signal(list)
+    # 端点切换（参数：端点 ID），供 MainWindow 持久化面板选择
+    endpoint_changed = Signal(str)
+    # 用户手动切换模型（参数：端点 ID, 模型名），供 MainWindow 持久化面板选择
+    model_user_changed = Signal(str, str)
 
     def __init__(self, parent=None) -> None:
         """初始化续写控制面板。"""
@@ -415,30 +419,40 @@ class ContinuationPanel(QWidget):
         default_model = endpoint.get("default_model", "")
         # 回退链：enabled_models → models → [default_model]（旧端点兼容）
         models_to_show = enabled or all_models or ([default_model] if default_model else [])
+        ep_id = endpoint.get("id", "")
         if not models_to_show:
             self._model_combo.blockSignals(True)
             self._model_combo.clear()
             self._model_combo.blockSignals(False)
+            # 即使无模型也通知 MainWindow 持久化端点切换
+            if ep_id:
+                self.endpoint_changed.emit(ep_id)
             return
         self.set_models(models_to_show)
         # 选中：该端点上次手动选择的模型 → 否则首个
-        ep_id = endpoint.get("id", "")
         last = self._last_model_per_endpoint.get(ep_id, "")
         idx = self._model_combo.findText(last) if last else -1
         if idx < 0:
             idx = 0
+            if last:
+                logger.warning("端点 %s 上次选的模型 %s 已不在启用列表，切回首个", ep_id, last)
         self._model_combo.blockSignals(True)
         self._model_combo.setCurrentIndex(idx)
         self._model_combo.blockSignals(False)
+        # 通知 MainWindow 持久化端点切换
+        if ep_id:
+            self.endpoint_changed.emit(ep_id)
 
     def _on_model_user_changed(self, _index: int) -> None:
-        """用户手动切换模型时记录会话记忆（每端点记住上次选择）。"""
+        """用户手动切换模型时记录会话记忆（每端点记住上次选择）并通知持久化。"""
         ep = self.get_selected_endpoint()
         if not ep:
             return
         text = self._model_combo.currentText()
         if text:
-            self._last_model_per_endpoint[ep.get("id", "")] = text
+            ep_id = ep.get("id", "")
+            self._last_model_per_endpoint[ep_id] = text
+            self.model_user_changed.emit(ep_id, text)
 
     # ===== 模式管理 =====
 

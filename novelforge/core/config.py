@@ -28,7 +28,9 @@
             "default_max_tokens": int,
             "auto_save": bool,
             "show_token_count": bool,
-            "selected_worldbook_ids": list[str]  # 续写面板多选世界书，跨会话恢复
+            "selected_worldbook_ids": list[str],  # 续写面板多选世界书，跨会话恢复
+            "last_endpoint_id": str,  # 续写面板上次选中的端点 ID，跨会话恢复（面板优先于流程配置）
+            "last_model_per_endpoint": dict[str, str]  # 每端点上次选中的模型，跨会话恢复（面板优先于流程配置）
         },
         "volume": {},  # 卷续写配置持久化（VolumeRunConfig 的 JSON dump）
         "context_extract": {
@@ -531,6 +533,33 @@ class ConfigManager:
         with self._lock:
             cont = self.config.setdefault("continuation", {})
             cont["selected_worldbook_ids"] = [str(i) for i in ids if i]
+            self.save()
+
+    def get_last_panel_endpoint_id(self) -> str:
+        """获取续写面板上次选中的端点 ID（跨会话恢复，面板优先于流程配置）。"""
+        cont = self.config.get("continuation", {})
+        return str(cont.get("last_endpoint_id", ""))
+
+    def set_last_panel_endpoint_id(self, endpoint_id: str) -> None:
+        """设置续写面板上次选中的端点 ID 并保存。"""
+        with self._lock:
+            cont = self.config.setdefault("continuation", {})
+            cont["last_endpoint_id"] = str(endpoint_id or "")
+            self.save()
+
+    def get_last_model_per_endpoint(self) -> dict[str, str]:
+        """获取每端点上次选中的模型映射（跨会话恢复，面板优先于流程配置）。"""
+        cont = self.config.get("continuation", {})
+        mapping = cont.get("last_model_per_endpoint", {})
+        if not isinstance(mapping, dict):
+            return {}
+        return {str(k): str(v) for k, v in mapping.items() if k and v}
+
+    def set_last_model_per_endpoint(self, mapping: dict[str, str]) -> None:
+        """设置每端点上次选中的模型映射并保存。"""
+        with self._lock:
+            cont = self.config.setdefault("continuation", {})
+            cont["last_model_per_endpoint"] = {str(k): str(v) for k, v in mapping.items() if k and v}
             self.save()
 
     def get_volume_settings(self) -> dict[str, Any]:

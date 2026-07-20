@@ -378,15 +378,16 @@ class MainWindow(QMainWindow):
         # 恢复窗口状态
         self._restore_window_state()
 
-        # 刷新端点列表
+        # 从 config 加载上次的续写参数到面板（须在 _refresh_endpoints 前，
+        # 因 _refresh_endpoints 的 _on_endpoint_changed 依赖 _last_model_per_endpoint）
+        self._apply_continuation_defaults()
+        # 刷新端点列表（恢复面板持久化的端点+模型选择）
         self._refresh_endpoints()
 
         # 刷新预设列表
         self._refresh_presets()
         # 刷新世界书列表到续写面板
         self._refresh_worldbooks()
-        # 从 config 加载上次的续写参数到面板
-        self._apply_continuation_defaults()
         # 从 config 加载上次的卷续写配置到 VolumePanel
         self._load_volume_config()
 
@@ -494,6 +495,13 @@ class MainWindow(QMainWindow):
         self.continuation_panel.mode_changed.connect(self._on_mode_changed)
         self.continuation_panel.worldbook_changed.connect(
             self._on_panel_worldbook_selection_changed
+        )
+        # 面板端点/模型变更持久化（面板优先于流程配置）
+        self.continuation_panel.endpoint_changed.connect(
+            self._on_panel_endpoint_changed
+        )
+        self.continuation_panel.model_user_changed.connect(
+            self._on_panel_model_changed
         )
         # 卷模式切换时显隐右侧续写输出面板
         self.continuation_panel.output_panel_visibility_requested.connect(
@@ -1033,24 +1041,25 @@ class MainWindow(QMainWindow):
     # ===== 端点管理 =====
 
     def _refresh_endpoints(self) -> None:
-        """刷新 API 端点列表到续写面板。
+        """刷新 API 端点列表到续写面板，恢复上次面板选择（端点+模型持久化）。
 
-        端点切换时模型会自动通过 _on_endpoint_changed 更新。
+        恢复优先级：面板持久化端点 → 当前模式流程端点兜底 → 默认端点。
+        模型由 _on_endpoint_changed 自动从 _last_model_per_endpoint 恢复
+        （_last_model_per_endpoint 已在 _apply_continuation_defaults 从 config 灌入）。
         """
         endpoints = self.config_manager.get_endpoints()
         default_id = self.config_manager.get("default_endpoint_id", "")
         self.continuation_panel.set_endpoints(endpoints, default_id)
-        # 模型由 _on_endpoint_changed 自动设置，无需手动调用 set_models
-        # 同步面板端点到当前模式的流程配置（流程指定即生效，面板仍可手动覆盖）
-        mode = self.continuation_panel.get_mode()
-        flow_key = "volume_continuation" if mode == "volume" else "single_continuation"
-        flow_ep = self.config_manager.get_flow_endpoint(flow_key)
-        if flow_ep:
-            self.continuation_panel.select_endpoint_by_id(flow_ep.get("id", ""))
-        # 同步流程配置的模型到面板（若该流程配置了模型且在当前端点 enabled_models 中）
-        flow_model = self.config_manager.get_flow_model(flow_key)
-        if flow_model:
-            self.continuation_panel.select_model_by_name(flow_model)
+        # 优先恢复面板上次持久化选的端点；若无则兜底当前模式流程端点
+        target_ep_id = self.config_manager.get_last_panel_endpoint_id()
+        if not target_ep_id:
+            mode = self.continuation_panel.get_mode()
+            flow_key = "volume_continuation" if mode == "volume" else "single_continuation"
+            flow_ep = self.config_manager.get_flow_endpoint(flow_key)
+            if flow_ep:
+                target_ep_id = flow_ep.get("id", "")
+        if target_ep_id:
+            self.continuation_panel.select_endpoint_by_id(target_ep_id)
 
     def _resolve_reasoning_effort(
         self, endpoint: dict, preset: WritingPreset | None = None
@@ -1142,6 +1151,22 @@ class MainWindow(QMainWindow):
             )
         except Exception as e:
             logger.error("保存世界书选中状态失败: %s", e)
+
+    def _on_panel_endpoint_changed(self, endpoint_id: str) -> None:
+        """续写面板端点切换时持久化到 config（面板优先于流程配置）。"""
+        try:
+            self.config_manager.set_last_panel_endpoint_id(endpoint_id)
+        except Exception as e:
+            logger.error("保存面板端点选择失败: %s", e)
+
+    def _on_panel_model_changed(self, endpoint_id: str, model: str) -> None:
+        """续写面板用户手动切换模型时持久化到 config（面板优先于流程配置）。"""
+        try:
+            mapping = self.config_manager.get_last_model_per_endpoint()
+            mapping[endpoint_id] = model
+            self.config_manager.set_last_model_per_endpoint(mapping)
+        except Exception as e:
+            logger.error("保存面板模型选择失败: %s", e)
 
     def _get_enabled_worldbook_entries(self) -> list:
         """获取续写面板当前选中世界书的启用条目列表。
@@ -1251,6 +1276,10 @@ class MainWindow(QMainWindow):
                 "target_words": cont.get("default_target_words", 2000),
                 "lookback_chapters": cont.get("default_lookback_chapters", 5),
             })
+            # 恢复持久化的每端点模型记忆，供 _on_endpoint_changed 读取
+            mapping = self.config_manager.get_last_model_per_endpoint()
+            if mapping:
+                self.continuation_panel._last_model_per_endpoint.update(mapping)
         except Exception as e:
             logger.warning("加载续写参数默认值失败: %s", e)
 
@@ -2259,7 +2288,7 @@ class MainWindow(QMainWindow):
             self._on_open_settings()
             return None
 
-        model = self.config_manager.get_flow_model("volume_continuation") or params.get("model", "")
+        model = params.get("model", "") or self.config_manager.get_flow_model("volume_continuation")
         if not model:
             QMessageBox.warning(self, "提示", "请选择模型")
             return None
@@ -2384,15 +2413,21 @@ class MainWindow(QMainWindow):
                 old_orchestrator.phase_finished.disconnect()
                 old_orchestrator.chapter_started.disconnect()
                 old_orchestrator.chapter_finished.disconnect()
+                old_orchestrator.chapter_step_started.disconnect()
                 old_orchestrator.chunk_received.disconnect()
                 old_orchestrator.token_count.disconnect()
                 old_orchestrator.checkpoint_reached.disconnect()
                 old_orchestrator.finished.disconnect()
                 old_orchestrator.error.disconnect()
                 old_orchestrator.auth_error.disconnect()
+                old_orchestrator.prompt_debug_requested.disconnect()
                 old_orchestrator.phase_output.disconnect()
             except (RuntimeError, TypeError):
                 pass  # 信号可能已断开或对象已删除
+            # 镜像 closeEvent 模式：stop + wait 确保线程真正结束再 deleteLater，
+            # 避免 QThread 仍在 run() finally 清理 aiohttp session/asyncio loop 时被删除触发段错误
+            old_orchestrator.stop()
+            old_orchestrator.wait(3000)
             old_orchestrator.deleteLater()
 
         # 创建 VolumeOrchestrator（传 phase/phase_inputs 支持分阶段执行）
@@ -2419,6 +2454,7 @@ class MainWindow(QMainWindow):
             endpoint_id=endpoint.get("id", ""),
             world_ontology=project.world_ontology if project else None,
             protagonist_profile=self._protagonist_profile_by_chapter.get(self._current_chapter.id),
+            style_profile=project.style_profile if project else None,
             custom_audit_rules=project.custom_audit_rules if project else None,
             phase=phase,
             phase_inputs=self._volume_state,
@@ -2587,7 +2623,7 @@ class MainWindow(QMainWindow):
             data: _load_volume_state 返回的持久化状态 dict
         """
         from novelforge.models import (
-            DeepAnalysis, VolumeOutline, OutlineAuditReport
+            DeepAnalysis, VolumeOutline
         )
 
         chapter_id = data.get("chapter_id", "")
@@ -2668,10 +2704,12 @@ class MainWindow(QMainWindow):
         }
 
         # 反序列化已完成阶段产物，存入 prepare_data（作为 _volume_state）
+        # 注意：outline_audit 阶段 emit 的 phase_output 是 final_outline（VolumeOutline），
+        # 不是 OutlineAuditReport，按 VolumeOutline 反序列化
         for phase, cls in [
             ("deep_analysis", DeepAnalysis),
             ("volume_outline", VolumeOutline),
-            ("outline_audit", OutlineAuditReport),
+            ("outline_audit", VolumeOutline),
         ]:
             artifact_data = phase_artifacts.get(phase)
             if artifact_data is not None:
@@ -2843,12 +2881,21 @@ class MainWindow(QMainWindow):
             dialog.exec()
             action, feedback = dialog.get_result()
             if action == "approve":
-                self._volume_orchestrator.resume({"action": "approve"})
+                if self._volume_orchestrator is not None:
+                    self._volume_orchestrator.resume({"action": "approve"})
+                else:
+                    logger.warning("_on_volume_checkpoint(after_chapter): orchestrator is None")
             elif action == "reject":
-                self._volume_orchestrator.resume({"action": "reject", "feedback": feedback})
+                if self._volume_orchestrator is not None:
+                    self._volume_orchestrator.resume({"action": "reject", "feedback": feedback})
+                else:
+                    logger.warning("_on_volume_checkpoint(after_chapter): orchestrator is None")
             else:  # cancel
                 panel.hide_continue_button()
-                self._volume_orchestrator.stop()
+                if self._volume_orchestrator is not None:
+                    self._volume_orchestrator.stop()
+                else:
+                    logger.warning("_on_volume_checkpoint(after_chapter cancel): orchestrator is None")
             return
 
         if checkpoint_name == "before_audit":
@@ -2871,14 +2918,20 @@ class MainWindow(QMainWindow):
 
         if action == "accept":
             panel.hide_continue_button()
-            self._volume_orchestrator.resume(payload)
+            if self._volume_orchestrator is not None:
+                self._volume_orchestrator.resume(payload)
+            else:
+                logger.warning("_on_volume_checkpoint(%s accept): orchestrator is None", checkpoint_name)
         elif action == "edit":
             # 用户选择编辑：显示面板继续按钮，不立即 resume
             panel.show_continue_button(checkpoint_name)
         else:  # cancel
             # 取消整个卷续写流程
             panel.hide_continue_button()
-            self._volume_orchestrator.stop()
+            if self._volume_orchestrator is not None:
+                self._volume_orchestrator.stop()
+            else:
+                logger.warning("_on_volume_checkpoint(%s cancel): orchestrator is None", checkpoint_name)
 
     def _on_volume_continue(self, checkpoint_name: str, payload: object = None) -> None:
         """VolumePanel 继续按钮点击：恢复 orchestrator。
@@ -2894,20 +2947,30 @@ class MainWindow(QMainWindow):
         panel = self.continuation_panel.volume_panel
         if checkpoint_name == "before_audit":
             panel.hide_continue_button()
-            self._volume_orchestrator.resume(payload)
+            panel.hide_audit_focus_input()
+            if self._volume_orchestrator is not None:
+                self._volume_orchestrator.resume(payload)
+            else:
+                logger.warning("_on_volume_continue(before_audit): orchestrator is None")
         else:
             edited = self._get_edited_volume_checkpoint_payload(checkpoint_name)
             panel.hide_continue_button()
-            self._volume_orchestrator.resume(
-                edited if edited is not None else None
-            )
+            if self._volume_orchestrator is not None:
+                self._volume_orchestrator.resume(
+                    edited if edited is not None else None
+                )
+            else:
+                logger.warning("_on_volume_continue(%s): orchestrator is None", checkpoint_name)
 
     def _on_volume_cancel_checkpoint(self) -> None:
         """用户在面板检查点输入区点击"取消续写"。"""
         panel = self.continuation_panel.volume_panel
         panel.hide_continue_button()
         panel.hide_audit_focus_input()
-        self._volume_orchestrator.stop()
+        if self._volume_orchestrator is not None:
+            self._volume_orchestrator.stop()
+        else:
+            logger.warning("_on_volume_cancel_checkpoint: orchestrator is None")
 
     def _get_edited_volume_checkpoint_payload(
         self, checkpoint_name: str
@@ -4358,6 +4421,10 @@ class MainWindow(QMainWindow):
 
         # 清理 volume 阶段状态（volume_phase 流程出错时）：弹重试对话框
         if self._volume_orchestrator is not None:
+            # 立即隐藏面板输入区，避免错误对话框关闭后用户点击陈旧按钮触发 None 访问
+            panel = self.continuation_panel.volume_panel
+            panel.hide_continue_button()
+            panel.hide_audit_focus_input()
             # 保留状态用于重试（不清理 _volume_state/_volume_current_phase/_volume_chapter_id）
             retry_phase = self._volume_current_phase
             retry_state = self._volume_state

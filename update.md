@@ -1,5 +1,59 @@
 # 更新日志
 
+## 2026-07-20：面板 API 选择优先于设置 API 选择
+
+### 背景
+
+用户反馈「面板上的 API 选择必须和设置中的 API 选择一致才能用」。经代码审查定位到 4 个根因：
+1. 卷续写模型优先级反转（流程→面板，与单章的「面板→流程」相反），导致面板选的模型对卷续写完全无效
+2. `_refresh_endpoints` 关闭设置/流程端点对话框后强制覆盖面板端点+模型为流程配置值，用户先前选择丢失
+3. 面板选择未持久化（`_last_model_per_endpoint` 是会话内存，端点选择从未持久化）
+4. `enabled_models` 过滤时静默切换模型，用户无感知
+
+### 核心改动
+
+- **修复卷续写模型优先级反转**（[main_window.py:2262](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/fix-audit-prompt-crash-Miexk8/novelforge/ui/main_window.py)）：`get_flow_model("volume_continuation") or params.get("model", "")` → `params.get("model", "") or get_flow_model("volume_continuation")`，与单章续写 L1819 一致
+- **面板端点+模型持久化**（[config.py:538-563](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/fix-audit-prompt-crash-Miexk8/novelforge/core/config.py)）：新增 `continuation.last_endpoint_id` + `continuation.last_model_per_endpoint` 两个配置字段，4 个 get/set 方法
+- **面板信号通知持久化**（[continuation_panel.py:130-133, 410-455](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/fix-audit-prompt-crash-Miexk8/novelforge/ui/continuation_panel.py)）：新增 `endpoint_changed(str)` + `model_user_changed(str, str)` 信号；`_on_endpoint_changed`/`_on_model_user_changed` 末尾 emit 信号
+- **`_refresh_endpoints` 恢复面板持久化选择**（[main_window.py:1035-1054](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/fix-audit-prompt-crash-Miexk8/novelforge/ui/main_window.py)）：不再强制同步流程配置到面板；恢复优先级「面板持久化端点 → 流程端点兜底 → 默认端点」
+- **启动顺序调整**（[main_window.py:381-392](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/fix-audit-prompt-crash-Miexk8/novelforge/ui/main_window.py)）：`_apply_continuation_defaults` 移到 `_refresh_endpoints` 前，确保 `_last_model_per_endpoint` 先从 config 灌入
+- **新增 2 个 slot**（[main_window.py:1155-1169](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/fix-audit-prompt-crash-Miexk8/novelforge/ui/main_window.py)）：`_on_panel_endpoint_changed`/`_on_panel_model_changed` 实时持久化面板变更
+- **`enabled_models` 静默切换加 warning 日志**（[continuation_panel.py:437-438](file:///c:/Users/sakur/.trae-cn/worktrees/GengBi/fix-audit-prompt-crash-Miexk8/novelforge/ui/continuation_panel.py)）：上次选的模型被禁用时 logger.warning 提示
+
+### 行为变化
+
+- **正文流程（单章+卷续写）面板优先**：面板选的端点+模型直接生效，流程配置作为回退
+- **非正文流程（single_audit/rewrite_analysis/generic_analysis）保持现状**：流程端点优先+面板回退（后台流程独立性）
+- **面板选择跨会话恢复**：重启应用后面板自动恢复上次选的端点+模型
+- **关闭设置/流程端点对话框不再覆盖面板选择**：面板保持用户上次选择
+
+### 文档同步
+
+- `agent.md` §15：更新「消费层优先级」（正文流程统一面板优先）、「正文流程同步」（恢复面板持久化选择）、新增「面板端点+模型持久化」条目
+- `update.md`：本条目
+
+## 2026-07-20：修复卷续写审计提示词输入后闪退
+
+### 背景
+
+用户在 260+ KB 文本加载 + 世界观/主角形象/文风档案三件套提取完成后，选择卷续写 10 章 × 4500 字，输入审计提示词后应用闪退。经代码审查定位到 5 个问题。
+
+### 核心改动
+
+- **QThread 生命周期竞态**（直接闪退原因）：`_start_volume_phase` 切换 orchestrator 前补 `stop()+wait(3000)+deleteLater()`，镜像 `closeEvent` 模式，避免 QThread 仍在 `run()` finally 清理时被删除触发段错误；同时补齐信号断开 `chapter_step_started`/`prompt_debug_requested` 2 个漏断信号
+- **`_volume_orchestrator` None 访问防护**：`_on_volume_checkpoint`/`_on_volume_continue`/`_on_volume_cancel_checkpoint` 8 处 slot 访问前加 None 校验；`_on_continuation_error` 置 None 前隐藏面板审计输入区，避免错误对话框关闭后用户点击陈旧按钮触发 AttributeError
+- **`style_profile` 注入 VolumeOrchestrator**：构造函数新增 `style_profile` 参数 + `_format_style_profile` 序列化方法；9 处 phase 方法 macros 字典补 `{{style_profile}}` 注入（此前 15 个阶段模板均含占位符但 orchestrator 不注入，导致字面文本进入 LLM 提示词）；`_run_chapter_writing` 的 `assemble()` 调用补传 `style_profile`/`custom_audit_rules`；`_start_volume_phase` 构造调用补传 `project.style_profile`
+- **`outline_audit` 阶段产物序列化类型修正**：`_resume_volume_state` 将 `outline_audit` 反序列化类型从 `OutlineAuditReport` 改为 `VolumeOutline`（与 `_run_phase_outline_audit` emit 的 `final_outline` 类型一致），修复恢复后「终稿大纲为空」错误
+
+### 测试
+
+- 运行 `python -m pytest tests/test_volume_*.py -q` 全部通过（无新增测试，待后续补充）
+
+### 文档同步
+
+- `agent.md`：更新 volume_orchestrator.py 描述（4 档案注入）、3 处注入点描述、新增 QThread 生命周期管理 + 阶段产物序列化设计决策
+- `update.md`：本条目
+
 ## 2026-07-17：加固打包脚本 python -m novelforge.resources.build
 
 ### 背景

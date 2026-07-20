@@ -46,7 +46,7 @@ novelforge/
 │   ├── continuation_worker.py   # QThread + asyncio 续写 worker（单次续写/重写生成/审计后修正；调试模式支持运行时端点/模型覆盖 _effective_model/_effective_client + endpoint_id 缓存 LLMClient；phase_name 按 created_by 映射 续写/重写生成/修正；run() finally 关闭主+调试缓存 LLMClient 释放 aiohttp session）
 │   ├── audit_worker.py          # 单章续写审计 worker（流式 stream_chat_completion，低温稳定输出；调试模式镜像 ContinuationWorker，phase_name 参数化 单章审计/重写需求分析）
 │   ├── custom_audit_rule_service.py  # 自定义设定结构化解析（parse_rule_streaming，AI 结合世界观+上下文结构化为 requirement+audit_criteria）
-│   ├── volume_orchestrator.py   # 卷级多章节续写编排器（QThread+asyncio，7 阶段流程 + 暂停点 + 调试模式；分阶段执行 phase/phase_inputs/phase_output 信号支持 volume_phase agent；chapter_step_started 信号驱动逐章子步骤进度（细纲/写作/验证/修订）；调试模式支持运行时端点/模型覆盖（_effective_model/_effective_client + endpoint_id 缓存 LLMClient）；run() finally 关闭主+调试缓存 LLMClient 释放 aiohttp session）
+│   ├── volume_orchestrator.py   # 卷级多章节续写编排器（QThread+asyncio，7 阶段流程 + 暂停点 + 调试模式；分阶段执行 phase/phase_inputs/phase_output 信号支持 volume_phase agent；chapter_step_started 信号驱动逐章子步骤进度（细纲/写作/验证/修订）；调试模式支持运行时端点/模型覆盖（_effective_model/_effective_client + endpoint_id 缓存 LLMClient）；run() finally 关闭主+调试缓存 LLMClient 释放 aiohttp session；构造接收 world_ontology/protagonist_profile/style_profile/custom_audit_rules 4 档案，9 处 macros 字典注入 {{style_profile}}，_format_style_profile 序列化辅助；_run_chapter_writing 的 assemble() 调用传齐 4 档案参数）
 │   ├── llm_client.py            # LLM 客户端（流式 + 非流式；构造函数接收 extra_payload/extra_headers 端点级自定义扩展，stream/chat_completion 在 _filter_unsupported_params 后 deep merge extra_payload 到 payload、update extra_headers 到 headers，fetch_models 也合并 extra_headers；_deep_merge_dict 模块级辅助函数——dict 递归合并、list/scalar 覆盖；reasoning_effort 按模型映射——Gemini 仅支持 low/medium/high，auto 不发送、minimal→low、max→high；_filter_unsupported_params 按模型子型号删除不支持参数——xAI Grok 全系列删 presence/frequency_penalty，非 grok-3-mini 删 reasoning_effort；_ensure_user_message 兜底——messages 全为 system 时将末条改为 user 副本，修复 Gemini 兼容网关 contents 为空 500 错误）
 │   ├── preset_service.py        # 预设管理（reset_default_preset 同步内置最新版）
 │   ├── regex_service.py         # 正则脚本管理（global/scoped/preset）
@@ -184,6 +184,8 @@ novelforge/
 - **关闭后恢复**：`_on_chapter_selected` 末尾调 `_check_volume_resume` 检测状态文件，弹恢复确认对话框（QMessageBox.question）；确认后 `_resume_volume_state` 重建 prepare_data（reload endpoint/project/preset + 当前章节 entries/metadata/regex_script_ids）+ 反序列化已完成阶段产物 + 确定下一未完成阶段 + 设 `_volume_resuming=True` 恢复模式启动；endpoint/preset 已删除时弹提示中止
 - **阶段失败重试**：`_on_continuation_error` 中 volume 错误弹重试/取消对话框（QMessageBox.question）；重试复用 `_volume_state`（含 prepare_data + 前序产物）+ `_volume_current_phase` 调 `_start_volume_phase` 重启失败阶段（不重新准备数据，避免重复弹校验对话框）；取消清理全部 + 删除状态文件
 - **停止/完成清理**：`_on_stop_continuation`（用户主动停止）+ `_on_volume_continuation_finished`（正常完成）+ 重试取消分支均清理 `_volume_state`/`_volume_current_phase`/`_volume_resuming`/`_volume_chapter_id` + 删除状态文件；`_on_volume_continuation_finished` 存储操作块外包 try/except，单章保存异常不崩溃完成回调
+- **QThread 生命周期管理**：`_start_volume_phase` 切换 orchestrator 前必须 `stop()+wait(3000)+deleteLater()`，镜像 `closeEvent` 模式，避免 QThread 仍在 `run()` finally 清理 aiohttp session/asyncio loop 时被删除触发段错误；信号断开须覆盖全部 13 个信号（含 `chapter_step_started`/`prompt_debug_requested`）；`_on_continuation_error` 置 `_volume_orchestrator=None` 前须隐藏面板审计输入区，`_on_volume_checkpoint`/`_on_volume_continue`/`_on_volume_cancel_checkpoint` 8 处 slot 访问前须 None 校验防 AttributeError
+- **阶段产物序列化**：`outline_audit` 阶段 `phase_output` emit 的是 `final_outline`（VolumeOutline），`_save_volume_state`/`_resume_volume_state` 须按 VolumeOutline 序列化/反序列化（非 OutlineAuditReport）
 - 卷模式默认启用 100k token 切分（_analysis_chunk_tokens_combo 默认选项）
 - 阶段提示词走 str.replace 宏替换（不用 MacroEngine/Jinja2）
 - 测试覆盖：`tests/test_volume_*.py`（orchestrator/prompts/e2e/ui/models/checkpoint_dialog/chapter_confirm_dialog/artifact_detail_dialog）
@@ -209,7 +211,7 @@ novelforge/
 - **数据模型**：CustomAuditRule（id/title/raw_input/requirement/audit_criteria/severity/created_at），保存到 Project.custom_audit_rules 全局共享
 - **结构化解析**：CustomAuditRuleService.parse_rule_streaming 加载 phase_custom_rule_parse.txt，AI 结合世界观+上下文结构化为 requirement+audit_criteria 两字段
 - **UI 入口**：context_preview_panel 的"新增自定义设定"/"查看自定义设定"按钮
-- **3 处注入**：①单章续写 assemble 传 custom_audit_rules ②单章审计 phase_single_audit.txt 注入 ③卷续写 VolumeOrchestrator 构造传，9 处 phase 方法注入
+- **3 处注入**：①单章续写 assemble 传 custom_audit_rules ②单章审计 phase_single_audit.txt 注入 ③卷续写 VolumeOrchestrator 构造传齐 world_ontology/protagonist_profile/style_profile/custom_audit_rules 4 档案，9 处 phase 方法 macros 字典注入 {{custom_audit_rules}}/{{style_profile}}
 - **审计维度** custom_rules_compliance（一票否决）+ rigid_ai_text（刻板 AI 文本禁令严格给分）：未满足 high 严重度规则判 critical；3 处以上 AI 痕迹判 major，5 处以上判 critical
 
 ### 13. 安全加固
@@ -241,8 +243,9 @@ novelforge/
 - **流程模型映射**：`config["flow_models"] = {flow_key: model_str}`，空串或未配置回退该流程端点的 `default_model`；`get_flow_model(flow_key)` 解析（flow_key 空串则用默认端点 default_model）
 - **不升 config_version**：`flow_models` 缺失时全回退原行为（端点 default_model），旧配置兼容
 - **配置入口**：`FlowEndpointDialog` 每个 flow 行横排 [端点下拉][模型下拉]；模型下拉用回退链 `enabled_models → models → [default_model]` 填充（与续写面板一致），首项「默认模型（{default_model}）」itemData="" 表示回退端点默认模型；端点切换时 `_populate_model_combo` 重新填充并保留已保存模型选中
-- **消费层优先级**：正文流程 `params.get("model")`（面板下拉）→ `get_flow_model(flow_key)`（流程配置）→ 端点 default_model（get_flow_model 内部回退）；非正文流程直接 `get_flow_model(flow_key)`；审计后重写复用 `single_audit` flow_key，重写生成复用 `single_continuation` flow_key
-- **正文流程同步**：`_refresh_endpoints` 关闭对话框后同步面板端点 + 模型选中（`select_model_by_name`，blockSignals 屏蔽会话记忆）；面板模型下拉仍可临时覆盖（会话记忆），不写回 `flow_models`
+- **消费层优先级**：正文流程（单章+卷续写）统一为「面板 `params.get("model")` → 流程 `get_flow_model(flow_key)` → 端点 default_model（get_flow_model 内部回退）」；非正文流程（single_audit/rewrite_analysis/generic_analysis）保持「流程端点 → 面板端点」+「流程模型 → 面板模型」回退；审计后重写复用 `single_audit` flow_key，重写生成复用 `single_continuation` flow_key
+- **面板端点+模型持久化**：`continuation.last_endpoint_id`（面板上次选的端点 ID）+ `continuation.last_model_per_endpoint`（每端点上次选的模型映射），跨会话恢复；面板通过 `endpoint_changed`/`model_user_changed` 信号通知 MainWindow 持久化（面板不直接访问 config，保持分层）
+- **正文流程同步**：`_refresh_endpoints` 关闭对话框后恢复面板上次持久化选择（端点+模型），恢复优先级「面板持久化端点 → 当前模式流程端点兜底 → 默认端点」；模型由 `_on_endpoint_changed` 自动从 `_last_model_per_endpoint`（启动时由 `_apply_continuation_defaults` 从 config 灌入）恢复；不再强制同步流程配置到面板；面板端点/模型变更实时持久化
 - **三个 service**：context_extractor/ontology_extractor/custom_audit_rule_service 的 `_get_llm_client(flow_key)` 改用 `get_flow_model(flow_key)` 取模型，替代原 `ep.get("default_model")`；context_extractor 不再读 `extractor_model`（已移除），模型统一由 flow_models 控制
 - **Token 拆分持久化**：Settings 对话框已移除「上下文提取」组（含提取模型+Token 拆分）；Token 拆分改由上下文预览面板独管，main_window 连接 `_token_limit_combo.currentTextChanged` → `_save_token_limit_to_config` 持久化到 `context_extract.token_limit`；启动时 `_sync_token_limit_default` 从 config 加载到面板
 

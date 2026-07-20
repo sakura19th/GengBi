@@ -147,6 +147,7 @@ class VolumeOrchestrator(QThread):
         endpoint_id: str = "",
         world_ontology: WorldOntology | None = None,
         protagonist_profile: ProtagonistProfile | None = None,
+        style_profile: Any = None,
         custom_audit_rules: list[Any] | None = None,
         phase: str = "all",
         phase_inputs: dict[str, Any] | None = None,
@@ -178,6 +179,7 @@ class VolumeOrchestrator(QThread):
             chapter_id: 章节 ID
             world_ontology: 底层世界观元描述（从 Project 读取，全文固化）
             protagonist_profile: 主角形象档案（从当前章节缓存读取，反映至当前章节状态）
+            style_profile: 文风档案（从 Project 读取，全文固化，注入各阶段提示词作为风格量化约束）
             custom_audit_rules: 自定义设定/审计必查项列表（从 Project 读取，注入各阶段提示词作为硬约束）
             phase: 执行阶段（"all"=完整流程，"deep_analysis"/"volume_outline"/
                 "outline_audit"/"chapter_writing"=单阶段，供 volume_phase agent 使用）
@@ -224,6 +226,8 @@ class VolumeOrchestrator(QThread):
         self.world_ontology = world_ontology
         # 主角形象档案（跟随章节缓存，反映至当前章节状态，注入各阶段提示词）
         self.protagonist_profile = protagonist_profile
+        # 文风档案（全文提取一次固化，注入各阶段提示词作为风格量化约束）
+        self.style_profile = style_profile
         # 自定义设定/审计必查项（项目级全局，注入各阶段提示词作为硬约束，一票否决）
         self.custom_audit_rules = custom_audit_rules
 
@@ -1102,6 +1106,7 @@ class VolumeOrchestrator(QThread):
             "{{writing_style}}": self._get_profile_field("writing_style"),
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{chapters_text}}": chapters_text,
             "{{analysis_depth}}": depth,
@@ -1179,6 +1184,7 @@ class VolumeOrchestrator(QThread):
             "{{writing_style}}": self._get_profile_field("writing_style"),
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{deep_analysis}}": deep_analysis_text,
             "{{context_entries}}": self._build_context_entries_text(),
@@ -1352,6 +1358,7 @@ class VolumeOrchestrator(QThread):
         macros = {
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{deep_analysis}}": deep_analysis_text,
             "{{user_directive_analysis}}": (
@@ -1459,6 +1466,7 @@ class VolumeOrchestrator(QThread):
         macros = {
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{volume_outline}}": outline_text,
             "{{audit_dimensions}}": dimensions,
@@ -1568,6 +1576,7 @@ class VolumeOrchestrator(QThread):
             "{{pacing_speed}}": self.config.pacing_speed,
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
         }
         system_prompt = self._apply_macros(template, macros)
@@ -1649,6 +1658,7 @@ class VolumeOrchestrator(QThread):
             plan_text = ""
         macros = {
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{world_ontology}}": self._format_world_ontology(),
             "{{volume_outline}}": outline_text,
@@ -1774,6 +1784,8 @@ class VolumeOrchestrator(QThread):
             skip_history=True,
             world_ontology=self.world_ontology,
             protagonist_profile=self.protagonist_profile,
+            style_profile=self.style_profile,
+            custom_audit_rules=self.custom_audit_rules,
         )
         messages = list(result.messages)
 
@@ -1926,6 +1938,7 @@ class VolumeOrchestrator(QThread):
         macros = {
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{original_content}}": original_content,
             "{{critique}}": critique_text,
@@ -2036,6 +2049,7 @@ class VolumeOrchestrator(QThread):
         macros = {
             "{{world_ontology}}": self._format_world_ontology(),
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{snapshot}}": snapshot_text,
             "{{outline}}": outline_text,
@@ -2106,6 +2120,7 @@ class VolumeOrchestrator(QThread):
             outline_text = "（无大纲）"
         macros = {
             "{{protagonist_profile}}": self._format_protagonist_profile(),
+            "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
             "{{world_ontology}}": self._format_world_ontology(),
             "{{written_text}}": written_text,
@@ -2338,6 +2353,23 @@ class VolumeOrchestrator(QThread):
         except Exception as e:
             logger.warning("ProtagonistProfile 序列化失败: %s", e)
             return "（主角形象档案序列化失败，请基于已有前文自行推断主角性格）"
+
+    def _format_style_profile(self) -> str:
+        """格式化 StyleProfile 为提示词注入文本。
+
+        Returns:
+            格式化 JSON 字符串；无文风档案时返回占位提示文字。
+        """
+        if not self.style_profile:
+            return "（无文风档案）"
+        try:
+            return json.dumps(
+                self.style_profile.model_dump(mode="json"),
+                ensure_ascii=False, indent=2,
+            )
+        except Exception as e:
+            logger.warning("StyleProfile 序列化失败: %s", e)
+            return "（文风档案序列化失败）"
 
     def _format_custom_audit_rules(self) -> str:
         """格式化自定义设定列表为提示词注入文本。
