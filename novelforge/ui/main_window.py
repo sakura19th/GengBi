@@ -3255,16 +3255,61 @@ class MainWindow(QMainWindow):
         future.add_done_callback(on_done)
 
     def _on_context_entries_changed(self, entries: list) -> None:
-        """上下文条目变更（用户编辑/禁用/添加）。"""
+        """上下文条目变更（用户编辑/禁用/添加/删除/清空）。
+
+        ``entries`` 为已过滤的启用条目列表（供续写使用）；持久化时取全部条目
+        （含禁用条目，禁用状态由 ``entry.enabled`` 字段承载）。
+        """
         self._current_context_entries = entries
-        # 同步到按章节绑定的内存缓存
-        if self._current_chapter:
-            self._context_entries_by_chapter[self._current_chapter.id] = list(entries)
+        if self._current_chapter and self._current_project_id:
+            # 内存缓存存全部条目（含禁用），与 SQLite 保持一致
+            context_panel = self.continuation_panel.context_preview_panel
+            all_entries = context_panel.get_all_entries()
+            self._context_entries_by_chapter[self._current_chapter.id] = list(all_entries)
             # 容量上限检查：淘汰最旧条目
             if len(self._context_entries_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
                 oldest = next(iter(self._context_entries_by_chapter))
                 del self._context_entries_by_chapter[oldest]
-        logger.debug("上下文条目变更: %d 条", len(entries))
+            # 非阻塞持久化到 SQLite（fire-and-forget）
+            self._persist_context_entries(all_entries)
+        logger.debug(
+            "上下文条目变更: 启用 %d 条", len(entries)
+        )
+
+    def _persist_context_entries(self, all_entries: list) -> None:
+        """非阻塞持久化上下文条目到 SQLite 缓存。
+
+        使用 ``run_coroutine_threadsafe`` 提交，不阻塞 UI 线程；失败仅日志告警，
+        不弹窗打断用户编辑。重写模式（``exclude_current``）由当前续写模式判定，
+        与提取时一致（cache_key 追加 ``:rewrite`` 后缀避免互相覆盖）。
+        """
+        if not self._current_chapter or not self._current_project_id:
+            return
+        from novelforge.services.async_runner import AsyncLoopRunner
+
+        runner = AsyncLoopRunner.instance()
+        loop = runner._loop
+        exclude_current = (
+            self.continuation_panel.get_mode() == "rewrite_current"
+        )
+        future = asyncio.run_coroutine_threadsafe(
+            self.context_extractor.save_edited_entries(
+                project_id=self._current_project_id,
+                chapter_id=self._current_chapter.id,
+                entries=all_entries,
+                exclude_current=exclude_current,
+            ),
+            loop,
+        )
+
+        # 异常仅日志，不弹窗（后台保存失败不应打断用户编辑）
+        def _on_done(fut: "asyncio.Future") -> None:
+            try:
+                fut.result()
+            except Exception as e:
+                logger.warning("上下文条目自动保存失败: %s", e)
+
+        future.add_done_callback(_on_done)
 
     def _ensure_chapter_contents(self) -> None:
         """确保 _current_chapters 中所有章节的 content 已加载。

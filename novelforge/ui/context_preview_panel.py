@@ -163,6 +163,7 @@ class _EntryEditorDialog(QDialog):
             position=self._position_edit.text() or self._entry.position,
             depth=self._depth_spin.value(),
             role=self._role_edit.text() or self._entry.role,
+            enabled=self._entry.enabled,
             source_chapter_range=self._entry.source_chapter_range,
             extracted_at=self._entry.extracted_at,
             raw_st_fields=dict(self._entry.raw_st_fields),
@@ -611,7 +612,8 @@ class ContextPreviewPanel(QWidget):
 
         # 更新条目显示
         self._entries = list(entries)
-        self._disabled_uids.clear()
+        # 从 entry.enabled 重建 _disabled_uids（enabled 字段为禁用状态真源）
+        self._disabled_uids = {e.uid for e in self._entries if not e.enabled}
         self._refresh_entries_display()
         self.extraction_finished.emit(list(self._entries))
 
@@ -672,7 +674,8 @@ class ContextPreviewPanel(QWidget):
             entries: ContextEntry 列表
         """
         self._entries = list(entries)
-        self._disabled_uids.clear()
+        # 从 entry.enabled 重建 _disabled_uids（enabled 字段为禁用状态真源）
+        self._disabled_uids = {e.uid for e in self._entries if not e.enabled}
         self._refresh_entries_display()
         self.entries_changed.emit(list(self._entries))
 
@@ -797,14 +800,23 @@ class ContextPreviewPanel(QWidget):
     def _on_disable_toggled(self, uid: str, state: int) -> None:
         """禁用复选框状态变更。
 
+        同步更新 ``entry.enabled`` 字段（持久化真源）与 ``_disabled_uids``
+        影子缓存（UI 显示用）。
+
         Args:
             uid: 条目 UID
             state: 复选框状态（0=未勾选=禁用，2=勾选=启用）
         """
-        if state == 0:
-            self._disabled_uids.add(uid)
-        else:
+        enabled = state != 0
+        if enabled:
             self._disabled_uids.discard(uid)
+        else:
+            self._disabled_uids.add(uid)
+        # 同步更新 entry.enabled 字段（持久化真源，pydantic v2 模型可变）
+        for e in self._entries:
+            if e.uid == uid:
+                e.enabled = enabled
+                break
         self.entries_changed.emit(self.get_entries())
 
     def _on_edit_clicked(self, entry: ContextEntry) -> None:
@@ -959,7 +971,8 @@ class ContextPreviewPanel(QWidget):
             return
         # 更新条目显示（累计 entries）
         self._entries = list(entries)
-        self._disabled_uids.clear()
+        # 从 entry.enabled 重建 _disabled_uids（enabled 字段为禁用状态真源）
+        self._disabled_uids = {e.uid for e in self._entries if not e.enabled}
         self._refresh_entries_display()
         # 更新 loading 文本
         self._loading_text.setText(
@@ -1482,7 +1495,8 @@ class ContextPreviewPanel(QWidget):
 
         # 更新条目显示
         self._entries = list(entries)
-        self._disabled_uids.clear()
+        # 从 entry.enabled 重建 _disabled_uids（enabled 字段为禁用状态真源）
+        self._disabled_uids = {e.uid for e in self._entries if not e.enabled}
         self._refresh_entries_display()
 
         # 更新状态与元数据

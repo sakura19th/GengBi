@@ -2732,6 +2732,83 @@ class ContextExtractor:
         cache_key = self._build_cache_key(project_id, chapter_id)
         return await self._get_cached_data(cache_key)
 
+    async def save_edited_entries(
+        self,
+        project_id: str,
+        chapter_id: str,
+        entries: list[ContextEntry],
+        exclude_current: bool = False,
+        ttl_hours: int | None = None,
+    ) -> None:
+        """持久化用户编辑后的上下文条目到 SQLite 缓存。
+
+        复用现有 cache_key（``ctx_extract:{project_id}:{chapter_id}[:rewrite]``），
+        保留原 ``chapters_hash`` 与元数据（保证提取时缓存校验仍通过），仅更新
+        entries 字段并刷新 TTL。无现有缓存时使用 sentinel hash 保存（切章加载
+        可恢复，后续提取会因 hash 不匹配自动重提取，符合预期）。
+
+        用户编辑是明确意图，本方法不检查 ``cache_enabled`` 配置（与提取流程
+        不同），无条件保存以避免编辑丢失。
+
+        Args:
+            project_id: 项目 ID
+            chapter_id: 章节 ID
+            entries: 全部条目（含 enabled=False 的禁用条目）
+            exclude_current: 重写模式标记（cache_key 追加 :rewrite 后缀）
+            ttl_hours: TTL（小时），None 时用 DEFAULT_CACHE_TTL_HOURS
+        """
+        cache_key = self._build_cache_key(
+            project_id, chapter_id, exclude_current=exclude_current
+        )
+        # 从现有缓存读取 chapters_hash 与元数据（保留提取时的 hash 保证缓存校验通过）
+        existing = await self._get_cached_data(cache_key)
+        if existing is not None:
+            chapters_hash = existing.get("chapters_hash", "manual_edit")
+            lookback = int(existing.get("lookback", 0))
+            batch_count = int(existing.get("batch_count", 1))
+            merged = bool(existing.get("merged", False))
+            elapsed_seconds = float(existing.get("elapsed_seconds", 0.0))
+            token_usage = existing.get("token_usage", {})
+            if not isinstance(token_usage, dict):
+                token_usage = {}
+        else:
+            # 无现有缓存（用户手动新增条目而未提取过）：使用 sentinel hash，
+            # 切章加载不校验 hash 仍可恢复；下次提取时 hash 不匹配自动重提取
+            chapters_hash = "manual_edit"
+            lookback = 0
+            batch_count = 1
+            merged = False
+            elapsed_seconds = 0.0
+            token_usage = {}
+
+        effective_ttl = (
+            ttl_hours if ttl_hours is not None else DEFAULT_CACHE_TTL_HOURS
+        )
+
+        try:
+            await self._save_cached_entries(
+                cache_key,
+                entries,
+                chapters_hash,
+                effective_ttl,
+                elapsed_seconds=elapsed_seconds,
+                token_usage=token_usage,
+                lookback=lookback,
+                batch_count=batch_count,
+                merged=merged,
+                protagonist_profile=None,
+                protagonist_batch_count=1,
+                protagonist_merged=False,
+            )
+            logger.info(
+                "已保存编辑后的上下文条目: %s (%d 条, TTL=%dh)",
+                cache_key,
+                len(entries),
+                effective_ttl,
+            )
+        except Exception as e:
+            logger.warning("保存编辑后的上下文条目失败: %s", e)
+
     async def load_cached_protagonist(
         self, project_id: str, chapter_id: str
     ) -> dict[str, Any] | None:
