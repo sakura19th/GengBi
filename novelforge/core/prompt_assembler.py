@@ -361,6 +361,7 @@ class PromptAssembler:
         protagonist_profile: Any = None,
         custom_audit_rules: Any = None,
         style_profile: Any = None,
+        custom_characters: Any = None,
         exclude_current: bool = False,
     ) -> AssembleResult:
         """组装提示词 messages。
@@ -402,6 +403,7 @@ class PromptAssembler:
             custom_audit_rules=custom_audit_rules,
             previous_chapter_titles=previous_chapter_titles,
             style_profile=style_profile,
+            custom_characters=custom_characters,
         )
 
         # M3: 构建模板渲染上下文（局部变量，线程安全；供 _process_content 使用）
@@ -667,6 +669,7 @@ class PromptAssembler:
         custom_audit_rules: Any = None,
         previous_chapter_titles: str = "",
         style_profile: Any = None,
+        custom_characters: Any = None,
     ) -> MacroContext:
         """构建宏替换上下文。"""
         # 获取章节标题和序号
@@ -710,6 +713,10 @@ class PromptAssembler:
         )
         ctx.extra["custom_audit_rules"] = self._serialize_rules_or_placeholder(
             custom_audit_rules, "（无自定义设定）"
+        )
+        # 注入 custom_characters 到 extra（供 {{custom_characters}} 宏替换）
+        ctx.extra["custom_characters"] = self._serialize_custom_characters_or_placeholder(
+            custom_characters
         )
         # 注入 previous_chapter_titles 到 extra（供 {{previous_chapter_titles}} 宏替换）
         ctx.extra["previous_chapter_titles"] = (
@@ -764,6 +771,34 @@ class PromptAssembler:
         except Exception as e:
             logger.debug("自定义规则序列化失败: %s", e)
         return placeholder
+
+    @staticmethod
+    def _serialize_custom_characters_or_placeholder(characters: Any) -> str:
+        """序列化自定义角色 dict 为可读文本，None/空返回占位文本。
+
+        格式：每个角色按【角色：{name}】分节，后接 8 维度 JSON。
+        """
+        if not characters:
+            return "（无自定义角色档案）"
+        if isinstance(characters, dict):
+            parts: list[str] = []
+            for name, profile in characters.items():
+                if hasattr(profile, "model_dump"):
+                    data = profile.model_dump(mode="json")
+                elif isinstance(profile, dict):
+                    data = profile
+                else:
+                    continue
+                parts.append(f"【角色：{name}】")
+                parts.append(json.dumps(data, ensure_ascii=False, indent=2))
+            return "\n\n".join(parts) if parts else "（无自定义角色档案）"
+        # 单个 ProtagonistProfile 对象兜底
+        if hasattr(characters, "model_dump"):
+            return json.dumps(
+                characters.model_dump(mode="json"),
+                ensure_ascii=False, indent=2,
+            )
+        return "（无自定义角色档案）"
 
     def _stage1_sort(
         self, preset: WritingPreset

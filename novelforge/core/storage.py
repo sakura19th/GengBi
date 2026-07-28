@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS chapters (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     protagonist_profile TEXT,
+    custom_characters TEXT,
     FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_chapters_project ON chapters(project_id, "index");
@@ -457,7 +458,7 @@ class Storage:
             logger.info("已为 projects 表添加 style_profile 列")
 
     async def _migrate_chapters_columns(self) -> None:
-        """幂等迁移：为旧版 chapters 表补充 protagonist_profile 列。
+        """幂等迁移：为旧版 chapters 表补充 protagonist_profile / custom_characters 列。
 
         SQLite 不支持 ADD COLUMN IF NOT EXISTS，需先查 PRAGMA table_info
         检测列是否存在，再决定是否 ALTER TABLE。
@@ -472,6 +473,11 @@ class Storage:
                 "ALTER TABLE chapters ADD COLUMN protagonist_profile TEXT"
             )
             logger.info("已为 chapters 表添加 protagonist_profile 列")
+        if "custom_characters" not in column_names:
+            await self._conn.execute(
+                "ALTER TABLE chapters ADD COLUMN custom_characters TEXT"
+            )
+            logger.info("已为 chapters 表添加 custom_characters 列")
 
     async def close(self) -> None:
         """关闭数据库连接。"""
@@ -658,8 +664,8 @@ class Storage:
             await self.conn.execute(
                 """INSERT INTO chapters
                    (id, project_id, "index", title, word_count, metadata,
-                    created_at, updated_at, protagonist_profile)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, protagonist_profile, custom_characters)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(id) DO UPDATE SET
                        project_id=excluded.project_id,
                        "index"=excluded."index",
@@ -668,7 +674,8 @@ class Storage:
                        metadata=excluded.metadata,
                        created_at=excluded.created_at,
                        updated_at=excluded.updated_at,
-                       protagonist_profile=excluded.protagonist_profile""",
+                       protagonist_profile=excluded.protagonist_profile,
+                       custom_characters=excluded.custom_characters""",
                 (
                     chapter_id,
                     project_id,
@@ -680,6 +687,8 @@ class Storage:
                     chapter["updated_at"],
                     json.dumps(chapter.get("protagonist_profile"), ensure_ascii=False)
                     if chapter.get("protagonist_profile") else None,
+                    json.dumps(chapter.get("custom_characters"), ensure_ascii=False)
+                    if chapter.get("custom_characters") else None,
                 ),
             )
             await self.conn.commit()
@@ -733,6 +742,23 @@ class Storage:
         await self.conn.execute(
             "UPDATE chapters SET protagonist_profile = ? WHERE id = ?",
             (protagonist_profile_json, chapter_id),
+        )
+        await self.conn.commit()
+
+    async def update_chapter_custom_characters(
+        self, chapter_id: str, custom_characters_json: str | None
+    ) -> None:
+        """只更新章节的 custom_characters 列，不触碰正文文件。
+
+        用于自定义角色提取完成落盘，避免 save_chapter 用空 content 覆盖正文。
+
+        Args:
+            chapter_id: 章节 ID
+            custom_characters_json: dict[str, ProtagonistProfile] 的 JSON 字符串，None 清空
+        """
+        await self.conn.execute(
+            "UPDATE chapters SET custom_characters = ? WHERE id = ?",
+            (custom_characters_json, chapter_id),
         )
         await self.conn.commit()
 
@@ -910,8 +936,8 @@ class Storage:
                 await self.conn.execute(
                     """INSERT INTO chapters
                        (id, project_id, "index", title, word_count, metadata,
-                        created_at, updated_at, protagonist_profile)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, protagonist_profile, custom_characters)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(id) DO UPDATE SET
                            project_id=excluded.project_id,
                            "index"=excluded."index",
@@ -920,7 +946,8 @@ class Storage:
                            metadata=excluded.metadata,
                            created_at=excluded.created_at,
                            updated_at=excluded.updated_at,
-                           protagonist_profile=excluded.protagonist_profile""",
+                           protagonist_profile=excluded.protagonist_profile,
+                           custom_characters=excluded.custom_characters""",
                     (
                         chapter_id,
                         project_id,
@@ -930,6 +957,7 @@ class Storage:
                         "{}",
                         now,
                         now,
+                        None,
                         None,
                     ),
                 )
@@ -983,6 +1011,7 @@ class Storage:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "protagonist_profile": json.loads(row["protagonist_profile"]) if row["protagonist_profile"] else None,
+            "custom_characters": json.loads(row["custom_characters"]) if row["custom_characters"] else {},
         }
 
     # ===== 续写版本操作 =====

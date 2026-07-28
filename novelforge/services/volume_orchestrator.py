@@ -149,10 +149,12 @@ class VolumeOrchestrator(QThread):
         protagonist_profile: ProtagonistProfile | None = None,
         style_profile: Any = None,
         custom_audit_rules: list[Any] | None = None,
+        custom_characters: Any = None,
         phase: str = "all",
         phase_inputs: dict[str, Any] | None = None,
         extra_payload: dict | None = None,
         extra_headers: dict | None = None,
+        proxy: str | None = None,
         parent=None,
     ) -> None:
         """初始化卷级编排器。
@@ -181,11 +183,13 @@ class VolumeOrchestrator(QThread):
             protagonist_profile: 主角形象档案（从当前章节缓存读取，反映至当前章节状态）
             style_profile: 文风档案（从 Project 读取，全文固化，注入各阶段提示词作为风格量化约束）
             custom_audit_rules: 自定义设定/审计必查项列表（从 Project 读取，注入各阶段提示词作为硬约束）
+            custom_characters: 自定义角色档案 dict（按章节缓存，注入各阶段提示词）
             phase: 执行阶段（"all"=完整流程，"deep_analysis"/"volume_outline"/
                 "outline_audit"/"chapter_writing"=单阶段，供 volume_phase agent 使用）
             phase_inputs: 单阶段模式的输入产物（如 {"deep_analysis": DeepAnalysis对象}）
             extra_payload: 自定义请求体字段（deep merge 到 payload）
             extra_headers: 自定义 HTTP 头（update 到 headers）
+            proxy: HTTP/HTTPS 代理 URL（None 表示不走代理）
             parent: 父 QObject
         """
         super().__init__(parent)
@@ -196,6 +200,8 @@ class VolumeOrchestrator(QThread):
         # 自定义请求扩展（透传给 LLMClient）
         self.extra_payload: dict = extra_payload or {}
         self.extra_headers: dict = extra_headers or {}
+        # 网络代理（透传给 LLMClient）
+        self.proxy = proxy
         self.preset = preset
         self.chapters = chapters
         self.current_chapter = current_chapter
@@ -230,6 +236,8 @@ class VolumeOrchestrator(QThread):
         self.style_profile = style_profile
         # 自定义设定/审计必查项（项目级全局，注入各阶段提示词作为硬约束，一票否决）
         self.custom_audit_rules = custom_audit_rules
+        # 自定义角色档案（按章节缓存，每章可多个角色，注入各阶段提示词）
+        self.custom_characters = custom_characters
 
         # 分阶段执行模式（volume_phase agent）：phase="all" 为完整流程
         self.phase = phase
@@ -458,6 +466,7 @@ class VolumeOrchestrator(QThread):
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
                 extra_payload=self.extra_payload,
                 extra_headers=self.extra_headers,
+                proxy=self.proxy,
             )
 
         try:
@@ -711,7 +720,9 @@ class VolumeOrchestrator(QThread):
 
         # ===== 阶段 4：逐章循环 =====
         previous_chapters_text = ""
-        previous_chapter_text = ""
+        # 卷第一章紧邻的上一章是插入点章节（self.current_chapter），其正文作为
+        # previous_chapter_text 注入 outline/verify 模板，保证衔接与 chapter_transition 审计生效
+        previous_chapter_text = self.current_chapter.content or ""
         chapter_count = self.config.chapter_count
         reasoning = ""  # 初始化，防 chapter_count=0 时 NameError
         for i in range(chapter_count):
@@ -779,7 +790,7 @@ class VolumeOrchestrator(QThread):
                     ))
 
                     # 强制第1轮修改（无论审计①是否通过）+ 自动修订循环
-                    # 新流程：跳过 _run_chapter_revise，直接用审计报告作为修改意见调 _run_chapter_rewrite
+                    # 审计报告整体即修改意见，直接调 _run_chapter_rewrite 重写完整正文
                     # critical 问题忽略 max_revise_rounds_per_chapter 上限，一直修正到通过为止
                     if self.config.enable_chapter_revise:
                         while not self._stop_event.is_set() and (
@@ -847,7 +858,7 @@ class VolumeOrchestrator(QThread):
                             raise asyncio.CancelledError("用户在每章确认点取消")
                         else:  # reject
                             feedback = payload.get("feedback", "")
-                            # 新流程：用户反馈作为额外修改意见拼入 critique，跳过 _run_chapter_revise
+                            # 用户反馈作为额外修改意见拼入 critique，直接调 _run_chapter_rewrite 重写
                             rounds += 1
                             self.chapter_step_started.emit(i, "revise")
                             content, reasoning, messages = await self._run_chapter_rewrite(
@@ -862,7 +873,7 @@ class VolumeOrchestrator(QThread):
                                 guidance=None, content=content,
                             ))
                             # 重新验证 + 自动修订循环
-                            # 新流程：跳过 _run_chapter_revise，直接用审计报告作为修改意见
+                            # 审计报告整体即修改意见，直接调 _run_chapter_rewrite 重写
                             # critical 问题忽略 max_revise_rounds_per_chapter 上限，一直修正到通过为止
                             if self.config.enable_chapter_verify:
                                 self.chapter_step_started.emit(i, "verify")
@@ -1108,6 +1119,7 @@ class VolumeOrchestrator(QThread):
             "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
+            "{{custom_characters}}": self._format_custom_characters(),
             "{{chapters_text}}": chapters_text,
             "{{analysis_depth}}": depth,
             "{{max_analysis_entries}}": str(max_entries),
@@ -1186,6 +1198,7 @@ class VolumeOrchestrator(QThread):
             "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
+            "{{custom_characters}}": self._format_custom_characters(),
             "{{deep_analysis}}": deep_analysis_text,
             "{{context_entries}}": self._build_context_entries_text(),
             "{{user_input}}": self.user_input or "",
@@ -1360,6 +1373,7 @@ class VolumeOrchestrator(QThread):
             "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
+            "{{custom_characters}}": self._format_custom_characters(),
             "{{deep_analysis}}": deep_analysis_text,
             "{{user_directive_analysis}}": (
                 json.dumps(
@@ -1468,6 +1482,7 @@ class VolumeOrchestrator(QThread):
             "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
+            "{{custom_characters}}": self._format_custom_characters(),
             "{{volume_outline}}": outline_text,
             "{{audit_dimensions}}": dimensions,
             "{{previous_chapters_text}}": previous_chapters_text,
@@ -1578,6 +1593,7 @@ class VolumeOrchestrator(QThread):
             "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
+            "{{custom_characters}}": self._format_custom_characters(),
         }
         system_prompt = self._apply_macros(template, macros)
         messages = [{"role": "system", "content": system_prompt}]
@@ -1660,6 +1676,7 @@ class VolumeOrchestrator(QThread):
             "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
+            "{{custom_characters}}": self._format_custom_characters(),
             "{{world_ontology}}": self._format_world_ontology(),
             "{{volume_outline}}": outline_text,
             "{{chapter_plan}}": plan_text,
@@ -1786,6 +1803,7 @@ class VolumeOrchestrator(QThread):
             protagonist_profile=self.protagonist_profile,
             style_profile=self.style_profile,
             custom_audit_rules=self.custom_audit_rules,
+            custom_characters=self.custom_characters,
         )
         messages = list(result.messages)
 
@@ -1884,7 +1902,7 @@ class VolumeOrchestrator(QThread):
         """阶段④-重写：审计后基于审计结果与修改意见重写完整章节正文（流式）。
 
         新流程：使用 phase_audit_rewrite.txt 独立模板，聚焦修改意见（审计报告整体即修改意见），
-        不再单独生成修订指导（跳过 _run_chapter_revise）。
+        不再单独生成修订指导，直接重写完整正文。
 
         与 _run_chapter_writing 的区别：
         - 不复用 prompt_assembler 组装，而是直接加载 phase_audit_rewrite.txt 模板
@@ -1940,6 +1958,7 @@ class VolumeOrchestrator(QThread):
             "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
+            "{{custom_characters}}": self._format_custom_characters(),
             "{{original_content}}": original_content,
             "{{critique}}": critique_text,
             "{{chapter_plan}}": chapter_plan_text,
@@ -2051,6 +2070,7 @@ class VolumeOrchestrator(QThread):
             "{{protagonist_profile}}": self._format_protagonist_profile(),
             "{{style_profile}}": self._format_style_profile(),
             "{{custom_audit_rules}}": self._format_custom_audit_rules(),
+            "{{custom_characters}}": self._format_custom_characters(),
             "{{snapshot}}": snapshot_text,
             "{{outline}}": outline_text,
             "{{written_text}}": written_text,
@@ -2084,77 +2104,6 @@ class VolumeOrchestrator(QThread):
                 logger.warning("ChapterVerify 失败 (attempt %d): %s", attempt + 1, e)
                 continue
         return None
-
-    async def _run_chapter_revise(
-        self,
-        written_text: str,
-        critique: CritiqueReport | None,
-        outline: Outline | None,
-        lookback_chapters_text: str = "",
-        user_guidance: dict | None = None,
-    ) -> dict:
-        """阶段④-修订：产出修订指导（non-stream JSON，宽松 dict）。
-
-        复用 AgentOrchestrator._run_revise 的模式，加载 phase_revise.txt
-        （用 get_agent_prompt_path）。
-        失败重试一次，再失败返回空 dict。
-
-        Args:
-            user_guidance: 用户确认不通过时直接提供的修订指导。非 None 时跳过 LLM
-                revise 调用，直接返回该 dict（节省一次调用）。
-        """
-        if user_guidance is not None:
-            return user_guidance
-        template = self._load_agent_template("revise")
-        if critique is not None:
-            critique_text = json.dumps(
-                critique.model_dump(), ensure_ascii=False, indent=2
-            )
-        else:
-            critique_text = "（无评审报告）"
-        if outline is not None:
-            outline_text = json.dumps(
-                outline.model_dump(), ensure_ascii=False, indent=2
-            )
-        else:
-            outline_text = "（无大纲）"
-        macros = {
-            "{{protagonist_profile}}": self._format_protagonist_profile(),
-            "{{style_profile}}": self._format_style_profile(),
-            "{{custom_audit_rules}}": self._format_custom_audit_rules(),
-            "{{world_ontology}}": self._format_world_ontology(),
-            "{{written_text}}": written_text,
-            "{{critique}}": critique_text,
-            "{{outline}}": outline_text,
-            "{{previous_chapters_text}}": lookback_chapters_text,
-            "{{pacing_speed}}": self.config.pacing_speed,
-        }
-        system_prompt = self._apply_macros(template, macros)
-        messages = [{"role": "system", "content": system_prompt}]
-
-        # 调试模式确认
-        if not await self._maybe_debug_prompt(messages, "章节修订"):
-            return {}
-
-        for attempt in range(2):
-            temperature = 0.3 if attempt == 0 else 0.0
-            try:
-                response = await self._effective_client().chat_completion(
-                    messages,
-                    self._effective_model(),
-                    temperature=temperature,
-                    max_tokens=3000,
-                )
-                content = response["choices"][0]["message"]["content"]
-                return parse_json_response(content)
-            except AuthError:
-                raise
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.warning("ChapterRevise 失败 (attempt %d): %s", attempt + 1, e)
-                continue
-        return {}
 
     async def _wait_for_resume(self, checkpoint_name: str) -> Any:
         """暂停等待用户操作，返回 checkpoint_payload。
@@ -2370,6 +2319,31 @@ class VolumeOrchestrator(QThread):
         except Exception as e:
             logger.warning("StyleProfile 序列化失败: %s", e)
             return "（文风档案序列化失败）"
+
+    def _format_custom_characters(self) -> str:
+        """格式化自定义角色 dict 为提示词注入文本。
+
+        Returns:
+            按角色名分节的 8 维度 JSON 文本；无自定义角色时返回占位提示文字。
+        """
+        if not self.custom_characters:
+            return "（无自定义角色档案）"
+        if isinstance(self.custom_characters, dict):
+            parts: list[str] = []
+            for name, profile in self.custom_characters.items():
+                try:
+                    if hasattr(profile, "model_dump"):
+                        data = profile.model_dump(mode="json")
+                    elif isinstance(profile, dict):
+                        data = profile
+                    else:
+                        continue
+                    parts.append(f"【角色：{name}】")
+                    parts.append(json.dumps(data, ensure_ascii=False, indent=2))
+                except Exception as e:
+                    logger.warning("自定义角色 %s 序列化失败: %s", name, e)
+            return "\n\n".join(parts) if parts else "（无自定义角色档案）"
+        return "（无自定义角色档案）"
 
     def _format_custom_audit_rules(self) -> str:
         """格式化自定义设定列表为提示词注入文本。

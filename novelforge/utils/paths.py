@@ -98,6 +98,23 @@ def get_extract_protagonist_merge_prompt_path() -> Path:
     return get_resource_path("defaults", "extract_protagonist_merge_prompt.txt")
 
 
+def get_extract_custom_character_prompt_path() -> Path:
+    """获取自定义角色提取提示词路径。
+
+    提取指定角色（用户输入角色名）的 ProtagonistProfile 8 大维度心理学档案，
+    支持 token 拆分 + 增量更新（含 ``{{accumulated_protagonist}}`` 与 ``{{character_name}}`` 占位符）。
+    """
+    return get_resource_path("defaults", "extract_custom_character_prompt.txt")
+
+
+def get_extract_custom_character_merge_prompt_path() -> Path:
+    """获取自定义角色合并提示词路径。
+
+    多批次提取后，由该模板指导 LLM 合并为统一的 ProtagonistProfile JSON 对象。
+    """
+    return get_resource_path("defaults", "extract_custom_character_merge_prompt.txt")
+
+
 def get_extract_style_prompt_path() -> Path:
     """获取文风档案提取提示词路径。
 

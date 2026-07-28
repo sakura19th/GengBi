@@ -136,7 +136,7 @@ class _SlowModelFetchWorker(QThread):
     models_fetched = Signal(list)
     error = Signal(str)
 
-    def __init__(self, base_url: str, api_key: str, parent=None) -> None:
+    def __init__(self, base_url: str, api_key: str, proxy=None, parent=None) -> None:
         super().__init__(parent)
 
     def run(self) -> None:

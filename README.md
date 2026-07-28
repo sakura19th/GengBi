@@ -136,14 +136,20 @@ API Key 使用 PBKDF2HMAC + Fernet 加密存储，不明文落盘。
 | `{{user}}` | 用户名（ST 兼容，默认 `User`） | 全局配置 |
 | `{{char}}` | 角色名（ST 兼容，默认 `Assistant`） | 全局配置 |
 
-**额外注入宏**（由主窗口在续写时动态注入，非 `MacroContext` 字段）：
+**额外注入宏**（由 PromptAssembler._build_macro_context 在续写时动态注入，非 `MacroContext` 字段）：
 
 | 宏 | 说明 | 来源 |
 |---|---|---|
 | `{{world_ontology}}` | 世界观底层 7 维度 JSON（格式化缩进） | `OntologyExtractor` 提取，固化到 `Project.world_ontology` |
 | `{{protagonist_profile}}` | 主角形象 8 维度心理学档案 JSON（格式化缩进） | `ContextExtractor._extract_protagonist`，按章节缓存 |
+| `{{custom_characters}}` | 自定义角色档案（按角色名分节，每个含 8 维度 JSON） | `ContextExtractor.extract_custom_character_streaming`，按章节缓存（每章可多个角色） |
+| `{{style_profile}}` | 文风档案 9 维度量化 JSON（格式化缩进） | `StyleExtractor` 提取，固化到 `Project.style_profile` |
+| `{{custom_audit_rules}}` | 自定义设定/审计必查项格式化文本 | `CustomAuditRuleService` 结构化，存于 `Project.custom_audit_rules` |
+| `{{previous_chapter_titles}}` | 前文章节标题列表（供标题生成参考命名规律） | 当前章节之前的章节标题拼接 |
 
-> 这两个宏在卷续写的各阶段模板中也同样可用（深度分析、卷大纲、章节细纲、验证、修订）。
+> 这些宏在卷续写的各阶段模板中也同样可用（深度分析、卷大纲、章节细纲、验证、修订）。无对应档案时注入占位文本（如"（无主角形象档案）"），不影响提示词结构。
+>
+> 注：`{{previous_chapter_titles}}` 仅在单章续写预设（`default_preset.json` 的 main 模块）中注入，卷续写 phase 模板未使用该宏（卷续写通过 `{{previous_chapters_text}}`/`{{previous_chapter_text}}` 等流程专用占位符提供前文衔接信息）。
 
 示例（默认预设 main 条目片段）：
 
@@ -151,11 +157,23 @@ API Key 使用 PBKDF2HMAC + Fernet 加密存储，不明文落盘。
 【世界观底层】
 {{world_ontology}}
 
+【文风档案】
+{{style_profile}}
+
+【写作风格补充说明】
+{{writing_style}}
+
 【主角信息】
 {{protagonist_profile}}
 
-【写作风格】
-{{writing_style}}
+【自定义角色档案】
+{{custom_characters}}
+
+【自定义设定/审计必查项】
+{{custom_audit_rules}}
+
+【前文章节标题】
+{{previous_chapter_titles}}
 
 目标字数约 {{target_words}} 字。
 ```

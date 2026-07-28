@@ -1723,8 +1723,8 @@ def test_after_chapter_checkpoint_rejected_then_approved() -> None:
     # 第 1 章：细纲 + 写作
     fake.add_chat_response(make_outline_json())
     fake.add_stream_response([StreamChunk(content="第一章初稿")])
-    # reject 后：_run_chapter_revise(user_guidance) 短路无 LLM 调用，
-    # _run_chapter_rewrite 流式重写（无 verify，跳过验证环节）
+    # reject 后：_run_chapter_rewrite 流式重写（用户反馈拼入 critique 作为修改意见，
+    # 无 verify，跳过验证环节）
     fake.add_stream_response([StreamChunk(content="第一章重写稿")])
     # 第 2 章：细纲 + 写作
     fake.add_chat_response(make_outline_json())

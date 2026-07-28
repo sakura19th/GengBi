@@ -78,6 +78,7 @@ FLOW_DEFAULT_JAILBREAKS: dict[str, str] = {
     "context_extraction": "low",
     "ontology_extraction": "low",
     "protagonist_extraction": "low",
+    "custom_character_extraction": "low",
     "style_extraction": "low",
     "custom_rule_parsing": "off",
     "writing_element_analysis": "low",
@@ -119,6 +120,10 @@ def get_default_config() -> dict[str, Any]:
         },
         "data": {
             "storage_path": str(get_default_storage_path()),
+        },
+        "network": {
+            "proxy_enabled": False,
+            "http_proxy": "",
         },
         "crypto_salt": "",
         "privacy_accepted": False,
@@ -514,6 +519,26 @@ class ConfigManager:
         """设置外观配置并保存。"""
         with self._lock:
             self.config["appearance"] = appearance
+            self.save()
+
+    def get_network_settings(self) -> dict[str, Any]:
+        """获取网络代理设置。"""
+        with self._lock:
+            network = self.config.get("network")
+            if not isinstance(network, dict):
+                return {"proxy_enabled": False, "http_proxy": ""}
+            return {
+                "proxy_enabled": bool(network.get("proxy_enabled", False)),
+                "http_proxy": str(network.get("http_proxy", "")),
+            }
+
+    def set_network_settings(self, settings: dict[str, Any]) -> None:
+        """保存网络代理设置。"""
+        with self._lock:
+            self.config["network"] = {
+                "proxy_enabled": bool(settings.get("proxy_enabled", False)),
+                "http_proxy": str(settings.get("http_proxy", "")),
+            }
             self.save()
 
     def get_continuation_settings(self) -> dict[str, Any]:

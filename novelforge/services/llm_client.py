@@ -120,6 +120,7 @@ class LLMClient:
         reasoning_effort: str | None = None,
         extra_payload: dict | None = None,
         extra_headers: dict | None = None,
+        proxy: str | None = None,
     ) -> None:
         """初始化 LLM 客户端。
 
@@ -132,6 +133,8 @@ class LLMClient:
             extra_payload: 自定义请求体字段（deep merge 到 payload，如 zenmux
                 的 provider_routing_strategy）
             extra_headers: 自定义 HTTP 头（update 到 headers，可覆盖默认头）
+            proxy: HTTP/HTTPS 代理 URL（如 ``http://127.0.0.1:7890`` 或
+                ``http://user:pass@host:port``），None/空串表示不使用代理
         """
         # 参数校验
         if not (base_url.startswith("http://") or base_url.startswith("https://")):
@@ -154,6 +157,8 @@ class LLMClient:
         # 自定义扩展：payload 字段 deep merge，HTTP 头 update
         self.extra_payload: dict = extra_payload or {}
         self.extra_headers: dict = extra_headers or {}
+        # HTTP/HTTPS 代理 URL（None 表示不走代理）
+        self.proxy = proxy.strip() if proxy and proxy.strip() else None
         # 非流式：total 总超时
         self.timeout = aiohttp.ClientTimeout(total=timeout)
         # 流式：无 total 限制，sock_read 控制分块间超时（检测死连接，不杀长流）
@@ -313,6 +318,7 @@ class LLMClient:
                     json=payload,
                     headers=headers,
                     timeout=self.stream_timeout,
+                    proxy=self.proxy or None,
                 ) as response:
                     # 处理错误状态码（不调用 raise_for_status）
                     if response.status == 401:
@@ -583,6 +589,7 @@ class LLMClient:
                     json=payload,
                     headers=headers,
                     timeout=self.timeout,
+                    proxy=self.proxy or None,
                 ) as response:
                     # 处理错误状态码
                     if response.status == 401:
@@ -664,7 +671,8 @@ class LLMClient:
         try:
             session = await self._get_session()
             async with session.get(
-                url, headers=headers, timeout=self.timeout
+                url, headers=headers, timeout=self.timeout,
+                proxy=self.proxy or None,
             ) as response:
                 if response.status >= 400:
                     body = await response.text()

@@ -418,6 +418,7 @@ def test_macro_replacement_deep_analysis() -> None:
         "{{context_entries}}": "## 人物\n- 主角林晨",
         "{{user_input}}": "请加强主角内心戏",
         "{{custom_audit_rules}}": "（无自定义设定）",
+        "{{custom_characters}}": "（无自定义角色档案）",
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -447,6 +448,7 @@ def test_macro_replacement_volume_outline() -> None:
         "{{style_profile}}": "（无文风档案）",
         "{{user_directive_analysis}}": '{"required_elements": ["宝物"]}',
         "{{custom_audit_rules}}": "（无自定义设定）",
+        "{{custom_characters}}": "（无自定义角色档案）",
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -474,6 +476,7 @@ def test_macro_replacement_outline_audit() -> None:
         "{{style_profile}}": "（无文风档案）",
         "{{user_directive_analysis}}": '{"required_elements": ["宝物"]}',
         "{{custom_audit_rules}}": "（无自定义设定）",
+        "{{custom_characters}}": "（无自定义角色档案）",
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -500,6 +503,7 @@ def test_macro_replacement_chapter_outline() -> None:
         "{{protagonist_profile}}": '{"basic_anchors": {}}',
         "{{style_profile}}": "（无文风档案）",
         "{{custom_audit_rules}}": "（无自定义设定）",
+        "{{custom_characters}}": "（无自定义角色档案）",
     }
     result = _apply_macros(template, macros)
     _assert_no_placeholders(result)
@@ -558,7 +562,7 @@ def test_phase_chapter_rewrite_template_exists() -> None:
 
 
 def test_phase_chapter_rewrite_placeholders() -> None:
-    """phase_chapter_rewrite.txt 含 11 个占位符且无残留。"""
+    """phase_chapter_rewrite.txt 含 12 个占位符且无残留。"""
     template = load_text_resource(get_agent_prompt_path("chapter_rewrite"))
     expected_placeholders = [
         "{{original_content}}",
@@ -572,6 +576,7 @@ def test_phase_chapter_rewrite_placeholders() -> None:
         "{{style_profile}}",
         "{{pacing_speed}}",
         "{{target_words}}",
+        "{{custom_characters}}",
     ]
     for ph in expected_placeholders:
         assert ph in template, f"phase_chapter_rewrite.txt 缺少占位符: {ph}"
@@ -598,7 +603,7 @@ def test_phase_audit_rewrite_template_exists() -> None:
 
 
 def test_phase_audit_rewrite_placeholders() -> None:
-    """phase_audit_rewrite.txt 含 10 个占位符（无 revision_guidance）且无残留。"""
+    """phase_audit_rewrite.txt 含 12 个占位符（无 revision_guidance）且无残留。"""
     template = load_text_resource(get_agent_prompt_path("audit_rewrite"))
     expected_placeholders = [
         "{{original_content}}",
@@ -607,6 +612,7 @@ def test_phase_audit_rewrite_placeholders() -> None:
         "{{protagonist_profile}}",
         "{{style_profile}}",
         "{{custom_audit_rules}}",
+        "{{custom_characters}}",
         "{{previous_chapters_text}}",
         "{{chapter_plan}}",
         "{{outline}}",

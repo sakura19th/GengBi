@@ -86,6 +86,9 @@ class Chapter(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
     protagonist_profile: ProtagonistProfile | None = None
+    # 自定义角色档案：角色名 → 8 维度心理学档案（按章节缓存，每章可存多个角色）
+    # 复用 ProtagonistProfile 模型，与主角形象提取链路解耦
+    custom_characters: dict[str, ProtagonistProfile] = Field(default_factory=dict)
 
     @field_validator("id", "project_id")
     @classmethod

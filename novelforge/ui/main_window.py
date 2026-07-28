@@ -32,6 +32,8 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -201,6 +203,9 @@ class MainWindow(QMainWindow):
     _protagonist_chunk_received = Signal(str)  # 主角形象提取 chunk（跨线程）
     _protagonist_done = Signal(object, str)    # 主角形象提取完成（跨线程）：profile, status
     _protagonist_batch_done = Signal(int, int) # 主角形象提取批次完成（跨线程）
+    _custom_character_chunk_received = Signal(str)  # 自定义角色提取 chunk（跨线程）
+    _custom_character_done = Signal(str, object, str)  # 自定义角色提取完成（跨线程）：character_name, profile, status
+    _custom_character_batch_done = Signal(int, int) # 自定义角色提取批次完成（跨线程）
     _custom_rule_chunk_received = Signal(str)  # 自定义设定流式 chunk（跨线程）
     _custom_rule_done = Signal(object, str)    # 自定义设定完成（跨线程）：rule, status
 
@@ -259,6 +264,8 @@ class MainWindow(QMainWindow):
         self._context_entries_by_chapter: OrderedDict[str, list] = OrderedDict()
         # 主角形象档案内存 LRU 缓存（chapter_id -> ProtagonistProfile），跟随章节缓存
         self._protagonist_profile_by_chapter: OrderedDict[str, ProtagonistProfile] = OrderedDict()
+        # 自定义角色档案内存 LRU 缓存（chapter_id -> {character_name -> ProtagonistProfile}），跟随章节缓存
+        self._custom_characters_by_chapter: OrderedDict[str, dict[str, ProtagonistProfile]] = OrderedDict()
         # 正在提取的章节 ID（用于提取完成时正确归档）
         self._extracting_chapter_id: str | None = None
         # M5: 历史日志服务
@@ -320,6 +327,10 @@ class MainWindow(QMainWindow):
         self._protagonist_extracting: bool = False  # 主角形象提取中标志（章节级）
         self._protagonist_stream_text: str = ""  # 主角形象提取流式文本缓冲
         self._protagonist_stream_text_by_chapter: dict[str, str] = {}  # 按章节缓冲主角提取流式文本
+        self._custom_character_extracting: bool = False  # 自定义角色提取中标志（章节级）
+        self._custom_character_name: str = ""  # 当前正在提取的自定义角色名（提取中暂存，完成时归档）
+        self._custom_character_stream_text: str = ""  # 自定义角色提取流式文本缓冲
+        self._custom_character_stream_text_by_chapter: dict[str, str] = {}  # 按章节缓冲自定义角色提取流式文本
         self._continuation_chapter_id: str | None = None  # 单章续写发起章节
         self._continuation_stream_text_by_chapter: dict[str, str] = {}  # 续写流式文本
         self._audit_chapter_id: str | None = None  # 审计发起章节
@@ -363,6 +374,10 @@ class MainWindow(QMainWindow):
         self._protagonist_chunk_received.connect(self._on_protagonist_chunk_received)
         self._protagonist_done.connect(self._on_protagonist_done)
         self._protagonist_batch_done.connect(self._on_protagonist_batch_done)
+        # 连接自定义角色提取信号（跨线程安全传递）
+        self._custom_character_chunk_received.connect(self._on_custom_character_chunk_received)
+        self._custom_character_done.connect(self._on_custom_character_done)
+        self._custom_character_batch_done.connect(self._on_custom_character_batch_done)
         self._custom_rule_chunk_received.connect(self._on_custom_rule_chunk_received)
         self._custom_rule_done.connect(self._on_custom_rule_done)
 
@@ -532,6 +547,8 @@ class MainWindow(QMainWindow):
         context_panel.view_style_requested.connect(self._on_view_style_requested)
         context_panel.extract_protagonist_requested.connect(self._on_extract_protagonist_requested)
         context_panel.view_protagonist_requested.connect(self._on_view_protagonist_requested)
+        context_panel.extract_custom_character_requested.connect(self._on_extract_custom_character_requested)
+        context_panel.view_custom_character_requested.connect(self._on_view_custom_character_requested)
         context_panel.add_custom_rule_requested.connect(self._on_add_custom_rule_requested)
         context_panel.view_custom_rules_requested.connect(self._on_view_custom_rules_requested)
         context_panel.view_extract_prompt_requested.connect(
@@ -1530,6 +1547,14 @@ class MainWindow(QMainWindow):
                 self._protagonist_stream_text, is_protagonist=True
             )
             return
+        # 自定义角色提取为章节级，切回发起章节恢复流式态
+        if (self._custom_character_extracting
+                and self._extracting_chapter_id == chapter.id
+                and self._custom_character_stream_text):
+            context_panel.restore_extraction_state(
+                self._custom_character_stream_text, is_custom_character=True
+            )
+            return
 
         # 1. 独立恢复主角形象档案（优先持久化字段，兜底 cache 表）
         if chapter.id not in self._protagonist_profile_by_chapter:
@@ -1559,6 +1584,14 @@ class MainWindow(QMainWindow):
                                 self._protagonist_profile_by_chapter.popitem(last=False)
                 except Exception as e:
                     logger.warning("加载主角形象缓存失败: %s", e)
+
+        # 1b. 独立恢复自定义角色档案（持久化字段 chapters.custom_characters 列）
+        if chapter.id not in self._custom_characters_by_chapter:
+            if chapter.custom_characters:
+                self._custom_characters_by_chapter[chapter.id] = dict(chapter.custom_characters)
+                self._custom_characters_by_chapter.move_to_end(chapter.id)
+                if len(self._custom_characters_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+                    self._custom_characters_by_chapter.popitem(last=False)
 
         # 2. 内存缓存优先
         if chapter.id in self._context_entries_by_chapter:
@@ -2456,6 +2489,7 @@ class MainWindow(QMainWindow):
             protagonist_profile=self._protagonist_profile_by_chapter.get(self._current_chapter.id),
             style_profile=project.style_profile if project else None,
             custom_audit_rules=project.custom_audit_rules if project else None,
+            custom_characters=self._custom_characters_by_chapter.get(self._current_chapter.id, {}),
             phase=phase,
             phase_inputs=self._volume_state,
             extra_payload=endpoint.get("extra_payload") or {},
@@ -4185,6 +4219,227 @@ class MainWindow(QMainWindow):
         layout.addWidget(btn)
         dialog.exec()
 
+    def _on_extract_custom_character_requested(self) -> None:
+        """提取自定义角色形象（非阻塞，流式进度）。
+
+        用户在上下文预览面板点击"提取自定义角色"按钮时触发。
+        弹出输入对话框获取角色名，按主角形象相同流程提取 8 维度
+        ProtagonistProfile，缓存到当前章节 custom_characters dict（按角色名键）。
+        """
+        if not self._current_chapter:
+            QMessageBox.warning(self, "提示", "请先选择章节")
+            return
+
+        # 弹出输入对话框获取角色名
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(
+            self, "提取自定义角色", "请输入要提取的角色名："
+        )
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            QMessageBox.warning(self, "提示", "角色名不能为空")
+            return
+
+        # 确保章节正文已加载
+        self._ensure_chapter_contents()
+
+        endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            self._on_open_settings()
+            return
+
+        if not self._current_chapters:
+            QMessageBox.warning(self, "提示", "无章节可提取自定义角色")
+            return
+
+        # 加载项目对象
+        project = None
+        if self._current_project_id:
+            project = self.storage_service.load_project(self._current_project_id)
+        if project is None:
+            QMessageBox.warning(self, "提示", "项目加载失败")
+            return
+
+        # 读取 token_limit 与 lookback 配置
+        config = self.continuation_panel.context_preview_panel.get_lookback_config()
+        token_limit_override = config.get("token_limit", 0)
+        lookback = config.get("lookback", 0)
+
+        # 禁用按钮 + 启动流式进度展示
+        context_panel = self.continuation_panel.context_preview_panel
+        self._custom_character_extracting = True
+        self._custom_character_name = name
+        self._custom_character_stream_text = ""
+        self._extracting_chapter_id = self._current_chapter.id
+        context_panel.start_custom_character_extraction()
+        self._set_status_message(f"正在提取自定义角色「{name}」（流式）...")
+
+        # 非阻塞提交
+        from novelforge.services.async_runner import AsyncLoopRunner
+
+        runner = AsyncLoopRunner.instance()
+        loop = runner._loop
+
+        def on_chunk(text: str) -> None:
+            self._custom_character_chunk_received.emit(text)
+
+        def on_batch_complete(batch_idx: int, total_batches: int) -> None:
+            self._custom_character_batch_done.emit(batch_idx, total_batches)
+
+        future = asyncio.run_coroutine_threadsafe(
+            self.context_extractor.extract_custom_character_streaming(
+                project=project,
+                chapters=self._current_chapters,
+                current_chapter=self._current_chapter,
+                character_name=name,
+                token_limit=token_limit_override,
+                lookback=lookback,
+                on_chunk=on_chunk,
+                on_batch_complete=on_batch_complete,
+                jailbreak_text=self._get_flow_jailbreak_text("custom_character_extraction"),
+            ),
+            loop,
+        )
+
+        def on_done(fut) -> None:
+            try:
+                profile, status = fut.result()
+                self._custom_character_done.emit(name, profile, status)
+            except Exception as e:
+                logger.error("自定义角色提取异常: %s", e, exc_info=True)
+                self._custom_character_done.emit(name, None, f"failed: {e}")
+
+        future.add_done_callback(on_done)
+
+    @Slot(str)
+    def _on_custom_character_chunk_received(self, text: str) -> None:
+        """自定义角色提取 chunk 回调：缓冲，面板处于提取态时更新 UI。"""
+        self._custom_character_stream_text += text
+        context_panel = self.continuation_panel.context_preview_panel
+        if context_panel._is_extracting:
+            context_panel.update_custom_character_progress(text)
+
+    @Slot(int, int)
+    def _on_custom_character_batch_done(self, batch_idx: int, total_batches: int) -> None:
+        """自定义角色提取批次完成回调（UI 线程执行，由 Signal 触发）。"""
+        context_panel = self.continuation_panel.context_preview_panel
+        context_panel.update_custom_character_batch(batch_idx, total_batches)
+        self._set_status_message(
+            f"自定义角色提取进度: 第 {batch_idx}/{total_batches} 批次完成"
+        )
+
+    @Slot(str, object, str)
+    def _on_custom_character_done(self, character_name: str, profile, status: str) -> None:
+        """自定义角色提取完成回调：清理状态标记，更新内存 LRU + 持久化。"""
+        context_panel = self.continuation_panel.context_preview_panel
+        panel_active = context_panel._is_extracting
+        chapter_id = self._extracting_chapter_id
+
+        if profile is None:
+            if panel_active:
+                context_panel.fail_custom_character_extraction(status)
+            self._set_status_message(f"自定义角色「{character_name}」提取失败: {status}")
+            QMessageBox.critical(
+                self, "提取失败",
+                f"自定义角色「{character_name}」提取失败: {status}",
+            )
+        else:
+            # 落盘到 chapters.custom_characters 列 + 内存 LRU 热缓存
+            if chapter_id:
+                # 取出现有 dict 并更新单个角色（保留其他角色）
+                chars = self._custom_characters_by_chapter.get(chapter_id, {})
+                chars[character_name] = profile
+                self._custom_characters_by_chapter[chapter_id] = chars
+                self._custom_characters_by_chapter.move_to_end(chapter_id)
+                if len(self._custom_characters_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+                    self._custom_characters_by_chapter.popitem(last=False)
+                try:
+                    self.storage_service.update_chapter_custom_characters(chapter_id, chars)
+                except Exception as e:
+                    logger.warning(
+                        "自定义角色持久化失败 chapter=%s name=%s: %s",
+                        chapter_id, character_name, e,
+                    )
+            if panel_active:
+                context_panel.finish_custom_character_extraction(status)
+            self._set_status_message(
+                f"自定义角色「{character_name}」提取完成，已保存到当前章节并持久化"
+            )
+
+        # 清理状态标记与缓冲
+        self._custom_character_extracting = False
+        self._custom_character_name = ""
+        self._custom_character_stream_text = ""
+        self._extracting_chapter_id = None
+
+    def _on_view_custom_character_requested(self) -> None:
+        """查看当前章节已提取的自定义角色档案。"""
+        if not self._current_chapter:
+            QMessageBox.information(self, "提示", "请先选择章节")
+            return
+        chapter_id = self._current_chapter.id
+        chars = self._custom_characters_by_chapter.get(chapter_id, {})
+        if not chars:
+            QMessageBox.information(
+                self, "提示",
+                "当前章节尚未提取自定义角色，请先点击「提取自定义角色」按钮"
+            )
+            return
+        self._show_custom_character_dialog(chars)
+
+    def _show_custom_character_dialog(self, chars: dict) -> None:
+        """展示自定义角色档案列表对话框（master-detail 布局）。
+
+        左侧 QListWidget 列出全部角色名（按字母排序），右侧 QPlainTextEdit
+        显示选中角色的 8 维度档案，点击列表项联动刷新右侧内容。
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"自定义角色档案 - {self._current_chapter.title}")
+        dialog.resize(1000, 600)
+        layout = QVBoxLayout(dialog)
+
+        # 标题
+        title_label = QLabel(f"当前章节共 {len(chars)} 个自定义角色（点击左侧列表查看）")
+        title_label.setObjectName("panelTitle")
+        layout.addWidget(title_label)
+
+        # master-detail 布局
+        content_layout = QHBoxLayout()
+        char_list = QListWidget()
+        char_list.setMinimumWidth(180)
+        sorted_names = sorted(chars.keys())
+        for name in sorted_names:
+            item = QListWidgetItem(name)
+            char_list.addItem(item)
+
+        detail_edit = QPlainTextEdit()
+        detail_edit.setReadOnly(True)
+
+        def on_item_changed(current, previous):
+            if current is None:
+                detail_edit.setPlainText("")
+                return
+            name = current.text()
+            detail_edit.setPlainText(self._format_protagonist_for_display(chars[name]))
+
+        char_list.currentItemChanged.connect(on_item_changed)
+
+        # 默认选中第一项
+        if sorted_names:
+            char_list.setCurrentRow(0)
+
+        content_layout.addWidget(char_list)
+        content_layout.addWidget(detail_edit, 1)
+        layout.addLayout(content_layout, 1)
+
+        btn = QPushButton("关闭")
+        btn.clicked.connect(dialog.accept)
+        layout.addWidget(btn)
+        dialog.exec()
+
     @staticmethod
     def _format_ontology_for_display(wo) -> str:
         """格式化 WorldOntology 为可读文本（按 7 维度分节）。"""
@@ -4539,6 +4794,13 @@ class MainWindow(QMainWindow):
         self.chapter_editor.set_streaming_locked(False)
         QMessageBox.warning(self, "认证失败", "API Key 无效，请检查设置")
         self._on_open_settings()
+
+    def _get_network_proxy(self) -> str | None:
+        """读取全局网络代理设置，返回代理 URL 或 None。"""
+        network = self.config_manager.get_network_settings()
+        if network["proxy_enabled"] and network["http_proxy"]:
+            return network["http_proxy"]
+        return None
 
     def _on_rewrite(self, params: dict) -> None:
         """重写：复用缓存审计结果直接生成新 swipe，无缓存则走完整流程。
@@ -5520,6 +5782,7 @@ class MainWindow(QMainWindow):
             phase_name="重写需求分析",
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
+            proxy=self._get_network_proxy(),
             parent=self,
         )
 
@@ -5695,6 +5958,7 @@ class MainWindow(QMainWindow):
                 protagonist_profile=self._protagonist_profile_by_chapter.get(rewrite_cid),
                 custom_audit_rules=project.custom_audit_rules if project else None,
                 style_profile=project.style_profile if project else None,
+                custom_characters=self._custom_characters_by_chapter.get(rewrite_cid),
                 exclude_current=True,
             )
         except Exception as e:
@@ -5970,6 +6234,7 @@ class MainWindow(QMainWindow):
             phase_name=phase_name,
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
+            proxy=self._get_network_proxy(),
             parent=self,
         )
 

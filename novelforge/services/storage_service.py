@@ -189,6 +189,28 @@ class StorageService:
             self.storage.update_chapter_protagonist(chapter_id, json_str)
         )
 
+    def update_chapter_custom_characters(
+        self, chapter_id: str, characters: dict[str, ProtagonistProfile] | None
+    ) -> None:
+        """只更新章节的 custom_characters 列，不触碰正文文件。
+
+        用于自定义角色提取完成落盘，避免 save_chapter 用空 content 覆盖正文。
+
+        Args:
+            chapter_id: 章节 ID
+            characters: 角色名 → ProtagonistProfile 映射；None 或空 dict 写 None 清空
+        """
+        if not characters:
+            json_str: str | None = None
+        else:
+            json_str = json.dumps(
+                {name: p.model_dump(mode="json") for name, p in characters.items()},
+                ensure_ascii=False,
+            )
+        self._runner.run(
+            self.storage.update_chapter_custom_characters(chapter_id, json_str)
+        )
+
     def load_chapter(self, chapter_id: str) -> Chapter | None:
         """加载章节（含正文）。"""
         data = self._runner.run(self.storage.load_chapter(chapter_id))

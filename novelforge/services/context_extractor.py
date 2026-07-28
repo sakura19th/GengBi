@@ -40,6 +40,8 @@ from novelforge.services.llm_client import (
 )
 from novelforge.services.storage_service import StorageService, _generate_id
 from novelforge.utils.paths import (
+    get_extract_custom_character_merge_prompt_path,
+    get_extract_custom_character_prompt_path,
     get_extract_merge_prompt_path,
     get_extract_protagonist_merge_prompt_path,
     get_extract_protagonist_prompt_path,
@@ -110,6 +112,25 @@ PROTAGONIST_DIMENSIONS: tuple[str, ...] = (
     "growth_arc",
     "ooc_redlines",
 )
+
+# ===== 自定义角色形象提取常量（镜像 protagonist 模式）=====
+
+# 自定义角色形象独立缓存 key 前缀（与 protagonist:/ctx_extract: 解耦）
+CUSTOM_CHARACTER_CACHE_KEY_PREFIX = "custom_character"
+
+# 自定义角色形象提取请求的 max_tokens（与 PROTAGONIST_EXTRACT_MAX_TOKENS 对齐）
+CUSTOM_CHARACTER_EXTRACT_MAX_TOKENS = 16000
+
+# 自定义角色形象提取温度（首次/重试）
+CUSTOM_CHARACTER_EXTRACT_TEMPERATURE = 0.2
+CUSTOM_CHARACTER_EXTRACT_TEMPERATURE_RETRY = 0.0
+
+# 自定义角色形象合并温度（首次/重试）
+CUSTOM_CHARACTER_MERGE_TEMPERATURE = 0.2
+CUSTOM_CHARACTER_MERGE_TEMPERATURE_RETRY = 0.0
+
+# 自定义角色复用 PROTAGONIST_DIMENSIONS（同 8 维度）
+CUSTOM_CHARACTER_DIMENSIONS = PROTAGONIST_DIMENSIONS
 
 
 @dataclass
@@ -325,6 +346,39 @@ def _parse_protagonist_response(content: str) -> dict[str, Any]:
     )
 
 
+def _filter_custom_character_dimensions(data: dict[str, Any]) -> dict[str, Any]:
+    """过滤字典，仅保留自定义角色 8 大维度字段（复用 PROTAGONIST_DIMENSIONS）。
+
+    自定义角色与主角用相同的 8 维度模型，本函数直接委托给
+    ``_filter_protagonist_dimensions`` 避免重复实现。
+
+    Args:
+        data: 原始字典
+
+    Returns:
+        仅含 8 大维度字段的字典
+    """
+    return _filter_protagonist_dimensions(data)
+
+
+def _parse_custom_character_response(content: str) -> dict[str, Any]:
+    """解析 LLM 提取响应为自定义角色 ProtagonistProfile 字典。
+
+    解析逻辑与 ``_parse_protagonist_response`` 完全一致（同 8 维度 JSON 对象），
+    直接委托避免重复实现。
+
+    Args:
+        content: LLM 返回的文本内容
+
+    Returns:
+        包含 8 大维度字段的字典
+
+    Raises:
+        json.JSONDecodeError: 解析失败
+    """
+    return _parse_protagonist_response(content)
+
+
 def _validate_and_normalize_entry(
     raw: dict[str, Any],
     source_chapter_range: tuple[int, int] | None,
@@ -460,6 +514,10 @@ class ContextExtractor:
         self._protagonist_prompt_template: str | None = None
         # 主角形象合并提示词模板
         self._protagonist_merge_prompt_template: str | None = None
+        # 自定义角色形象提取提示词模板
+        self._custom_character_prompt_template: str | None = None
+        # 自定义角色形象合并提示词模板
+        self._custom_character_merge_prompt_template: str | None = None
         # token 计数缓存：(chapter_id, content_hash) -> token_count
         # 避免同一章节内容在多次 extract 调用时重复计数（tiktoken 加载开销大）
         self._token_cache: dict[tuple[str, str], int] = {}
@@ -864,6 +922,128 @@ class ContextExtractor:
                 )
         return self._protagonist_merge_prompt_template
 
+    def _load_custom_character_prompt_template(self) -> str:
+        """加载自定义角色形象提取提示词模板（带缓存）。
+
+        Returns:
+            提示词模板字符串
+        """
+        if self._custom_character_prompt_template is None:
+            path = get_extract_custom_character_prompt_path()
+            try:
+                self._custom_character_prompt_template = path.read_text(encoding="utf-8")
+            except OSError as e:
+                logger.error("加载自定义角色提取提示词模板失败: %s", e)
+                # 回退最小可用模板
+                self._custom_character_prompt_template = (
+                    "请分析以下小说前文，提取指定角色 {{character_name}} 的完整心理学档案。\n\n"
+                    "# 小说档案\n标题：{{title}}\n作者：{{author}}\n"
+                    "主角：{{protagonist}}\n目标角色：{{character_name}}\n"
+                    "简介：{{synopsis}}\n世界观设定：{{world_setting}}\n"
+                    "写作风格：{{writing_style}}\n\n"
+                    "# 前序批次累积的角色形象认知（增量上下文）\n"
+                    "{{accumulated_protagonist}}\n\n"
+                    "# 本批次章节内容\n{{chapters_text}}\n\n"
+                    "仅提取 {{character_name}} 这一角色的档案。"
+                    "请输出严格 JSON 对象，含 8 大维度字段："
+                    "basic_anchors/personality_system/motivation_system/"
+                    "emotion_defense/behavior_fingerprint/relationship_coordinate/"
+                    "growth_arc/ooc_redlines。只输出 JSON，不要 markdown 代码块。"
+                )
+        return self._custom_character_prompt_template
+
+    def _load_custom_character_merge_prompt_template(self) -> str:
+        """加载自定义角色形象合并提示词模板（带缓存）。
+
+        Returns:
+            合并提示词模板字符串
+        """
+        if self._custom_character_merge_prompt_template is None:
+            path = get_extract_custom_character_merge_prompt_path()
+            try:
+                self._custom_character_merge_prompt_template = path.read_text(
+                    encoding="utf-8"
+                )
+            except OSError as e:
+                logger.error("加载自定义角色合并提示词模板失败: %s", e)
+                # 回退最小可用模板
+                self._custom_character_merge_prompt_template = (
+                    "请将以下多批次提取的角色 {{character_name}} 的 ProtagonistProfile "
+                    "合并为统一的 JSON 对象。\n\n"
+                    "# 待合并的多批次提取结果\n{{entries_blocks}}\n\n"
+                    "合并任务：消除跨块重复、冲突消解（弧光以最新为准）、"
+                    "补全与连贯、OOC红线完整性。"
+                    "输出严格 JSON 对象，含 8 大维度字段。"
+                    "只输出 JSON，不要 markdown 代码块。"
+                )
+        return self._custom_character_merge_prompt_template
+
+    def _build_custom_character_prompt(
+        self,
+        project: Project | None,
+        chapters_text: str,
+        accumulated_protagonist: dict | None = None,
+        character_name: str = "",
+    ) -> str:
+        """构建自定义角色形象提取提示词。
+
+        用宏替换填充 ``{{title}}``/``{{author}}``/``{{protagonist}}``
+        /``{{character_name}}``/``{{synopsis}}``/``{{world_setting}}``
+        /``{{writing_style}}``/``{{accumulated_protagonist}}``/``{{chapters_text}}``。
+
+        首批提取（accumulated_protagonist=None 或空 dict）注入"（首批提取，无前序参考）"，
+        后续批次注入累积 ProtagonistProfile JSON。
+
+        Args:
+            project: 项目对象
+            chapters_text: 本批次章节文本
+            accumulated_protagonist: 前序批次累积的 ProtagonistProfile 字典（None 表示首批）
+            character_name: 目标角色名（注入 ``{{character_name}}`` 占位符）
+
+        Returns:
+            填充后的提示词
+        """
+        template = self._load_custom_character_prompt_template()
+
+        # 获取小说档案
+        profile = project.novel_profile if project else None
+        title = getattr(profile, "title", "") if profile else ""
+        author = getattr(profile, "author", "") if profile else ""
+        protagonist = getattr(profile, "protagonist", "") if profile else ""
+        synopsis = getattr(profile, "synopsis", "") if profile else ""
+        world_setting = getattr(profile, "world_setting", "") if profile else ""
+        writing_style = getattr(profile, "writing_style", "") if profile else ""
+
+        # 累积 protagonist 文本（首批注入提示文字）
+        if not accumulated_protagonist:
+            accumulated_text = "（首批提取，无前序参考）"
+        else:
+            try:
+                accumulated_text = json.dumps(
+                    accumulated_protagonist, ensure_ascii=False, indent=2
+                )
+            except (TypeError, ValueError) as e:
+                logger.warning("序列化累积 custom_character 失败，使用提示文字: %s", e)
+                accumulated_text = "（前序累积内容序列化失败，请独立分析）"
+
+        # 宏替换
+        replacements = {
+            "{{title}}": title,
+            "{{author}}": author,
+            "{{protagonist}}": protagonist,
+            "{{character_name}}": character_name,
+            "{{synopsis}}": synopsis,
+            "{{world_setting}}": world_setting,
+            "{{writing_style}}": writing_style,
+            "{{accumulated_protagonist}}": accumulated_text,
+            "{{chapters_text}}": chapters_text,
+        }
+        prompt = template
+        for placeholder, value in replacements.items():
+            prompt = prompt.replace(placeholder, value)
+
+        return prompt
+
     def _build_protagonist_prompt(
         self,
         project: Project | None,
@@ -1013,6 +1193,25 @@ class ContextExtractor:
                 f"```json\n{block_json}\n```"
             )
         return "\n\n".join(parts)
+
+    def _build_custom_character_blocks(
+        self,
+        batch_results: list[dict],
+        batch_ranges: list[tuple[int, int]],
+    ) -> str:
+        """构造自定义角色形象合并提示词的 ``{{entries_blocks}}`` 占位符内容。
+
+        格式与 ``_build_protagonist_blocks`` 一致，每批 JSON 前加
+        ``## 批次 i/N（章节 X-Y）`` 标题，块间空行分隔。
+
+        Args:
+            batch_results: 各批次独立提取的 ProtagonistProfile 字典列表
+            batch_ranges: 各批次章节区间列表（与 batch_results 一一对应）
+
+        Returns:
+            拼接后的多批次文本块
+        """
+        return self._build_protagonist_blocks(batch_results, batch_ranges)
 
     async def _run_protagonist_merge(
         self,
@@ -1198,6 +1397,186 @@ class ContextExtractor:
         # 全部重试失败 → 降级返回累积结果
         logger.warning(
             "主角形象汇总 2 次重试均失败，降级返回累积结果: %s", last_error
+        )
+        return accumulated_protagonist
+
+    async def _run_custom_character_merge(
+        self,
+        batch_results: list[dict],
+        accumulated_protagonist: dict,
+        llm_client: LLMClient,
+        model: str,
+        stream: bool,
+        on_chunk: Callable[[str], None] | None,
+        on_batch_complete: Callable[[list, int, int], None] | None,
+        batch_count: int,
+        total_token_usage: dict[str, Any],
+        batch_ranges: list[tuple[int, int]] | None = None,
+        jailbreak_text: str = "",
+        character_name: str = "",
+    ) -> dict | None:
+        """合并多批次自定义角色 ProtagonistProfile 结果（汇总环节）。
+
+        镜像 ``_run_protagonist_merge``，差异点：
+        - 使用自定义角色合并模板（``extract_custom_character_merge_prompt.txt``）
+        - 注入 ``{{character_name}}`` 占位符
+        - 使用 ``CUSTOM_CHARACTER_*`` 温度与 max_tokens 常量
+        - 使用 ``_parse_custom_character_response`` 解析
+
+        构造合并提示词，调用 LLM，解析响应为 ProtagonistProfile 字典。
+        2 次重试（温度 0.2/0.0），失败返回 accumulated_protagonist（降级）。
+
+        Returns:
+            合并后的 ProtagonistProfile 字典，失败返回 accumulated_protagonist（降级）
+        """
+        # 过滤空批次
+        non_empty_indices = [i for i, r in enumerate(batch_results) if r]
+        if not non_empty_indices:
+            logger.warning("自定义角色形象汇总：所有批次均为空，返回累积结果")
+            return accumulated_protagonist
+
+        # 构造用于合并的批次列表（仅非空批次）
+        if batch_ranges is None:
+            merge_results = [batch_results[i] for i in non_empty_indices]
+            merge_ranges = [(i + 1, i + 1) for i in non_empty_indices]
+        else:
+            merge_results = [batch_results[i] for i in non_empty_indices]
+            merge_ranges = [batch_ranges[i] for i in non_empty_indices]
+
+        template = self._load_custom_character_merge_prompt_template()
+        entries_blocks = self._build_custom_character_blocks(merge_results, merge_ranges)
+        prompt = template.replace("{{entries_blocks}}", entries_blocks)
+        prompt = prompt.replace("{{character_name}}", character_name)
+        messages = []
+        if jailbreak_text:
+            messages.append({"role": "system", "content": jailbreak_text})
+        messages.append({"role": "user", "content": prompt})
+
+        # 流式分隔标记
+        if stream and on_chunk is not None:
+            separator = f"\n\n--- 自定义角色 {character_name} 形象汇总 ---\n\n"
+            try:
+                on_chunk(separator)
+            except Exception as e:
+                logger.warning("on_chunk 回调异常: %s", e)
+
+        # 取消信号检查
+        if self._cancel_event.is_set():
+            return accumulated_protagonist
+
+        # 2 次重试：温度 0.2 / 0.0
+        temperatures = [
+            CUSTOM_CHARACTER_MERGE_TEMPERATURE,
+            CUSTOM_CHARACTER_MERGE_TEMPERATURE_RETRY,
+        ]
+        last_error: str = ""
+        for attempt, temperature in enumerate(temperatures):
+            if self._cancel_event.is_set():
+                return accumulated_protagonist
+
+            content_parts: list[str] = []
+            response: dict[str, Any] = {}
+            try:
+                if stream:
+                    async for chunk in llm_client.stream_chat_completion(
+                        messages=messages,
+                        model=model,
+                        temperature=temperature,
+                        max_tokens=CUSTOM_CHARACTER_EXTRACT_MAX_TOKENS,
+                        stop_event=self._cancel_event,
+                    ):
+                        if chunk.content:
+                            content_parts.append(chunk.content)
+                            if on_chunk is not None:
+                                try:
+                                    on_chunk(chunk.content)
+                                except Exception as e:
+                                    logger.warning("on_chunk 回调异常: %s", e)
+                        if chunk.finish_reason:
+                            if chunk.finish_reason == "length":
+                                logger.warning(
+                                    "自定义角色形象汇总第 %d 次尝试流式响应被 max_tokens 截断 "
+                                    "(finish_reason=length, CUSTOM_CHARACTER_EXTRACT_MAX_TOKENS=%d)，"
+                                    "JSON 可能不完整",
+                                    attempt + 1, CUSTOM_CHARACTER_EXTRACT_MAX_TOKENS,
+                                )
+                            break
+                    content = "".join(content_parts)
+                else:
+                    response = await llm_client.chat_completion(
+                        messages=messages,
+                        model=model,
+                        temperature=temperature,
+                        max_tokens=CUSTOM_CHARACTER_EXTRACT_MAX_TOKENS,
+                        stop_event=self._cancel_event,
+                    )
+                    _fr = response.get("choices", [{}])[0].get("finish_reason")
+                    if _fr == "length":
+                        logger.warning(
+                            "自定义角色形象汇总第 %d 次尝试响应被 max_tokens 截断 "
+                            "(finish_reason=length, CUSTOM_CHARACTER_EXTRACT_MAX_TOKENS=%d)，"
+                            "JSON 可能不完整",
+                            attempt + 1, CUSTOM_CHARACTER_EXTRACT_MAX_TOKENS,
+                        )
+                    batch_usage = response.get("usage", {})
+                    if isinstance(batch_usage, dict):
+                        for k, v in batch_usage.items():
+                            if isinstance(v, (int, float)):
+                                total_token_usage[k] = (
+                                    total_token_usage.get(k, 0) + v
+                                )
+                    choices = response.get("choices", [])
+                    if not choices:
+                        last_error = "LLM 响应无 choices"
+                        logger.warning(
+                            "自定义角色形象汇总第 %d 次尝试无 choices", attempt + 1
+                        )
+                        continue
+                    message = choices[0].get("message", {})
+                    content = message.get("content", "") or ""
+
+                # 解析 JSON
+                merged_protagonist = _parse_custom_character_response(content)
+                logger.info(
+                    "自定义角色形象汇总成功: %d 批次合并 (第 %d 次尝试, 温度=%.1f)",
+                    len(merge_results), attempt + 1, temperature,
+                )
+                return merged_protagonist
+
+            except asyncio.CancelledError:
+                logger.info("自定义角色形象汇总被取消")
+                return accumulated_protagonist
+            except asyncio.TimeoutError as e:
+                last_error = f"超时: {e}"
+                logger.warning(
+                    "自定义角色形象汇总第 %d 次尝试超时: %s", attempt + 1, e
+                )
+                continue
+            except (AuthError, RateLimitError, APIError, LLMError) as e:
+                last_error = str(e)
+                logger.warning(
+                    "自定义角色形象汇总第 %d 次尝试 LLM 调用失败: %s",
+                    attempt + 1, e,
+                )
+                continue
+            except json.JSONDecodeError as e:
+                last_error = f"JSON 解析失败: {e}"
+                logger.warning(
+                    "自定义角色形象汇总第 %d 次尝试 JSON 解析失败: %s",
+                    attempt + 1, e,
+                )
+                continue
+            except Exception as e:
+                last_error = f"异常: {e}"
+                logger.error(
+                    "自定义角色形象汇总第 %d 次尝试异常: %s",
+                    attempt + 1, e, exc_info=True,
+                )
+                continue
+
+        # 全部重试失败 → 降级返回累积结果
+        logger.warning(
+            "自定义角色形象汇总 2 次重试均失败，降级返回累积结果: %s", last_error
         )
         return accumulated_protagonist
 
@@ -1476,6 +1855,272 @@ class ContextExtractor:
         logger.info(
             "%s主角形象提取完成: %d 批 (merged=%s)",
             log_prefix, batch_count, merged,
+        )
+        return profile, batch_count, merged
+
+    async def _extract_custom_character(
+        self,
+        project: Project | None,
+        batches: list[list[Chapter]],
+        config: dict[str, Any],
+        client: LLMClient,
+        model: str,
+        character_name: str,
+        stream: bool,
+        on_chunk: Callable[[str], None] | None,
+        on_batch_complete: Callable[[list, int, int], None] | None,
+        jailbreak_text: str = "",
+    ) -> tuple[ProtagonistProfile | None, int, bool]:
+        """自定义角色形象提取（镜像 ``_extract_protagonist``）。
+
+        流程：
+        1. 复用 batches 划分（不重复拆分计算）
+        2. 逐批增量提取 ProtagonistProfile（用 extract_custom_character_prompt.txt），
+           携带 character_name 与 accumulated 上下文
+        3. batch_count > 1 时调用 _run_custom_character_merge 合并
+        4. 返回 (ProtagonistProfile, batch_count, merged)
+
+        维度合并复用 ``_merge_protagonist_fields``（维度相同，见设计决策 4）。
+
+        Args:
+            character_name: 目标角色名（注入 ``{{character_name}}`` 占位符）
+
+        Returns:
+            (ProtagonistProfile | None, batch_count, merged) 元组
+        """
+        batch_count = len(batches)
+        log_prefix = "流式" if stream else ""
+
+        # 逐批调用 LLM，每批携带前批累积的 ProtagonistProfile
+        accumulated_protagonist: dict[str, Any] = {}
+        batch_results: list[dict[str, Any]] = []
+        batch_ranges: list[tuple[int, int]] = []
+
+        for batch_idx, batch_chapters in enumerate(batches):
+            if self._cancel_event.is_set():
+                logger.info("自定义角色 %s 提取被取消（批次 %d/%d 前）",
+                            character_name, batch_idx + 1, batch_count)
+                return None, batch_count, False
+
+            batch_start = min(ch.index for ch in batch_chapters)
+            batch_end = max(ch.index for ch in batch_chapters)
+            batch_ranges.append((batch_start, batch_end))
+
+            # 多批次时插入分隔标记（仅流式模式）
+            if stream and batch_count > 1 and on_chunk is not None:
+                separator = (
+                    f"\n\n--- 自定义角色 {character_name} 批次 {batch_idx + 1}/{batch_count} "
+                    f"(章节 {batch_start}-{batch_end}) ---\n\n"
+                )
+                try:
+                    on_chunk(separator)
+                except Exception as e:
+                    logger.warning("on_chunk 回调异常: %s", e)
+
+            # 构建提示词（首批 accumulated=None）
+            chapters_text_parts: list[str] = []
+            for ch in batch_chapters:
+                chapters_text_parts.append(f"## {ch.title}\n\n{ch.content}")
+            chapters_text = "\n\n".join(chapters_text_parts)
+
+            try:
+                prompt = self._build_custom_character_prompt(
+                    project, chapters_text,
+                    accumulated_protagonist=accumulated_protagonist or None,
+                    character_name=character_name,
+                )
+            except Exception as e:
+                logger.error("构建自定义角色提示词失败: %s", e, exc_info=True)
+                return None, batch_count, False
+
+            # 调用 LLM（2 次尝试：温度 0.2 / 0.0）
+            messages = []
+            if jailbreak_text:
+                messages.append({"role": "system", "content": jailbreak_text})
+            messages.append({"role": "user", "content": prompt})
+            extract_temperatures = [
+                CUSTOM_CHARACTER_EXTRACT_TEMPERATURE,
+                CUSTOM_CHARACTER_EXTRACT_TEMPERATURE_RETRY,
+            ]
+            content_parts: list[str] = []
+            response: dict[str, Any] = {}
+            batch_protagonist: dict[str, Any] | None = None
+
+            for attempt, temperature in enumerate(extract_temperatures):
+                if self._cancel_event.is_set():
+                    return None, batch_count, False
+                if stream:
+                    content_parts.clear()
+                try:
+                    if stream:
+                        async for chunk in client.stream_chat_completion(
+                            messages=messages,
+                            model=model,
+                            temperature=temperature,
+                            max_tokens=CUSTOM_CHARACTER_EXTRACT_MAX_TOKENS,
+                            stop_event=self._cancel_event,
+                        ):
+                            if chunk.content:
+                                content_parts.append(chunk.content)
+                                if on_chunk is not None:
+                                    try:
+                                        on_chunk(chunk.content)
+                                    except Exception as e:
+                                        logger.warning("on_chunk 回调异常: %s", e)
+                            if chunk.finish_reason:
+                                if chunk.finish_reason == "length":
+                                    logger.warning(
+                                        "自定义角色 %s 批次 %d/%d 第 %d 次尝试流式响应被 max_tokens 截断 "
+                                        "(finish_reason=length, CUSTOM_CHARACTER_EXTRACT_MAX_TOKENS=%d)，"
+                                        "JSON 可能不完整",
+                                        character_name, batch_idx + 1, batch_count,
+                                        attempt + 1, CUSTOM_CHARACTER_EXTRACT_MAX_TOKENS,
+                                    )
+                                break
+                        content = "".join(content_parts)
+                    else:
+                        response = await client.chat_completion(
+                            messages=messages,
+                            model=model,
+                            temperature=temperature,
+                            max_tokens=CUSTOM_CHARACTER_EXTRACT_MAX_TOKENS,
+                            stop_event=self._cancel_event,
+                        )
+                        _fr = response.get("choices", [{}])[0].get("finish_reason")
+                        if _fr == "length":
+                            logger.warning(
+                                "自定义角色 %s 批次 %d/%d 第 %d 次尝试响应被 max_tokens 截断 "
+                                "(finish_reason=length, CUSTOM_CHARACTER_EXTRACT_MAX_TOKENS=%d)，"
+                                "JSON 可能不完整",
+                                character_name, batch_idx + 1, batch_count,
+                                attempt + 1, CUSTOM_CHARACTER_EXTRACT_MAX_TOKENS,
+                            )
+                    if self._cancel_event.is_set():
+                        return None, batch_count, False
+                    if not stream:
+                        choices = response.get("choices", [])
+                        if not choices:
+                            logger.warning(
+                                "自定义角色 %s 批次 %d/%d 第 %d 次尝试无 choices",
+                                character_name, batch_idx + 1, batch_count, attempt + 1,
+                            )
+                            if attempt < len(extract_temperatures) - 1:
+                                continue
+                            return None, batch_count, False
+                        message = choices[0].get("message", {})
+                        content = message.get("content", "") or ""
+
+                    # 解析 JSON → dict（仅保留 8 大维度字段）
+                    batch_protagonist = _parse_custom_character_response(content)
+                    break  # 成功，退出重试循环
+                except asyncio.CancelledError:
+                    logger.info(
+                        "自定义角色 %s 提取被取消（批次 %d/%d 第 %d 次尝试）",
+                        character_name, batch_idx + 1, batch_count, attempt + 1,
+                    )
+                    return None, batch_count, False
+                except json.JSONDecodeError as e:
+                    logger.warning(
+                        "自定义角色 %s 批次 %d/%d 第 %d 次尝试 JSON 解析失败: %s, content=%s",
+                        character_name, batch_idx + 1, batch_count, attempt + 1,
+                        e, content[:200],
+                    )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
+                    return None, batch_count, False
+                except asyncio.TimeoutError as e:
+                    logger.warning(
+                        "自定义角色 %s 批次 %d/%d 第 %d 次尝试超时: %s",
+                        character_name, batch_idx + 1, batch_count, attempt + 1, e,
+                    )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
+                    return None, batch_count, False
+                except (AuthError, RateLimitError, APIError, LLMError) as e:
+                    logger.warning(
+                        "自定义角色 %s 批次 %d/%d 第 %d 次尝试 LLM 调用失败: %s",
+                        character_name, batch_idx + 1, batch_count, attempt + 1, e,
+                    )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
+                    return None, batch_count, False
+                except Exception as e:
+                    logger.error(
+                        "自定义角色 %s 批次 %d/%d 第 %d 次尝试异常: %s",
+                        character_name, batch_idx + 1, batch_count, attempt + 1, e,
+                        exc_info=True,
+                    )
+                    if attempt < len(extract_temperatures) - 1:
+                        continue
+                    return None, batch_count, False
+
+            # 循环仅 break（成功）或 return（失败）退出，此处 batch_protagonist 必非 None
+            if batch_protagonist is None:
+                raise RuntimeError(
+                    f"自定义角色 {character_name} 提取循环异常退出：batch_protagonist 为 None"
+                )
+            batch_results.append(batch_protagonist)
+
+            # 增量合并到 accumulated_protagonist（复用 _merge_protagonist_fields，维度相同）
+            accumulated_protagonist = self._merge_protagonist_fields(
+                accumulated_protagonist, batch_protagonist
+            )
+
+            logger.info(
+                "%s自定义角色 %s 批次 %d/%d 完成: 章节 %d-%d (累计 %d 维度非空)",
+                log_prefix, character_name,
+                batch_idx + 1, batch_count,
+                batch_start, batch_end,
+                sum(1 for v in accumulated_protagonist.values() if v),
+            )
+
+        # 汇总环节：batch_count > 1 时调用 _run_custom_character_merge 语义整合
+        merged = False
+        if batch_count > 1:
+            merged_protagonist = await self._run_custom_character_merge(
+                batch_results=batch_results,
+                accumulated_protagonist=accumulated_protagonist,
+                llm_client=client,
+                model=model,
+                stream=stream,
+                on_chunk=on_chunk,
+                on_batch_complete=on_batch_complete,
+                batch_count=batch_count,
+                total_token_usage={},
+                batch_ranges=batch_ranges,
+                jailbreak_text=jailbreak_text,
+                character_name=character_name,
+            )
+            if merged_protagonist is not None:
+                accumulated_protagonist = merged_protagonist
+                merged = True
+                logger.info("自定义角色 %s 汇总环节完成", character_name)
+            else:
+                logger.warning(
+                    "自定义角色 %s 汇总环节失败，降级使用累积结果", character_name
+                )
+
+        if self._cancel_event.is_set():
+            return None, batch_count, False
+
+        # 构建 ProtagonistProfile 对象
+        all_chapter_indices: list[int] = []
+        for batch_chapters in batches:
+            for ch in batch_chapters:
+                all_chapter_indices.append(ch.index)
+        source_chapter_range = (
+            (min(all_chapter_indices), max(all_chapter_indices))
+            if all_chapter_indices else None
+        )
+        profile = ProtagonistProfile(
+            **accumulated_protagonist,
+            extracted_at=datetime.now(),
+            source_chapter_range=source_chapter_range,
+        )
+
+        logger.info(
+            "%s自定义角色 %s 提取完成: %d 批 (merged=%s)",
+            log_prefix, character_name, batch_count, merged,
         )
         return profile, batch_count, merged
 
@@ -1808,6 +2453,94 @@ class ContextExtractor:
         except Exception as e:
             logger.warning("保存主角形象缓存失败: %s", e)
 
+    # ===== 自定义角色形象独立缓存（与 protagonist:/ctx_extract: 解耦）=====
+
+    def _build_custom_character_cache_key(
+        self, project_id: str, chapter_id: str, character_name: str
+    ) -> str:
+        """构建自定义角色形象独立缓存 key。
+
+        格式：``custom_character:{project_id}:{chapter_id}:{character_name}``
+
+        含角色名，同章节不同角色独立缓存互不覆盖；与 protagonist:/ctx_extract: 解耦。
+        """
+        return (
+            f"{CUSTOM_CHARACTER_CACHE_KEY_PREFIX}:{project_id}:{chapter_id}:"
+            f"{character_name}"
+        )
+
+    async def _get_cached_custom_character(
+        self, cache_key: str, chapters_hash: str
+    ) -> ProtagonistProfile | None:
+        """从独立缓存读取自定义角色形象，并校验 chapters_hash 是否匹配。
+
+        Args:
+            cache_key: 缓存 key（``custom_character:{...}:{character_name}``）
+            chapters_hash: 当前目标章节的内容哈希
+
+        Returns:
+            ProtagonistProfile 实例（hash 匹配时），不匹配或未命中返回 None
+        """
+        data = await self._get_cached_data(cache_key)
+        if data is None:
+            return None
+        cached_hash = data.get("chapters_hash", "")
+        if cached_hash != chapters_hash:
+            logger.info(
+                "自定义角色缓存 chapters_hash 不匹配（%s != %s），需重新提取",
+                cached_hash[:8],
+                chapters_hash[:8],
+            )
+            return None
+        profile_data = data.get("protagonist_profile")
+        if not profile_data:
+            return None
+        try:
+            return ProtagonistProfile.model_validate(profile_data)
+        except Exception as e:
+            logger.warning("缓存 custom_character 反序列化失败: %s", e)
+            return None
+
+    async def _save_cached_custom_character(
+        self,
+        cache_key: str,
+        profile: ProtagonistProfile,
+        chapters_hash: str,
+        ttl_hours: int,
+        batch_count: int = 1,
+        merged: bool = False,
+        character_name: str = "",
+    ) -> None:
+        """保存自定义角色形象到独立缓存（按章节+角色名绑定，含元数据）。
+
+        Args:
+            cache_key: 缓存 key（``custom_character:{...}:{character_name}``）
+            profile: ProtagonistProfile 实例
+            chapters_hash: 来源章节内容哈希（用于失效判断）
+            ttl_hours: 缓存有效期（小时）
+            batch_count: 拆分批次数
+            merged: 是否经过【信息汇总】环节
+            character_name: 角色名（仅用于日志）
+        """
+        try:
+            data = {
+                "protagonist_profile": profile.model_dump(mode="json"),
+                "chapters_hash": chapters_hash,
+                "extracted_at": datetime.now().isoformat(),
+                "batch_count": batch_count,
+                "merged": merged,
+                "character_name": character_name,
+            }
+            await self.storage_service.storage.set_cache(
+                cache_key, data, ttl_hours=ttl_hours, category=CACHE_CATEGORY
+            )
+            logger.info(
+                "已保存自定义角色 %s 缓存: %s (批次=%d, merged=%s)",
+                character_name, cache_key, batch_count, merged,
+            )
+        except Exception as e:
+            logger.warning("保存自定义角色缓存失败: %s", e)
+
     def _get_llm_client(self, flow_key: str = "") -> tuple[LLMClient, str] | None:
         """获取 LLM 客户端与默认模型。
 
@@ -1843,6 +2576,12 @@ class ContextExtractor:
         reasoning_effort = ep.get("reasoning_effort", "") or ""
         extra_payload = ep.get("extra_payload") or {}
         extra_headers = ep.get("extra_headers") or {}
+        network = self.config_manager.get_network_settings()
+        proxy = (
+            network["http_proxy"]
+            if network["proxy_enabled"] and network["http_proxy"]
+            else None
+        )
         client = LLMClient(
             base_url=base_url,
             api_key=api_key,
@@ -1850,6 +2589,7 @@ class ContextExtractor:
             reasoning_effort=reasoning_effort,
             extra_payload=extra_payload,
             extra_headers=extra_headers,
+            proxy=proxy,
         )
         model = self.config_manager.get_flow_model(flow_key) or DEFAULT_EXTRACTOR_MODEL
         return client, model
@@ -2679,6 +3419,199 @@ class ContextExtractor:
         logger.info(status_msg)
         return protagonist_profile, status_msg
 
+    async def extract_custom_character_streaming(
+        self,
+        project: Project,
+        chapters: list[Chapter],
+        current_chapter: Chapter,
+        character_name: str,
+        token_limit: int = 0,
+        lookback: int = 0,
+        on_chunk: Callable[[str], None] | None = None,
+        on_batch_complete: Callable[[int, int], None] | None = None,
+        jailbreak_text: str = "",
+    ) -> tuple[ProtagonistProfile | None, str]:
+        """独立流式提取自定义角色形象（镜像 ``extract_protagonist_streaming``）。
+
+        与主角形象提取解耦，单独触发指定角色 8 维度心理学档案提取，
+        结果保存到独立缓存 key（``custom_character:{project_id}:{chapter_id}:{character_name}``）。
+
+        流程：
+        1. 获取 endpoint/config/client/model（flow_key=``custom_character_extraction``）
+        2. 计算 lookback chapters（复用 _get_lookback_chapters）
+        3. 调用 _split_chapters_by_token_limit 拆分 batches
+        4. 调用 _extract_custom_character 复用完整逻辑（增量更新 + 合并 + 批次重试）
+        5. 保存到独立缓存 key
+        6. 返回 (ProtagonistProfile | None, 状态消息)
+
+        Args:
+            project: 项目对象
+            chapters: 项目所有章节
+            current_chapter: 当前续写章节
+            character_name: 目标角色名
+            token_limit: token 限制（0=不拆分，>0 按章节边界拆分多批次）
+            lookback: 回溯章节数（0=全部前文）
+            on_chunk: 流式 chunk 回调（接收增量文本）
+            on_batch_complete: 批次完成回调（batch_idx, total_batches）
+
+        Returns:
+            (ProtagonistProfile | None, str) 元组：
+            - 成功：(ProtagonistProfile, 状态消息)
+            - 失败：(None, 错误消息)
+            - 取消：(None, "用户取消提取")
+        """
+        start_time = time.time()
+        config = self._get_extract_config(project)
+        cache_ttl_hours = int(
+            config.get("cache_ttl_hours", DEFAULT_CACHE_TTL_HOURS)
+        )
+        cache_enabled = bool(config.get("cache_enabled", True))
+
+        # 取消信号处理
+        cancelled_before_start = self._cancel_event.is_set()
+        self._cancel_event.clear()
+        if cancelled_before_start:
+            logger.info("自定义角色 %s 提取在开始前已被取消", character_name)
+            return None, "用户取消提取"
+
+        # 0 章时跳过
+        if not chapters:
+            logger.info("无前文可提取自定义角色 %s，跳过", character_name)
+            return None, "无前文可提取"
+
+        # 角色名校验
+        if not character_name or not character_name.strip():
+            return None, "角色名不能为空"
+
+        # 获取前 N 章
+        target_chapters = self._get_lookback_chapters(
+            chapters, current_chapter, lookback
+        )
+        if not target_chapters:
+            return None, "无前文可提取"
+
+        # 获取 LLM 客户端（flow_key=custom_character_extraction）
+        client_info = self._get_llm_client("custom_character_extraction")
+        if client_info is None:
+            return None, "未配置 API 端点或 API Key 无效"
+        client, default_model = client_info
+        try:
+            return await self._extract_custom_character_body(
+                client=client,
+                default_model=default_model,
+                project=project,
+                current_chapter=current_chapter,
+                target_chapters=target_chapters,
+                token_limit=token_limit,
+                on_chunk=on_chunk,
+                on_batch_complete=on_batch_complete,
+                jailbreak_text=jailbreak_text,
+                config=config,
+                cache_enabled=cache_enabled,
+                cache_ttl_hours=cache_ttl_hours,
+                start_time=start_time,
+                character_name=character_name,
+            )
+        finally:
+            # 释放 aiohttp session
+            try:
+                await client.close()
+            except Exception as e:
+                logger.warning("关闭 LLMClient 失败: %s", e)
+
+    async def _extract_custom_character_body(
+        self,
+        client: LLMClient,
+        default_model: str,
+        project: Project,
+        current_chapter: Chapter,
+        target_chapters: list[Chapter],
+        token_limit: int,
+        on_chunk: Callable[[str], None] | None,
+        on_batch_complete: Callable[[int, int], None] | None,
+        jailbreak_text: str,
+        config: dict[str, Any],
+        cache_enabled: bool,
+        cache_ttl_hours: int,
+        start_time: float,
+        character_name: str,
+    ) -> tuple[ProtagonistProfile | None, str]:
+        # 模型由流程端点配置 flow_models["custom_character_extraction"] 控制
+        model = default_model
+
+        # 按 token 限制拆分批次
+        batches = self._split_chapters_by_token_limit(
+            target_chapters, token_limit, model
+        )
+        batch_count = len(batches)
+        logger.info(
+            "自定义角色 %s 提取: %d 章拆分为 %d 批 (token_limit=%d)",
+            character_name, len(target_chapters), batch_count, token_limit,
+        )
+
+        # 适配 on_batch_complete 回调签名
+        adapted_batch_cb: Callable[[list, int, int], None] | None = None
+        if on_batch_complete is not None:
+            def _adapt_batch(_entries, b_idx, b_total):
+                on_batch_complete(b_idx, b_total)
+            adapted_batch_cb = _adapt_batch
+
+        # 调用 _extract_custom_character 复用完整逻辑
+        try:
+            character_profile, profile_batch_count, profile_merged = (
+                await self._extract_custom_character(
+                    project=project,
+                    batches=batches,
+                    config=config,
+                    client=client,
+                    model=model,
+                    character_name=character_name,
+                    stream=True,
+                    on_chunk=on_chunk,
+                    on_batch_complete=adapted_batch_cb,
+                    jailbreak_text=jailbreak_text,
+                )
+            )
+        except asyncio.CancelledError:
+            logger.info("自定义角色 %s 提取被取消", character_name)
+            return None, "用户取消提取"
+        except Exception as e:
+            logger.error("自定义角色 %s 提取异常: %s", character_name, e, exc_info=True)
+            return None, f"提取失败: {e}"
+
+        # 取消信号检查
+        if self._cancel_event.is_set():
+            return None, "用户取消提取"
+
+        if character_profile is None:
+            return None, f"自定义角色 {character_name} 提取失败（详见日志）"
+
+        # 保存到独立缓存
+        if cache_enabled:
+            project_id = project.id if project else "unknown"
+            chapter_id = current_chapter.id if current_chapter else "global"
+            chapters_hash = _compute_chapters_hash(target_chapters)
+            cache_key = self._build_custom_character_cache_key(
+                project_id, chapter_id, character_name
+            )
+            await self._save_cached_custom_character(
+                cache_key,
+                character_profile,
+                chapters_hash,
+                cache_ttl_hours,
+                batch_count=profile_batch_count,
+                merged=profile_merged,
+                character_name=character_name,
+            )
+
+        elapsed = time.time() - start_time
+        status_msg = (
+            f"自定义角色 {character_name} 提取完成（{profile_batch_count} 批，"
+            f"merged={profile_merged}，耗时 {elapsed:.2f}s）"
+        )
+        logger.info(status_msg)
+        return character_profile, status_msg
+
     def build_prompt_for_preview(
         self,
         project: Project | None,
@@ -2822,6 +3755,25 @@ class ContextExtractor:
             缓存 dict（含 protagonist_profile/batch_count/merged 等），未命中返回 None
         """
         cache_key = self._build_protagonist_cache_key(project_id, chapter_id)
+        return await self._get_cached_data(cache_key)
+
+    async def load_cached_custom_character(
+        self, project_id: str, chapter_id: str, character_name: str
+    ) -> dict[str, Any] | None:
+        """加载章节指定角色的缓存（供章节切换时恢复，不校验 hash）。
+
+        Args:
+            project_id: 项目 ID
+            chapter_id: 章节 ID
+            character_name: 角色名
+
+        Returns:
+            缓存 dict（含 protagonist_profile/batch_count/merged/character_name 等），
+            未命中返回 None
+        """
+        cache_key = self._build_custom_character_cache_key(
+            project_id, chapter_id, character_name
+        )
         return await self._get_cached_data(cache_key)
 
     async def cancel(self) -> None:

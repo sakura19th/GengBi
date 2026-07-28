@@ -76,12 +76,21 @@ class ModelFetchWorker(QThread):
         self,
         base_url: str,
         api_key: str,
+        proxy: str | None = None,
         parent=None,
     ) -> None:
-        """初始化模型获取线程。"""
+        """初始化模型获取线程。
+
+        Args:
+            base_url: API 基础 URL
+            api_key: API Key
+            proxy: HTTP/HTTPS 代理 URL（None 表示不走代理）
+            parent: 父 QObject
+        """
         super().__init__(parent)
         self._base_url = base_url
         self._api_key = api_key
+        self._proxy = proxy
         self._stop = False
 
     def stop(self) -> None:
@@ -99,7 +108,7 @@ class ModelFetchWorker(QThread):
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
-            client = LLMClient(self._base_url, self._api_key, timeout=30.0)
+            client = LLMClient(self._base_url, self._api_key, timeout=30.0, proxy=self._proxy)
             try:
                 models = loop.run_until_complete(client.fetch_models())
                 self.models_fetched.emit(models)
@@ -392,7 +401,13 @@ class EndpointEditDialog(QDialog):
         self._fetch_models_btn.setText("获取中...")
 
         # parent=None：解耦对话框生命周期，避免对话框关闭时 QThread 被强制销毁
-        self._model_fetch_worker = ModelFetchWorker(base_url, api_key, None)
+        network = self._config_manager.get_network_settings()
+        proxy = (
+            network["http_proxy"]
+            if network["proxy_enabled"] and network["http_proxy"]
+            else None
+        )
+        self._model_fetch_worker = ModelFetchWorker(base_url, api_key, proxy, None)
         self._model_fetch_worker.models_fetched.connect(self._on_models_fetched)
         self._model_fetch_worker.error.connect(self._on_fetch_error)
         # 线程结束后自动清理（fire-and-forget，不随对话框销毁）
@@ -672,6 +687,29 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(appearance_group)
 
+        # 网络代理组
+        network_group = QGroupBox("网络代理")
+        network_form = QFormLayout(network_group)
+
+        self._proxy_check = QCheckBox("启用 HTTP 代理")
+        self._proxy_edit = QLineEdit()
+        self._proxy_edit.setPlaceholderText(
+            "http://127.0.0.1:7890 或 http://user:pass@host:port"
+        )
+        self._proxy_edit.setClearButtonEnabled(True)
+        network_form.addRow("", self._proxy_check)
+        network_form.addRow("代理 URL：", self._proxy_edit)
+
+        # 加载当前配置
+        network = self._config_manager.get_network_settings()
+        self._proxy_check.setChecked(network["proxy_enabled"])
+        self._proxy_edit.setText(network["http_proxy"])
+        self._proxy_edit.setEnabled(network["proxy_enabled"])
+        # 开关联动 URL 输入框启用状态
+        self._proxy_check.toggled.connect(self._proxy_edit.setEnabled)
+
+        layout.addWidget(network_group)
+
         # 按钮区
         button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -852,6 +890,12 @@ class SettingsDialog(QDialog):
         cont_settings["default_lookback_chapters"] = self._lookback_spin.value()
         cont_settings["default_temperature"] = self._temp_spin.value()
         self._config_manager.config["continuation"] = cont_settings
+
+        # 保存网络代理配置
+        self._config_manager.set_network_settings({
+            "proxy_enabled": self._proxy_check.isChecked(),
+            "http_proxy": self._proxy_edit.text().strip(),
+        })
 
         self._config_manager.save()
         self.accept()

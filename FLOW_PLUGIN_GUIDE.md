@@ -132,6 +132,8 @@
 | `context_extraction` | 上下文提取 | 非正文流程 | 流程端点配置等级下拉 | `low` |
 | `ontology_extraction` | 世界观底层提取 | 非正文流程 | 流程端点配置等级下拉 | `low` |
 | `protagonist_extraction` | 主角形象提取 | 非正文流程 | 流程端点配置等级下拉 | `low` |
+| `custom_character_extraction` | 自定义角色提取 | 非正文流程 | 流程端点配置等级下拉 | `low` |
+| `style_extraction` | 文风档案提取 | 非正文流程 | 流程端点配置等级下拉 | `low` |
 | `custom_rule_parsing` | 自定义设定解析 | 非正文流程 | 流程端点配置等级下拉 | `off` |
 | `writing_element_analysis` | 写作要素分析 | 非正文流程 | 流程端点配置等级下拉 | `low` |
 | `writing_element_refinement` | 写作要素深化 | 非正文流程 | 流程端点配置等级下拉 | `low` |
@@ -596,4 +598,4 @@ A: 不能。`max_tokens` 只从预设 `generation_params` 读，插件 params �
 A: 不能。续写面板模式下拉是单选，`_on_start_flow` 只加载并执行一个插件。但多个插件可共存于注册表，用户在下拉中切换选择。
 
 **Q: flow_key 能用自定义值吗？**
-A: 模型层不校验 flow_key 取值，可填任意字符串。但运行时 `get_flow_endpoint`/`get_flow_model` 找不到配置会回退默认端点/模型，破限配置也无法生效。建议使用 8 个标准 flow_key。
+A: 模型层不校验 flow_key 取值，可填任意字符串。但运行时 `get_flow_endpoint`/`get_flow_model` 找不到配置会回退默认端点/模型，破限配置也无法生效。建议使用 12 个标准 flow_key。

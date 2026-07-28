@@ -31,6 +31,9 @@
 {{style_profile}}
 （若为"（无文风档案）"则跳过文风一致性维度审计；否则请严格对照此九维量化参数审计大纲中的文风规划是否符合前文风格特征）
 
+# 自定义角色档案
+{{custom_characters}}
+
 # 自定义设定/审计必查项
 {{custom_audit_rules}}
 （若为"（无自定义设定）"则跳过 custom_rules_compliance 维度审计；否则**必须严格对照每条规则的 audit_criteria 逐条检查**，违反 severity=critical 的规则时该维度 score ≤ 3，整体 passed=false）
