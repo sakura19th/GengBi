@@ -2,6 +2,57 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-07-28：v0.2.15 发版——自定义角色提取 + 网络代理 + 多项修复
+
+### 背景
+
+v0.2.14 发布后积累多项功能新增与缺陷修复，涉及自定义角色形象提取、全局网络代理、卷续写衔接 bug、单章续写宏注入断链、跨线程信号类型不匹配等。本次汇总发版 v0.2.15，将 2026-07-27 起至 2026-07-28 的全部变更打包发布。
+
+### 核心改动（按发版时间倒序汇总，详见下方各分条目）
+
+1. **修复单章续写 `{{custom_characters}}` 宏未注入**（2026-07-28）
+   - `novelforge/core/prompt_assembler.py`：`assemble()` 调用 `_build_macro_context()` 补传 `custom_characters` 参数；`_build_macro_context()` 方法体补 `ctx.extra["custom_characters"]` 注入
+   - `README.md`：额外注入宏注释补充 `{{previous_chapter_titles}}` 仅在单章续写预设 main 模块注入的说明
+
+2. **修复自定义角色提取信号类型不匹配 + 改进查看列表 UI**（2026-07-28）
+   - `novelforge/ui/main_window.py`：`_custom_character_done` 信号类型 `Signal(object, str, str)` → `Signal(str, object, str)`，与 emit 参数顺序 `(name, profile, status)` 严格匹配
+   - `_show_custom_character_dialog` 重写为 master-detail 列表（QListWidget 角色名排序 + QPlainTextEdit 档案展示 + currentItemChanged 联动）
+
+3. **新增网络代理 http_proxy 设置**（2026-07-28）
+   - `novelforge/core/config.py`：新增 `network` 顶层分组（`proxy_enabled`/`http_proxy`）+ `get/set_network_settings` 方法
+   - `novelforge/services/llm_client.py`：构造函数新增 `proxy` 参数，三处 aiohttp 请求统一传 `proxy=self.proxy or None`
+   - 4 个 extractor `_get_llm_client` + 3 个 worker 构造 + ModelFetchWorker + main_window 7 处 worker 实例化点透传 proxy
+   - `novelforge/ui/settings_dialog.py`：新增「网络代理」QGroupBox 分组（启用开关 + URL 输入框，开关联动）
+   - 新增 `tests/test_http_proxy.py`（19 用例）
+
+4. **新增自定义角色形象提取功能**（2026-07-28）
+   - `novelforge/models/chapter.py`：`Chapter` 新增 `custom_characters: dict[str, ProtagonistProfile]` 字段
+   - `novelforge/core/storage.py`：`chapters` 表新增 `custom_characters TEXT` 列 + 幂等迁移 + `update_chapter_custom_characters` 单列更新
+   - `novelforge/services/context_extractor.py`：新增 `extract_custom_character_streaming` 链路（缓存 key 前缀 `custom_character:`），镜像主角提取流程
+   - 新增 `extract_custom_character_prompt.txt` / `extract_custom_character_merge_prompt.txt` / `jb_custom_character_extraction.txt`
+   - 注册 `custom_character_extraction` flow_key（默认破限 `low`）
+   - `novelforge/ui/context_preview_panel.py`：新增「提取自定义角色」「查看自定义角色」按钮 + 流式接口 + 切章状态恢复
+   - `novelforge/ui/main_window.py`：信号接线 + 槽实现 + 章节切换状态恢复
+   - 新增 `tests/test_custom_character_extraction.py`（31 用例）
+
+5. **卷级多章节续写流程审查修复**（2026-07-27）
+   - `novelforge/services/volume_orchestrator.py`：修复卷第一章 `previous_chapter_text` 初始化为空导致衔接断裂 + `chapter_transition` 审计维度误判跳过；删除已废弃的 `_run_chapter_revise` 死代码
+   - `tests/test_volume_orchestrator.py`：同步 reject 路径测试过时注释
+
+### 测试
+
+- `tests/test_custom_character_extraction.py` 31 用例 + `tests/test_protagonist_extraction.py` 29 用例无回归
+- `tests/test_http_proxy.py` 19 用例 + `tests/test_settings_dialog_endpoint_edit.py` 兼容新 `proxy` 参数
+- `tests/test_volume_orchestrator.py` + `tests/test_volume_prompts.py` 通过
+- `tests/test_m2_prompt_assembly.py` + `tests/test_volume_prompts.py` 验证宏替换无回归
+- 所有修改文件 `python -m py_compile` 编译通过
+
+### 文档同步
+
+- `agent.md`：当前版本号 v0.2.14 → v0.2.15；架构分层多文件描述更新（含 proxy/自定义角色链路）；关键设计决策新增第 20 条「自定义角色形象提取」+ 第 21 条「网络代理（HTTP Proxy）」；第 9 条「卷级多章节续写」补「卷第一章衔接」条目；第 10 条「额外注入宏」列表补齐 `{{custom_characters}}` 与 `{{previous_chapter_titles}}`
+- `README.md`：顶部版本号 v0.2.14 → v0.2.15；打包示例文件名同步；更新记录顶部新增 `### v0.2.15` 小节；额外注入宏注释补 `{{previous_chapter_titles}}` 适用范围说明
+- `update.md`：本汇总条目（下方保留各分条目原始记录）
+
 ## 2026-07-28：修复单章续写 {{custom_characters}} 宏未注入 + 校对 README 额外注入宏文档
 
 ### 背景

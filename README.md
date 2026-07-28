@@ -2,7 +2,7 @@
 
 > 古意盎然的小说续写桌面工具——辅助创作者在既有故事之后接续新篇，而非替代写作。
 
-**当前版本：v0.2.14**
+**当前版本：v0.2.15**
 
 赓笔（gēng bǐ）取"赓续笔墨"之意。"赓"本义为接续他人诗文，正契合本工具的定位：在你已写就的章节之后，借助大语言模型续写后续内容，让故事自然生长。
 
@@ -43,7 +43,7 @@ python main.py
 ### 打包为可执行文件
 
 ```bash
-# 当前平台打包（生成 dist/GengBi_v{版本号} 可执行文件，如 GengBi_v0.2.14.exe）
+# 当前平台打包（生成 dist/GengBi_v{版本号} 可执行文件，如 GengBi_v0.2.15.exe）
 python -m novelforge.resources.build
 
 # 或直接调用 PyInstaller
@@ -268,6 +268,16 @@ API Key 使用 PBKDF2HMAC + Fernet 加密存储，不明文落盘。
 在主窗口菜单栏「调试」勾选「调试模式」，可在每个 LLM 调用前预览组装后的完整 messages（含宏替换与模板渲染后的最终文本），确认变量是否正确注入。
 
 ## 更新记录
+
+### v0.2.15
+
+- 新增「自定义角色形象提取」功能：输入角色名按主角形象相同流程（8 维度心理学档案）提取指定角色，每章可存多个角色档案，与主角形象链路解耦
+- 新增「网络代理」配置：设置中新增 HTTP/HTTPS 代理开关与 URL 输入，适用于所有 API 端点（续写/审计/提取/模型获取）
+- 修复卷续写第一章与插入点章节的衔接问题：卷第一章 `{{previous_chapter_text}}` 此前为空，导致无法紧密衔接且 `chapter_transition` 审计维度误判跳过
+- 修复单章续写 `{{custom_characters}}` 宏未注入的问题：`PromptAssembler.assemble()` 调用 `_build_macro_context()` 时漏传该参数，导致预设 main 模块中的占位符原样发送给 LLM
+- 修复自定义角色提取信号的跨线程类型不匹配问题：信号类型声明与 emit 参数顺序不一致导致 Shiboken 转换失败、档案被损坏为 str
+- 改进查看自定义角色的多角色 UI：由 QInputDialog 下拉改为 master-detail 列表（左侧角色名排序，右侧档案展示，联动刷新）
+- 移除卷续写已废弃的 `_run_chapter_revise` 死代码（新流程审计后直接 `_run_chapter_rewrite` 重写）
 
 ### v0.2.14
 
