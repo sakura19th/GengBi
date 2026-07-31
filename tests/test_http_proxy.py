@@ -8,6 +8,8 @@
 - SettingsDialog「网络代理」分组 UI 存在（QCheckBox + QLineEdit）
 - SettingsDialog 保存后 config_manager.get_network_settings 反映 UI 输入
 - ModelFetchWorker 接收并保存 proxy 参数
+- MainWindow._get_network_proxy 读取逻辑（开关 on/off × URL 空/非空组合）
+- MainWindow 7 处 worker 实例化点静态扫描，确保每个构造调用透传 proxy（回归防护）
 """
 from __future__ import annotations
 
@@ -265,3 +267,113 @@ def test_settings_dialog_save_strips_whitespace(tmp_path: Path, qapp: QApplicati
     dialog._on_accept()
     network = cm.get_network_settings()
     assert network["http_proxy"] == "http://127.0.0.1:7890"
+
+
+# ===== MainWindow _get_network_proxy 与 worker 接线测试 =====
+
+
+class _FakeConfigManager:
+    """仅实现 get_network_settings 的桩 ConfigManager。"""
+
+    def __init__(self, network: dict) -> None:
+        self._network = network
+
+    def get_network_settings(self) -> dict:
+        return self._network
+
+
+def _make_main_window_stub(network: dict):
+    """创建仅含 config_manager 的 MainWindow 桩实例（不经 __init__，避免 UI 依赖）。"""
+    from novelforge.ui.main_window import MainWindow
+
+    win = MainWindow.__new__(MainWindow)
+    win.config_manager = _FakeConfigManager(network)
+    return win
+
+
+def test_get_network_proxy_enabled_with_url() -> None:
+    """proxy_enabled=True 且 http_proxy 非空时返回代理 URL。"""
+    win = _make_main_window_stub(
+        {"proxy_enabled": True, "http_proxy": "http://127.0.0.1:7890"}
+    )
+    assert win._get_network_proxy() == "http://127.0.0.1:7890"
+
+
+def test_get_network_proxy_disabled() -> None:
+    """proxy_enabled=False 时返回 None（即使 http_proxy 非空）。"""
+    win = _make_main_window_stub(
+        {"proxy_enabled": False, "http_proxy": "http://127.0.0.1:7890"}
+    )
+    assert win._get_network_proxy() is None
+
+
+def test_get_network_proxy_enabled_empty_url() -> None:
+    """proxy_enabled=True 但 http_proxy 为空串时返回 None。"""
+    win = _make_main_window_stub({"proxy_enabled": True, "http_proxy": ""})
+    assert win._get_network_proxy() is None
+
+
+def test_get_network_proxy_both_off() -> None:
+    """proxy_enabled=False 且 http_proxy 为空时返回 None。"""
+    win = _make_main_window_stub({"proxy_enabled": False, "http_proxy": ""})
+    assert win._get_network_proxy() is None
+
+
+def test_all_worker_instantiations_pass_proxy() -> None:
+    """回归测试：main_window.py 中每个 worker 构造调用都必须传 proxy=self._get_network_proxy()。
+
+    历史 bug：7 处 worker 实例化点中 5 处漏传 proxy 参数，导致用户配置的
+    HTTP 代理在单章续写/卷续写/单章审计/审计后修正/重写生成流程被静默忽略。
+    本测试静态扫描源码，确保每个 worker 构造调用的参数块含 proxy 透传，
+    防止未来新增/修改 worker 实例化点时再次漏传。
+    """
+    import re
+    from collections import Counter
+
+    main_window_path = PROJECT_ROOT / "novelforge" / "ui" / "main_window.py"
+    source = main_window_path.read_text(encoding="utf-8")
+
+    # 匹配 worker 构造调用：名字后紧跟 ( （class 定义是 : ，类型注解无 ( ）
+    pattern = re.compile(r"\b(ContinuationWorker|AuditWorker|VolumeOrchestrator)\(")
+
+    call_sites: list[tuple[str, str]] = []  # (worker_name, argument_block)
+    for m in pattern.finditer(source):
+        name = m.group(1)
+        # 从 ( 开始，按括号深度匹配到对应 )
+        open_idx = m.end() - 1  # 指向 (
+        depth = 0
+        i = open_idx
+        while i < len(source):
+            ch = source[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        block = source[open_idx : i + 1]
+        call_sites.append((name, block))
+
+    # 必须找到 7 个 worker 构造调用（3 ContinuationWorker + 3 AuditWorker + 1 VolumeOrchestrator）
+    assert len(call_sites) == 7, (
+        f"预期 7 个 worker 构造调用，实际找到 {len(call_sites)} 个；"
+        f"若新增 worker 实例化点请同步传 proxy 并更新本断言"
+    )
+
+    name_counts = Counter(name for name, _ in call_sites)
+    assert name_counts == {
+        "ContinuationWorker": 3,
+        "AuditWorker": 3,
+        "VolumeOrchestrator": 1,
+    }, f"worker 构造调用分布异常：{name_counts}"
+
+    # 每个构造调用的参数块都必须含 proxy 透传
+    missing = [
+        name for name, block in call_sites
+        if "proxy=self._get_network_proxy()" not in block
+    ]
+    assert missing == [], (
+        f"以下 worker 构造调用未传 proxy=self._get_network_proxy()：{missing}；"
+        f"这会导致用户配置的 HTTP 代理在对应流程被静默忽略"
+    )

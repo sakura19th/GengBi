@@ -2073,6 +2073,7 @@ class MainWindow(QMainWindow):
             debug_mode=self._debug_mode,
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
+            proxy=self._get_network_proxy(),
             parent=self,
         )
 
@@ -2494,6 +2495,7 @@ class MainWindow(QMainWindow):
             phase_inputs=self._volume_state,
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
+            proxy=self._get_network_proxy(),
             parent=self,
         )
         self._volume_orchestrator.debug_mode = self._debug_mode
@@ -5305,6 +5307,7 @@ class MainWindow(QMainWindow):
             phase_name="单章审计",
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
+            proxy=self._get_network_proxy(),
             parent=self,
         )
 
@@ -5547,6 +5550,7 @@ class MainWindow(QMainWindow):
             debug_mode=self._debug_mode,
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
+            proxy=self._get_network_proxy(),
             parent=self,
         )
 
@@ -6056,6 +6060,7 @@ class MainWindow(QMainWindow):
             debug_mode=self._debug_mode,
             extra_payload=single_endpoint.get("extra_payload") or {},
             extra_headers=single_endpoint.get("extra_headers") or {},
+            proxy=self._get_network_proxy(),
             parent=self,
         )
 

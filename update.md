@@ -2,6 +2,39 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-07-31：修复网络代理在多数流程未生效的 bug
+
+### 背景
+
+用户反馈在设置中配置 `127.0.0.1:7890` 代理后未生效。排查发现 `novelforge/ui/main_window.py` 中 7 处 worker 实例化点，仅 2 处（重写需求分析、通用分析）传入了 `proxy=self._get_network_proxy()`，其余 5 处缺失该参数。由于 `_get_network_proxy()` 辅助方法与 worker 构造函数的 `proxy` 形参均已就绪，漏传属机械性遗漏，导致用户配置的 HTTP 代理在最常用的 5 个流程中被静默忽略：单章续写、卷续写（含全部 7 子阶段）、单章审计、审计后修正重写、重写当前章节生成。
+
+agent.md 第 21 条「网络代理」早已声明"main_window 7 处 worker 实例化点（`_get_network_proxy()` 辅助方法统一读取配置）"，但实际仅 2/7 处使用，文档与代码长期不一致。`tests/test_http_proxy.py` 19 用例仅覆盖 config/UI/LLMClient/ModelFetchWorker 参数存储，未覆盖 MainWindow→worker 接线，故 bug 未被发现。
+
+### 核心改动
+
+1. **补齐 5 处 worker 实例化的 proxy 参数**（`novelforge/ui/main_window.py`）
+   - `_on_start_continuation`（单章续写 ContinuationWorker，L2076）
+   - `_start_volume_phase`（卷续写 VolumeOrchestrator，L2498）
+   - `_on_start_single_audit`（单章审计 AuditWorker，L5310）
+   - `_on_audit_accepted`（审计后修正 ContinuationWorker，L5553）
+   - `_on_rewrite_analysis_accepted`（重写生成 ContinuationWorker，L6063）
+   - 每处于 `parent=self,` 前插入 `proxy=self._get_network_proxy(),`，与已正确的 2 处（重写需求分析 L5789、通用分析 L6242）写法对齐。修复后 7/7 处统一透传代理。
+
+2. **新增回归测试**（`tests/test_http_proxy.py`，+5 用例共 24 用例）
+   - `test_get_network_proxy_*`（4 用例）：用 `MainWindow.__new__(MainWindow)` 裸实例 + 桩 `config_manager` 单元测试 `_get_network_proxy()` 的开关 on/off × URL 空/非空组合
+   - `test_all_worker_instantiations_pass_proxy`（1 用例）：静态扫描 `main_window.py` 源码，按括号深度提取每个 worker 构造调用的参数块，断言 7 个调用（3 ContinuationWorker + 3 AuditWorker + 1 VolumeOrchestrator）均含 `proxy=self._get_network_proxy()`，防止未来新增/修改 worker 实例化点时再次漏传
+
+### 测试
+
+- `tests/test_http_proxy.py` 24 用例全部通过（19 原有 + 5 新增）
+- `tests/test_rewrite_current_mode.py` / `test_single_audit.py` / `test_reasoning_effort.py` / `test_volume_*.py` 共 208 用例通过，续写/重写/审计/卷续写流程无回归
+- 注：`test_rewrite_current_mode.py::test_flow_definitions_count_is_11` 失败为预存在无关失败（FLOW_DEFINITIONS 已增至 12 项而该计数测试未同步），与本次代理修复无关
+
+### 文档同步
+
+- `agent.md`：第 21 条「网络代理」原文已声明 7 处实例化点统一读取配置，修复后实际与声明一致，无需改文案
+- `update.md`：本条目
+
 ## 2026-07-28：v0.2.15 发版——自定义角色提取 + 网络代理 + 多项修复
 
 ### 背景
