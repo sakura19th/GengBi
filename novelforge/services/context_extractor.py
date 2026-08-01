@@ -10,7 +10,7 @@
 - 解析 JSON → ``list[ContextEntry]``，失败时尝试修复（去除 markdown 代码块标记）
 - 校验必填字段（``uid``、``category``、``content``），``content`` 长度截断 200 字
 - 实现分段缓存：``key = "ctx_extract:{project_id}:{chapters_hash}"``
-- 缓存有效期默认 24 小时（可被 ``cache_ttl_hours`` 覆盖）
+- 缓存永不过期（依赖 chapters_hash 判断失效，源章节内容变化时自动重提取）
 - ``force_refresh=True`` 时跳过缓存
 """
 from __future__ import annotations
@@ -59,8 +59,8 @@ DEFAULT_LOOKBACK_CHAPTERS = 5
 # 默认提取模型
 DEFAULT_EXTRACTOR_MODEL = "gpt-4o-mini"
 
-# 默认缓存有效期（小时）
-DEFAULT_CACHE_TTL_HOURS = 24
+# 默认缓存有效期（小时）；0 表示永不过期，依赖 chapters_hash 判断失效
+DEFAULT_CACHE_TTL_HOURS = 0
 
 # 提取请求的 max_tokens（足够返回完整 JSON 数组；从 5000 调高到 16000，
 # 避免大批量章节提取时 JSON 被 max_tokens 截断导致 Unterminated string）
@@ -2357,11 +2357,10 @@ class ContextExtractor:
                 cache_key, data, ttl_hours=ttl_hours, category=CACHE_CATEGORY
             )
             logger.info(
-                "已保存上下文提取缓存: %s (%d 条, TTL=%dh, 批次=%d, merged=%s, "
+                "已保存上下文提取缓存: %s (%d 条, 永不过期, 批次=%d, merged=%s, "
                 "protagonist=%s)",
                 cache_key,
                 len(entries),
-                ttl_hours,
                 batch_count,
                 merged,
                 "有" if protagonist_profile else "无",
@@ -2652,9 +2651,8 @@ class ContextExtractor:
             token_limit = token_limit_override
         else:
             token_limit = int(config.get("token_limit", 0))
-        cache_ttl_hours = int(
-            config.get("cache_ttl_hours", DEFAULT_CACHE_TTL_HOURS)
-        )
+        # 缓存永不过期，依赖 chapters_hash 判断失效（源章节内容变化时 hash 不匹配自动重提取）
+        cache_ttl_hours = 0
         cache_enabled = bool(config.get("cache_enabled", True))
 
         # 日志前缀（流式/非流式区分）
@@ -3273,9 +3271,8 @@ class ContextExtractor:
         """
         start_time = time.time()
         config = self._get_extract_config(project)
-        cache_ttl_hours = int(
-            config.get("cache_ttl_hours", DEFAULT_CACHE_TTL_HOURS)
-        )
+        # 缓存永不过期，依赖 chapters_hash 判断失效（源章节内容变化时 hash 不匹配自动重提取）
+        cache_ttl_hours = 0
         cache_enabled = bool(config.get("cache_enabled", True))
 
         # 取消信号处理（与 _extract_common 一致）
@@ -3462,9 +3459,8 @@ class ContextExtractor:
         """
         start_time = time.time()
         config = self._get_extract_config(project)
-        cache_ttl_hours = int(
-            config.get("cache_ttl_hours", DEFAULT_CACHE_TTL_HOURS)
-        )
+        # 缓存永不过期，依赖 chapters_hash 判断失效（源章节内容变化时 hash 不匹配自动重提取）
+        cache_ttl_hours = 0
         cache_enabled = bool(config.get("cache_enabled", True))
 
         # 取消信号处理
@@ -3688,7 +3684,7 @@ class ContextExtractor:
             chapter_id: 章节 ID
             entries: 全部条目（含 enabled=False 的禁用条目）
             exclude_current: 重写模式标记（cache_key 追加 :rewrite 后缀）
-            ttl_hours: TTL（小时），None 时用 DEFAULT_CACHE_TTL_HOURS
+            ttl_hours: 已废弃（保留签名向后兼容），缓存永不过期
         """
         cache_key = self._build_cache_key(
             project_id, chapter_id, exclude_current=exclude_current
@@ -3714,9 +3710,8 @@ class ContextExtractor:
             elapsed_seconds = 0.0
             token_usage = {}
 
-        effective_ttl = (
-            ttl_hours if ttl_hours is not None else DEFAULT_CACHE_TTL_HOURS
-        )
+        # 用户编辑是明确意图，缓存永不过期，避免编辑丢失
+        effective_ttl = 0
 
         try:
             await self._save_cached_entries(
@@ -3734,10 +3729,9 @@ class ContextExtractor:
                 protagonist_merged=False,
             )
             logger.info(
-                "已保存编辑后的上下文条目: %s (%d 条, TTL=%dh)",
+                "已保存编辑后的上下文条目: %s (%d 条, 永不过期)",
                 cache_key,
                 len(entries),
-                effective_ttl,
             )
         except Exception as e:
             logger.warning("保存编辑后的上下文条目失败: %s", e)

@@ -1879,6 +1879,94 @@ class TestContextExtractorExcludeCurrent:
         assert "ch_1" not in result_ids
 
 
+class TestContextCacheTTLNeverExpires:
+    """回归测试：提取的上下文缓存永不过期（修复 24 小时后消失 bug）。
+
+    上下文条目/主角形象/自定义角色档案走 SQLite ``cache`` 表，曾因 ``expires_at``
+    过期字段被 ``get_cache`` 在 24 小时后自动删除。修复后三类缓存 ``expires_at=NULL``
+    永不过期，依赖 ``chapters_hash`` 判断失效。
+    """
+
+    @staticmethod
+    def _make_real_storage(tmp_path: Path) -> Any:
+        from novelforge.core.storage import Storage
+
+        storage = Storage(tmp_path)
+        asyncio.run(storage.connect())
+        return storage
+
+    def test_save_edited_entries_expires_at_null(self, tmp_path: Path) -> None:
+        """save_edited_entries 保存的缓存 expires_at 为 NULL（永不过期）。"""
+        from novelforge.models.context import ContextEntry
+        from novelforge.services.context_extractor import ContextExtractor
+
+        storage = self._make_real_storage(tmp_path)
+        try:
+            storage_service = MagicMock()
+            storage_service.storage = storage
+            extractor = ContextExtractor(storage_service, MagicMock())
+
+            entry = ContextEntry(
+                uid="e1", category="characters", content="测试内容",
+            )
+            asyncio.run(
+                extractor.save_edited_entries(
+                    project_id="proj1", chapter_id="ch1", entries=[entry],
+                )
+            )
+
+            cache_key = extractor._build_cache_key("proj1", "ch1")
+
+            async def _query_expires_at() -> Any:
+                async with storage._conn.execute(
+                    "SELECT expires_at FROM cache WHERE key = ?", (cache_key,)
+                ) as cur:
+                    row = await cur.fetchone()
+                    return row[0] if row else None
+
+            expires_at = asyncio.run(_query_expires_at())
+            assert expires_at is None, "缓存应永不过期（expires_at=NULL）"
+
+            # get_cache 仍可读取
+            data = asyncio.run(storage.get_cache(cache_key))
+            assert data is not None
+            assert len(data["entries"]) == 1
+        finally:
+            asyncio.run(storage.close())
+
+    def test_expired_row_deleted_but_null_row_survives(self, tmp_path: Path) -> None:
+        """对比：expires_at 在过去的行被 get_cache 删除；NULL 行存活。"""
+        from datetime import timedelta
+
+        storage = self._make_real_storage(tmp_path)
+        try:
+            # 永不过期行（ttl_hours=0 → expires_at=NULL）
+            asyncio.run(
+                storage.set_cache("never_expire_key", {"v": 1}, ttl_hours=0)
+            )
+            # 已过期行：先按 ttl=24 写入，再手动改 expires_at 为过去时间
+            asyncio.run(
+                storage.set_cache("expired_key", {"v": 2}, ttl_hours=24)
+            )
+            past = (datetime.now() - timedelta(hours=25)).isoformat()
+
+            async def _expire_row() -> None:
+                await storage._conn.execute(
+                    "UPDATE cache SET expires_at = ? WHERE key = ?",
+                    (past, "expired_key"),
+                )
+                await storage._conn.commit()
+
+            asyncio.run(_expire_row())
+
+            # 永不过期行可读
+            assert asyncio.run(storage.get_cache("never_expire_key")) == {"v": 1}
+            # 过期行被 get_cache 删除并返回 None
+            assert asyncio.run(storage.get_cache("expired_key")) is None
+        finally:
+            asyncio.run(storage.close())
+
+
 if __name__ == "__main__":
     # 直接运行时执行所有测试
     pytest.main([__file__, "-v", "--tb=short"])

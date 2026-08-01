@@ -2,6 +2,36 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-08-01：修复提取的上下文 24 小时后消失
+
+### 背景
+
+用户反馈提取的上下文（条目/主角形象/自定义角色档案）在 24 小时后消失。排查发现 `novelforge/core/storage.py` 的 `cache` 表带 `expires_at` 过期字段，`get_cache` 读取时若 `datetime.now() > expires` 会**直接 `DELETE FROM cache WHERE key=?` 并返回 None**。该 TTL 由 `context_extractor.py` 写入时设置（`DEFAULT_CACHE_TTL_HOURS = 24`，三处提取流程读 `config.cache_ttl_hours`，`save_edited_entries` 走默认常量兜底）。
+
+此 TTL 与基于 `chapters_hash` 的内容失效机制重复且有害：缓存本就有正确的失效判断——源章节内容变化导致 hash 不匹配时自动重提取。TTL 在此之上加时间过期纯属冗余，且导致用户手动编辑的条目也在 24 小时后丢失，与 `save_edited_entries` 文档串"避免编辑丢失"的设计意图直接冲突。`cache_ttl_hours` 配置字段无 UI 入口（Settings 已移除「上下文提取」组），属死配置。
+
+### 核心改动
+
+1. **`novelforge/services/context_extractor.py`**
+   - `DEFAULT_CACHE_TTL_HOURS = 24` → `0`（0 表示永不过期）
+   - 三处提取流程（`_extract_common_body`/`_extract_protagonist_body`/`_extract_custom_character_body` 的 config 读取处）将 `cache_ttl_hours = int(config.get("cache_ttl_hours", DEFAULT_CACHE_TTL_HOURS))` 替换为 `cache_ttl_hours = 0`。强制 0 让旧用户配置文件中已持久化的 `cache_ttl_hours: 24` 失效，保证新旧用户一致（仅改默认常量无法修复存量用户，因 `config.get` 会返回已持久化的 24）
+   - `save_edited_entries`：`effective_ttl = ttl_hours if ttl_hours is not None else DEFAULT_CACHE_TTL_HOURS` → `effective_ttl = 0`（用户编辑是明确意图，永不过期）；`ttl_hours` 参数签名保留向后兼容，docstring 标注已废弃
+   - 两处日志文案 `TTL=%dh` → `永不过期`，并移除对应 printf 参数
+   - 模块 docstring「缓存有效期默认 24 小时」→「缓存永不过期（依赖 chapters_hash 判断失效）」
+
+2. **不改 `novelforge/core/storage.py`**：`set_cache` 已正确支持 `ttl_hours=0`（`expires = now + timedelta(hours=ttl_hours) if ttl_hours > 0 else None` → `expires_at=NULL`），`get_cache` 仅在 `expires_at` 非空时检查过期（`if expires_at:`），`expires_at=NULL` 时永不过期。storage 层无需改动。
+
+3. **不删除 `cache_ttl_hours` 配置字段**：保留 `config.py` 默认值与 `project.py` 文档，避免 config 迁移与跨文件改动。字段成为死配置（无 UI 入口、代码不再读取），仅在 agent.md 标注废弃。这是最小爆炸半径选择。
+
+### 测试
+
+- 新增回归测试 `tests/test_m4_context_extraction.py::TestContextCacheTTLNeverExpires`：验证 `save_edited_entries` 保存后 `expires_at IS NULL`，且 `get_cache` 持续返回非 None（含模拟 25 小时后场景对比旧 `ttl_hours=24` 行为会删除）
+- `tests/test_m4_context_extraction.py` / `test_protagonist_extraction.py` / `test_custom_character_extraction.py` / `test_rewrite_current_mode.py` 全部通过，无回归（这些测试 mock 配置含 `cache_ttl_hours: 24`，改动后该键被忽略，测试仍通过）
+
+### 文档同步
+
+- `agent.md`：更新 L43（context_extractor.py 描述）与 L134（设计决策 #3「条目编辑自动持久化」），补充三类缓存永不过期、依赖 `chapters_hash` 失效、修复 24h 消失 bug、`cache_ttl_hours` 字段废弃说明
+
 ## 2026-07-31：修复网络代理在多数流程未生效的 bug
 
 ### 背景
