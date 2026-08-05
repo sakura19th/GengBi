@@ -75,7 +75,7 @@ novelforge/
 │   ├── regex_manager.py         # 正则管理器（内联勾选即时持久化）
 │   ├── worldbook_manager.py     # 世界书管理器（条目级 enabled 开关）
 │   ├── settings_dialog.py       # 设置对话框（API 端点管理含 models 全部列表 + enabled_models 可勾选多选 QListWidget + 全选/全不选/自定义模型录入、复制端点；default_model 自动取首个已启用供后台流程；reasoning_effort 7 档；EndpointEditDialog._on_accept base_url 校验 http/https scheme + rstrip("/")；ModelFetchWorker 增加 stop() best-effort 标志位 + finished→deleteLater 自清理 + closeEvent/_on_fetch_models 停止前一个 worker wait(2000) + 防御式 isRunning 访问避免 wrapper 失效 RuntimeError；ModelFetchWorker 构造接收 proxy 参数，_on_fetch_models 从 config_manager.get_network_settings 读取代理传入；新增「网络代理」QGroupBox 分组（QCheckBox 启用开关 + QLineEdit 代理 URL 输入框，开关联动输入框启用状态，placeholder 提示 http://host:port 或 http://user:pass@host:port 格式），_on_accept 调 set_network_settings 持久化；不含上下文提取配置——已统一由流程端点配置+预览面板管理）
-│   ├── flow_endpoint_dialog.py  # 流程端点配置（12 流程端点映射 + 每流程模型下拉 enabled_models 回退链 + 10 非正文流程破限等级下拉 off/low/mid/high/custom + 自定义文本编辑入口）
+│   ├── flow_endpoint_dialog.py  # 流程端点配置（12 流程端点映射 + 每流程模型下拉 enabled_models 回退链 + 10 非正文流程破限等级下拉 off/low/mid/high/custom + 自定义文本编辑入口；两段可勾选折叠，折叠 setFixedHeight(标题栏)+_fit_dialog_height 按 totalSizeHint 锁对话框高度收紧，宽度不锁可拖，端点默认展开、破限默认折叠）
 │   ├── jailbreak_custom_dialog.py # 自定义破限文本编辑对话框（QPlainTextEdit + 确定/取消）
 │   ├── checkable_combo.py       # 可勾选多选下拉（世界书用；关闭态摘要文本 + 主题 QSS 箭头）
 │   ├── worldbook_panel.py       # 续写配置内嵌世界书多选（选中即启用；get_selected_worldbook_ids；选中态由 MainWindow 持久化到 continuation.selected_worldbook_ids）
@@ -147,7 +147,7 @@ novelforge/
 - 卷模式隐藏右侧输出面板，VolumePanel 流式区承接章节流式
 - 单次模式用 `lookback_chapters` 截断聊天历史；卷模式用 `skip_history=True` 跳过聊天历史，前文由"最近 10 章正文参考"系统消息提供
 - 窄屏自适应：按钮区用 QFlowLayout 自动换行
-- CollapsiblePanel 添加控件必须用 `add_widget()`
+- 可折叠分组：`FlowEndpointDialog` 用 `setFixedHeight(标题栏)` 压段外框 + `_fit_dialog_height`（`layout.totalSizeHint` + `setFixedHeight` 收对话框高度，宽度不锁）；`volume_panel` 章节产物为勾选折叠
 - 按钮高度统一 28px（全局 QSS 接管）
 - 用户输入区按内容自动增高（约 1～6 行封顶，超出内部滚动），按宽度自动换行
 
@@ -258,7 +258,7 @@ novelforge/
 
 - **正文流程**（single_continuation/volume_continuation）：破限由预设管理器勾选 `nf_jb_*` 模块控制（现有机制不变）；`default_preset.json` 的 `prompt_order` 中 5 个 `nf_jb_*` 已前置到 `main` 之前，使破限 system 消息在组装后位于「你是一位专业的小说续写助手」之前定调。`nf_jb_prefill` 虽移到 order 前列但它是 ABSOLUTE 注入（`injection_position=1, injection_depth=0`），仍按深度规则注入到末尾，行为不变。`nf_core_rules` 续写核心准则之首集成基线轻度破限【创作自由基准】（常开：用户至上+创作无禁区+拒绝即失职+非评判+不回避），作为始终生效的底色；`nf_jb_*` 为用户可选的更强增强档位（LOW=认知修正、MID=授权自由、HIGH=沙盒解放，含内部审查对抗）
 - **非正文流程**（8 个：single_audit/rewrite_analysis/context_extraction/ontology_extraction/protagonist_extraction/custom_character_extraction/style_extraction/custom_rule_parsing）：每个流程在 `resources/defaults/jailbreaks/jb_{flow}.txt` 有专用模板（含 `### LOW/MID/HIGH ###` 三档，按流程风格定制：提取类强调不拒绝敏感分析、审计类强调诚实批判不软化、重写分析强调不拒绝敏感重写需求、自定义设定解析强调接受任何黑暗设定）；运行时由 `JailbreakProvider.get_jailbreak(flow, level)` 返回文本，作为 `{"role":"system","content":jb_text}` 前置到 messages 开头（空文本不注入）；提取类流程的合并子调用复用同流程破限参数
-- **配置入口**：`FlowEndpointDialog` 在端点配置下方新增「破限配置（非正文流程）」分组，仅对 8 个非正文流程显示等级下拉（关闭/低/中/高/自定义）+「编辑自定义」按钮（仅 custom 时启用，弹 `JailbreakCustomDialog` 编辑）；正文流程不显示（由预设管理器控制）
+- **配置入口**：`FlowEndpointDialog` 分「端点与模型」「破限配置（非正文流程）」两段可勾选折叠 GroupBox（端点默认展开、破限默认折叠；折叠时外框与对话框高度同步收缩）；破限段仅对非正文流程显示等级下拉（关闭/低/中/高/自定义）+「编辑自定义」按钮（仅 custom 时启用，弹 `JailbreakCustomDialog` 编辑）；正文流程不显示破限（由预设管理器控制）
 - **默认等级**：提取类四个流程（context/ontology/protagonist/custom_character/style）默认 `low`（提取敏感小说内容不被拒绝），其余默认 `off`；自定义文本优先于等级模板
 - **配置层**：`config.py` `FLOW_DEFAULT_JAILBREAKS` 常量 + `flow_jailbreaks`/`flow_jailbreaks_custom` 两个 dict + 5 个 get/set 方法（镜像 `flow_endpoints` 模式）；`get_flow_jailbreak(flow)` 未配置回退默认等级
 - **降级策略**：`jb_{flow}.txt` 不存在或无对应等级段，`get_jailbreak` 返回空串，不阻塞流程

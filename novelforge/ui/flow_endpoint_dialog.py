@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -123,8 +124,10 @@ class FlowEndpointDialog(QDialog):
         default_name = default_ep.get("name", default_ep.get("id", "未配置")) if default_ep else "未配置"
         default_label = f"默认端点（{default_name}）"
 
-        # 端点配置表单（每行：端点下拉 + 模型下拉横排）
-        endpoint_form = QFormLayout()
+        # 端点与模型（可折叠，默认展开）
+        ep_group = QGroupBox("端点与模型")
+        ep_content = QWidget()
+        endpoint_form = QFormLayout(ep_content)
         for flow_key, flow_name in FLOW_DEFINITIONS:
             ep_combo = QComboBox()
             # 首项：默认端点（itemData="" 表示回退默认）
@@ -152,11 +155,17 @@ class FlowEndpointDialog(QDialog):
             row.addWidget(ep_combo, 1)
             row.addWidget(model_combo, 1)
             endpoint_form.addRow(f"{flow_name}:", row)
-        layout.addLayout(endpoint_form)
 
-        # 破限配置分组（仅非正文流程）
+        ep_group_layout = QVBoxLayout(ep_group)
+        ep_group_layout.setContentsMargins(4, 4, 4, 4)
+        ep_group_layout.addWidget(ep_content)
+        self._bind_collapsible_section(ep_group, ep_content, expanded=True)
+        layout.addWidget(ep_group)
+
+        # 破限配置（可折叠，默认折叠；仅非正文流程）
         jb_group = QGroupBox("破限配置（非正文流程）")
-        jb_layout = QFormLayout(jb_group)
+        jb_content = QWidget()
+        jb_layout = QFormLayout(jb_content)
 
         jb_hint = QLabel(
             "为非正文流程选择破限等级。等级文本作为 system 消息前置到此流程 messages 开头。\n"
@@ -191,6 +200,10 @@ class FlowEndpointDialog(QDialog):
             row.addWidget(edit_btn)
             jb_layout.addRow(f"{flow_name}:", row)
 
+        jb_group_layout = QVBoxLayout(jb_group)
+        jb_group_layout.setContentsMargins(4, 4, 4, 4)
+        jb_group_layout.addWidget(jb_content)
+        self._bind_collapsible_section(jb_group, jb_content, expanded=False)
         layout.addWidget(jb_group)
 
         # 按钮区
@@ -200,6 +213,70 @@ class FlowEndpointDialog(QDialog):
         button_box.accepted.connect(self._on_accept)
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
+
+    def _bind_collapsible_section(
+        self,
+        group: QGroupBox,
+        content: QWidget,
+        *,
+        expanded: bool,
+    ) -> None:
+        """将 GroupBox 绑为可勾选折叠段，折叠时外框随内容收缩。
+
+        Args:
+            group: 外层分组框
+            content: 可显隐的内容容器
+            expanded: 初始是否展开
+        """
+        group.setCheckable(True)
+        group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        group.toggled.connect(
+            lambda checked, g=group, c=content: self._on_section_toggled(g, c, checked)
+        )
+        group.setChecked(expanded)
+        # setChecked 在已是目标态时可能不发 toggled，显式同步一次
+        self._on_section_toggled(group, content, expanded)
+
+    def _on_section_toggled(
+        self,
+        group: QGroupBox,
+        content: QWidget,
+        checked: bool,
+    ) -> None:
+        """展开/折叠分段：折叠压到标题栏；对话框高度收紧到内容，宽度仍可拖。"""
+        content.setVisible(checked)
+        gl = group.layout()
+        if checked:
+            if gl is not None:
+                gl.setContentsMargins(4, 4, 4, 4)
+            group.setMinimumHeight(0)
+            group.setMaximumHeight(16777215)  # QWIDGETSIZE_MAX
+        else:
+            if gl is not None:
+                gl.setContentsMargins(0, 0, 0, 0)
+            # 标题栏高度；不用 minimumSizeHint（隐藏后常仍偏大）
+            title_h = max(group.fontMetrics().height() + 20, 28)
+            group.setFixedHeight(title_h)
+        self._fit_dialog_height()
+        # 等布局结算后再收一次，避免 sizeHint 仍是展开态
+        QTimer.singleShot(0, self._fit_dialog_height)
+
+    def _fit_dialog_height(self) -> None:
+        """按内容把对话框高度收到最小，保留当前宽度（不锁宽）。"""
+        lay = self.layout()
+        if lay is None:
+            return
+        w = max(self.width(), self.minimumWidth())
+        # 先解除高度锁，才能算出真实内容高度
+        self.setMinimumHeight(0)
+        self.setMaximumHeight(16777215)
+        lay.invalidate()
+        lay.activate()
+        h = lay.totalSizeHint().height()
+        h = max(h, lay.totalMinimumSize().height())
+        self.resize(w, h)
+        # 高度锁到内容，避免大窗外框留白；宽度不 setFixedWidth
+        self.setFixedHeight(h)
 
     def _load_data(self) -> None:
         """加载已保存的流程端点/模型映射与破限配置并选中对应项。"""

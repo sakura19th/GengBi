@@ -2,6 +2,28 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-08-05：流程端点配置两段可折叠收纳
+
+### 背景
+
+`FlowEndpointDialog` 纵向堆叠 12 行端点/模型 + 约 10 行破限配置，小显示器上对话框过高、不便操作。需将两段内容做成可收纳框；仅 `setVisible` 隐藏内容时外框仍留白，需同步收缩。
+
+### 核心改动
+
+- **`novelforge/ui/flow_endpoint_dialog.py`**：
+  - `_setup_ui` 将端点/模型、破限两段绑为可勾选折叠 GroupBox（端点默认展开、破限默认折叠）
+  - `_bind_collapsible_section` / `_on_section_toggled` / `_fit_dialog_height`：折叠时隐藏内容并用 `setFixedHeight(标题栏)` 压段外框；对话框按 `layout.totalSizeHint` 把高度 `setFixedHeight` 收到最小（`QTimer.singleShot` 再收一次防 stale），宽度不锁、仍可横向拖拽
+  - 保存/加载逻辑不变
+
+### 测试
+
+- 无新增自动化测试（现有无该对话框 UI 用例）；改动仅布局可见性与尺寸约束。
+
+### 文档同步
+
+- `agent.md`：`flow_endpoint_dialog.py` 目录树描述；UI 布局规范可折叠分组写法；设计决策第 16 条配置入口说明
+- `update.md`：本条目
+
 ## 2026-08-05：主角形象/自定义角色形象的复制到章节与前文回溯注入
 
 ### 背景
