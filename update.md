@@ -2,6 +2,42 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-08-05：v0.2.16 发版——上下文复制/回溯注入 + 网络代理修复 + 缓存过期修复
+
+### 背景
+
+v0.2.15 发布后积累 3 项变更：1 个功能新增（含两个子功能）、2 个 bug 修复。本次汇总发版 v0.2.16，将 2026-07-31 起至 2026-08-05 的全部变更打包发布。
+
+### 核心改动（按发版时间倒序汇总，详见下方各分条目）
+
+1. **新增「上下文复制到章节」+「同步注入回溯上下文」两个增强功能**（2026-08-05）
+   - **功能 1**：`ContextEntry` 新增 `copied_from` 字段记录复制来源；`ContextPreviewPanel` 新增「复制到章节」按钮 + 信号；`MainWindow._on_copy_context_to_chapter` 实现追加合并 + 新 uid 生成 + 持久化；条目 source 描述拼接复制来源
+   - **功能 2**：`ContinuationPanel` 新增「同步注入回溯上下文」QCheckBox 开关（默认 False，配置持久化）；`MainWindow._get_latest_lookback_context` 取回溯窗口最新一章提取结果（排除当前章避免重复）；`PromptAssembler.assemble` 新增 `lookback_context_entries`/`lookback_context_source_index` 参数，`_build_lookback_context_message` 构建独立 system 消息「# 前章上下文参考（第N章提取）」，注入位置紧跟 worldInfoBefore marker 之后
+   - 新增 `tests/test_context_copy_to_chapter.py`（17 用例）+ `tests/test_lookback_context_injection.py`（20 用例）
+
+2. **修复提取的上下文 24 小时后消失**（2026-08-01）
+   - `novelforge/services/context_extractor.py`：`DEFAULT_CACHE_TTL_HOURS = 24` → `0`；三处提取流程与 `save_edited_entries` 强制 `ttl_hours=0`（`expires_at=NULL` 永不过期），完全依赖 `chapters_hash` 判断失效
+   - 修复根因：`storage.cache` 表带 `expires_at` 过期字段，`get_cache` 读取时若过期会直接 DELETE 该行返回 None，导致提取结果（含用户手动编辑的条目）24 小时后被自动删除
+   - `cache_ttl_hours` 配置字段废弃（无 UI 入口，代码不再读取，保留兼容）
+   - 新增回归测试 `tests/test_m4_context_extraction.py::TestContextCacheTTLNeverExpires`
+
+3. **修复网络代理在多数流程未生效**（2026-07-31）
+   - `novelforge/ui/main_window.py`：补齐 5 处 worker 实例化的 `proxy=self._get_network_proxy()` 参数（原仅 2/7 处传入），修复后 7/7 处统一透传
+   - 涉及流程：单章续写、卷续写（含全部 7 子阶段）、单章审计、审计后修正重写、重写当前章节生成
+   - 新增 `tests/test_http_proxy.py` 5 个回归用例（共 24 用例），含静态扫描防未来漏传
+
+### 测试
+
+- 新增 42 用例：`tests/test_context_copy_to_chapter.py`（17）+ `tests/test_lookback_context_injection.py`（20）+ `tests/test_m4_context_extraction.py::TestContextCacheTTLNeverExpires` + `tests/test_http_proxy.py` 5 个新增用例
+- 全部测试通过，无回归
+
+### 文档同步
+
+- `agent.md`：当前版本号 v0.2.15 → v0.2.16；架构分层多文件描述更新（context.py 新增 `copied_from`、prompt_assembler.py 新增回溯上下文参数与 `_build_lookback_context_message`、main_window.py 新增 `_on_copy_context_to_chapter`/`_get_latest_lookback_context`、continuation_panel.py 新增 `inject_lookback_context_check`、context_extractor.py 缓存永不过期）；新增关键设计决策第 22 条「上下文复制到章节与回溯上下文同步注入」；测试要求章节新增功能 1/2 测试说明；第 3 条「提取与续写解耦」补充缓存永不过期说明
+- `README.md`：顶部版本号 v0.2.15 → v0.2.16；打包示例文件名同步；更新记录顶部新增 `### v0.2.16` 小节
+- `novelforge/__init__.py`：`__version__` 0.2.15 → 0.2.16
+- `update.md`：本汇总条目（下方保留各分条目原始记录）
+
 ## 2026-08-05：上下文复制到章节 + 回溯上下文同步注入
 
 ### 背景
