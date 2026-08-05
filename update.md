@@ -2,6 +2,66 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-08-05：上下文复制到章节 + 回溯上下文同步注入
+
+### 背景
+
+用户在小说续写工作流中提出两个增强需求：
+1. **复制上下文到章节**：在第 100 章提取上下文后，希望将结果复制到第 105 章复用，避免重复提取，且 source 描述应标明「复制自第100章」。
+2. **回溯上下文同步注入**：续写时若回溯窗口内某些章节已有提取结果，希望自动将最新一章的提取结果作为独立 system 消息注入提示词，便于跨章节上下文衔接；需提供开关供用户自定义开启或关闭。
+
+### 核心改动
+
+1. **功能 1：复制上下文到章节**
+   - **`novelforge/models/context.py`**：`ContextEntry` 新增 `copied_from: int | None = None` 字段，记录复制来源章节 index；非 None 时 UI source 描述显示「复制自第N章」前缀，None 时回退原 `source_chapter_range` 描述或「source=导入」。字段向后兼容（旧条目反序列化时默认 None）。
+   - **`novelforge/ui/context_preview_panel.py`**：
+     - 新增 `copy_to_chapter_requested = Signal()` 信号 + `_copy_to_chapter_btn` 按钮（"复制到章节"）+ `_on_copy_to_chapter_clicked` 槽（仅 emit 信号由 MainWindow 处理）
+     - 新增 `get_all_entries()` 方法返回全部条目（含禁用），与 `get_entries()`（仅启用）区分，复制时需含禁用条目保证完整迁移
+     - 条目元数据 source 描述拼接逻辑：`copied_from` 非 None 时优先显示「复制自第N章（原第X-Y章）」或「复制自第N章」，None 时回退「第X-Y章」或「导入」
+     - `_EntryEditorDialog.get_entry()` 透传 `copied_from` 字段，编辑时保留复制来源
+   - **`novelforge/ui/main_window.py`**（`_on_copy_context_to_chapter` 方法）：
+     - 信号接线 `context_panel.copy_to_chapter_requested.connect(self._on_copy_context_to_chapter)`
+     - `QInputDialog.getItem` 弹出章节列表选择对话框（排除当前章，按 index 排序展示「第N章 标题」）
+     - 空条目保护：当前章无上下文时调 `_on_toast_requested("当前章节无上下文条目可复制")` 并 return
+     - 每条 `model_copy(update={uid: generate_id("ctx_"), copied_from: source_index})` 生成新 uid 避免目标章冲突，保留原 `source_chapter_range`
+     - 目标章现有条目保留，复制条目追加在后（合并 = existing + copied）
+     - 加载目标章现有条目：内存 LRU `_context_entries_by_chapter` 优先，未命中同步查 SQLite（`load_cached_entries`，timeout=5）
+     - `save_edited_entries` 非阻塞持久化到目标章 cache_key（续写模式 `exclude_current=False`，`asyncio.run_coroutine_threadsafe` 提交到 `AsyncLoopRunner` 后台循环）
+     - 更新内存 LRU 含 `MAX_CONTEXT_CACHE_SIZE` 淘汰保护
+
+2. **功能 2：同步注入回溯上下文**
+   - **`novelforge/core/config.py`**：`DEFAULT_CONFIG["continuation"]["inject_lookback_context"] = False` 默认关闭
+   - **`novelforge/ui/continuation_panel.py`**：
+     - 新增 `_inject_lookback_context_check` QCheckBox「同步注入回溯上下文」，默认 False，tooltip 说明取数规则
+     - `get_parameters()` 返回 `inject_lookback_context` 布尔值
+     - `apply_parameters()` 从 params 恢复勾选状态
+   - **`novelforge/ui/main_window.py`**：
+     - `_get_latest_lookback_context(lookback, current_chapter) -> tuple[list, int] | None`：窗口计算镜像 `ContextExtractor._get_lookback_chapters` 但**排除当前章**（当前章条目已通过常规 `context_entries` 注入，避免重复）；lookback=0 取当前章前全部章节，lookback>0 取 `[current_idx - lookback + 1, current_idx)` 区间；按 index 降序遍历（最新章节优先），内存 LRU 优先、未命中同步查 SQLite，返回首个含 `enabled=True` 条目的章节 `(entries, chapter_index)`；窗口内无任何章有结果时返回 None
+     - 配置持久化：3 处读写 `continuation.inject_lookback_context`（`_apply_continuation_defaults` 加载 / `_on_start_continuation`+`_on_start_rewrite_analysis_accepted` 写入）
+     - 3 处 `prompt_assembler.assemble` 调用点（单章续写生成 L1969 / 续写预览 L3862 / 重写生成 L6155）均新增逻辑：`params.get("inject_lookback_context")` 为 True 时调 `_get_latest_lookback_context`，返回非 None 时传 `lookback_context_entries` + `lookback_context_source_index` 给 assemble
+   - **`novelforge/core/prompt_assembler.py`**：
+     - `assemble()` 新增 `lookback_context_entries: list[ContextEntry] | None = None` + `lookback_context_source_index: int | None = None` 参数
+     - 新增 `_build_lookback_context_message(entries, source_index) -> dict | None`：镜像 `_build_world_info_message` 的分组/Markdown 逻辑，但仅保留 `enabled` 且 position 为 before/after 且 content 非空的条目（at_depth 不纳入，before+after 合并统一注入为单条消息）；首行标题 `# 前章上下文参考（第N章提取）`（source_index 为 None 时用「前文」）；按 category 分组，组内按 order 升序，category 用 `_CATEGORY_LABELS` 中文标签；无条目时返回 None
+     - 注入位置优先级：worldInfoBefore marker 之后 > chatHistory marker 之前 > 兜底历史之前；`lookback_injected` 标记保证仅注入一次（front_prompts + back_prompts 多处 marker 均检查）
+
+### 测试
+
+- 新增 `tests/test_context_copy_to_chapter.py`（17 用例，5 测试类）：
+  - `TestCopiedFromField`（4 用例）：默认值/序列化往返/None 可省略
+  - `TestModelCopyForCopyFeature`（3 用例）：model_copy 生成新 uid+保留字段/保留禁用态/批量唯一 uid
+  - `TestGenerateId`（3 用例）：ctx_ 前缀/100 次唯一/非空 hex
+  - `TestSourceDescriptionLogic`（5 用例）：复制+原范围/仅复制/原范围/导入/copied_from 优先级
+  - `TestCopyMergeSemantics`（2 用例）：现有条目+复制追加合并/空目标章独立构成
+- 新增 `tests/test_lookback_context_injection.py`（20 用例，3 测试类）：
+  - `TestBuildLookbackContextMessage`（11 用例）：None/空/全禁用/全 at_depth/空 content 返回 None + 基本结构/默认标签/仅 before/order 排序/at_depth 过滤/禁用过滤
+  - `TestAssembleLookbackInjection`（8 用例）：无参数不注入/注入 after worldInfoBefore/与 worldInfoBefore 并存/无 worldInfoBefore 时注入 chatHistory 前/空列表不注入/全禁用不注入/system role/仅注入一次
+  - `TestLookbackAndCurrentCoexist`（1 用例）：当前章 before+after + 回溯消息三者并存
+- 全部 37 用例通过，无 Qt 依赖纯 Python 单元测试
+
+### 文档同步
+
+- `agent.md`：更新 L23（context.py 描述补 copied_from 字段）/ L33（prompt_assembler.py 描述补 lookback_context_entries 参数与 _build_lookback_context_message）/ L61（main_window.py 描述补 _on_copy_context_to_chapter + _get_latest_lookback_context + 3 处 assemble 注入点）/ L62（continuation_panel.py 描述补 inject_lookback_context_check）/ L64（context_preview_panel.py 描述补复制按钮与 source 拼接逻辑）；新增设计决策第 22 条「上下文复制到章节与回溯上下文同步注入」；测试要求章节新增功能 1/2 测试说明
+
 ## 2026-08-01：修复提取的上下文 24 小时后消失
 
 ### 背景

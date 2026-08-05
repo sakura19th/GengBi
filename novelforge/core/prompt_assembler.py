@@ -363,6 +363,8 @@ class PromptAssembler:
         style_profile: Any = None,
         custom_characters: Any = None,
         exclude_current: bool = False,
+        lookback_context_entries: list[ContextEntry] | None = None,
+        lookback_context_source_index: int | None = None,
     ) -> AssembleResult:
         """组装提示词 messages。
 
@@ -382,6 +384,11 @@ class PromptAssembler:
             lookback_chapters: 回溯章节数（0=全部前文，>0=仅取最近 N 章）
             skip_history: 跳过聊天历史构建（卷模式专用，True 时不注入任何章节正文到 chat history）
             exclude_current: 排除当前章节（重写模式专用，True 时聊天历史不含当前章节正文）
+            lookback_context_entries: 回溯窗口内最新一章的上下文条目（功能 2
+                「同步注入回溯上下文」开启时由 MainWindow 传入，作为独立 system
+                消息注入，与当前章 worldInfoBefore 分开）
+            lookback_context_source_index: 回溯上下文来源章节 index（用于消息标题
+                「前章上下文参考（第N章提取）」）
 
         Returns:
             AssembleResult 对象
@@ -517,17 +524,30 @@ class PromptAssembler:
         world_info_after_msg = self._build_world_info_message(
             context_entries, "after"
         )
+        # 回溯章节上下文（功能 2）：作为独立 system 消息注入
+        lookback_context_msg = self._build_lookback_context_message(
+            lookback_context_entries, lookback_context_source_index
+        )
 
         # ===== 组装最终 messages =====
         messages: list[dict[str, Any]] = []
+        lookback_injected = False
 
         for prompt in front_prompts:
             if prompt.marker == "worldInfoBefore":
                 if world_info_before_msg is not None:
                     messages.append(world_info_before_msg)
+                # 回溯上下文紧跟 worldInfoBefore 之后（独立 system 消息）
+                if not lookback_injected and lookback_context_msg is not None:
+                    messages.append(lookback_context_msg)
+                    lookback_injected = True
                 # 无条目时跳过 marker
                 continue
             if prompt.marker == "chatHistory":
+                # 无 worldInfoBefore marker 时，回溯上下文置于 chatHistory 之前
+                if not lookback_injected and lookback_context_msg is not None:
+                    messages.append(lookback_context_msg)
+                    lookback_injected = True
                 # chatHistory marker：插入历史 + 注入
                 messages.extend(final_history)
                 continue
@@ -545,8 +565,14 @@ class PromptAssembler:
             if prompt.marker == "worldInfoBefore":
                 if world_info_before_msg is not None:
                     messages.append(world_info_before_msg)
+                if not lookback_injected and lookback_context_msg is not None:
+                    messages.append(lookback_context_msg)
+                    lookback_injected = True
                 continue
             if prompt.marker == "chatHistory":
+                if not lookback_injected and lookback_context_msg is not None:
+                    messages.append(lookback_context_msg)
+                    lookback_injected = True
                 messages.extend(final_history)
                 continue
             if prompt.marker == "worldInfoAfter":
@@ -557,6 +583,11 @@ class PromptAssembler:
             content = self._process_content(prompt.content, macro_context, PLACEMENT_USER_INPUT, render_context)
             if content or prompt.system_prompt:
                 messages.append({"role": prompt.role, "content": content})
+
+        # 若无 worldInfoBefore 与 chatHistory marker，回溯上下文兜底注入到历史之前
+        if not lookback_injected and lookback_context_msg is not None:
+            messages.append(lookback_context_msg)
+            lookback_injected = True
 
         # 如果没有 chatHistory marker，仍需插入历史
         if not any(p.marker == "chatHistory" for p in front_prompts + back_prompts):
@@ -1289,6 +1320,58 @@ class PromptAssembler:
 
         # 构造 Markdown：首行标题，每 category 一段，每条列表项
         lines: list[str] = ["# 上下文条目（自动提取）"]
+        for category in sorted(grouped.keys()):
+            entries_in_group = sorted(grouped[category], key=lambda e: e.order)
+            label = _CATEGORY_LABELS.get(category, category)
+            lines.append(f"## {label}")
+            for entry in entries_in_group:
+                keys = f"（{','.join(entry.key)}）" if entry.key else ""
+                lines.append(f"- {entry.content}{keys}")
+
+        combined = "\n".join(lines)
+        return {"role": "system", "content": combined}
+
+    def _build_lookback_context_message(
+        self,
+        entries: list[ContextEntry] | None,
+        source_index: int | None,
+    ) -> dict[str, Any] | None:
+        """构建回溯章节上下文的独立 system 消息（功能 2）。
+
+        镜像 ``_build_world_info_message`` 的分组/Markdown 逻辑，但：
+        - 仅保留 ``enabled`` 且 position 为 before/after 且 content 非空的条目
+          （合并 before+after 两类，统一注入为单条消息）；
+        - 首行标题为 ``# 前章上下文参考（第N章提取）``，标明来源章节。
+
+        Args:
+            entries: 回溯章节的上下文条目
+            source_index: 来源章节 index（用于标题）
+
+        Returns:
+            消息字典，无条目时返回 None
+        """
+        if not entries:
+            return None
+        # 过滤启用条目（before + after 合并，at_depth 不纳入此消息）
+        filtered = [
+            e for e in entries
+            if e.enabled and e.position in ("before", "after") and e.content
+        ]
+        if not filtered:
+            return None
+
+        filtered.sort(key=lambda e: e.order)
+
+        # 按 category 分组，组内按 order 升序
+        grouped: dict[str, list[ContextEntry]] = {}
+        for entry in filtered:
+            category = entry.category or "other"
+            grouped.setdefault(category, []).append(entry)
+
+        source_label = (
+            f"第{source_index}章" if source_index is not None else "前文"
+        )
+        lines: list[str] = [f"# 前章上下文参考（{source_label}提取）"]
         for category in sorted(grouped.keys()):
             entries_in_group = sorted(grouped[category], key=lambda e: e.order)
             label = _CATEGORY_LABELS.get(category, category)

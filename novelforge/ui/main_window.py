@@ -551,6 +551,7 @@ class MainWindow(QMainWindow):
         context_panel.view_custom_character_requested.connect(self._on_view_custom_character_requested)
         context_panel.add_custom_rule_requested.connect(self._on_add_custom_rule_requested)
         context_panel.view_custom_rules_requested.connect(self._on_view_custom_rules_requested)
+        context_panel.copy_to_chapter_requested.connect(self._on_copy_context_to_chapter)
         context_panel.view_extract_prompt_requested.connect(
             self._on_view_extract_prompt
         )
@@ -1292,6 +1293,7 @@ class MainWindow(QMainWindow):
                 "temperature": cont.get("default_temperature", 0.8),
                 "target_words": cont.get("default_target_words", 2000),
                 "lookback_chapters": cont.get("default_lookback_chapters", 5),
+                "inject_lookback_context": cont.get("inject_lookback_context", False),
             })
             # 恢复持久化的每端点模型记忆，供 _on_endpoint_changed 读取
             mapping = self.config_manager.get_last_model_per_endpoint()
@@ -1862,6 +1864,7 @@ class MainWindow(QMainWindow):
             cont["default_temperature"] = params.get("temperature", 0.8)
             cont["default_target_words"] = params.get("target_words", 2000)
             cont["default_lookback_chapters"] = params.get("lookback_chapters", 5)
+            cont["inject_lookback_context"] = params.get("inject_lookback_context", False)
             self.config_manager.save()
         except Exception as e:
             logger.warning("保存续写参数失败: %s", e)
@@ -1954,6 +1957,15 @@ class MainWindow(QMainWindow):
             )
             lookback_chapters = params.get("lookback_chapters", 0)
             chapter_for_assemble = self._current_chapter
+            # 功能 2：同步注入回溯上下文（取窗口内最新一章结果）
+            lb_ctx_entries = None
+            lb_ctx_index = None
+            if params.get("inject_lookback_context"):
+                lb_ctx = self._get_latest_lookback_context(
+                    lookback_chapters, chapter_for_assemble
+                )
+                if lb_ctx is not None:
+                    lb_ctx_entries, lb_ctx_index = lb_ctx
             assemble_result = self.prompt_assembler.assemble(
                 preset=preset,
                 chapters=self._current_chapters,
@@ -1974,6 +1986,8 @@ class MainWindow(QMainWindow):
                 ),
                 custom_audit_rules=project.custom_audit_rules if project else None,
                 style_profile=project.style_profile if project else None,
+                lookback_context_entries=lb_ctx_entries,
+                lookback_context_source_index=lb_ctx_index,
             )
         except Exception as e:
             logger.error("提示词组装失败: %s", e, exc_info=True)
@@ -3347,6 +3361,114 @@ class MainWindow(QMainWindow):
 
         future.add_done_callback(_on_done)
 
+    def _on_copy_context_to_chapter(self) -> None:
+        """将当前章节的上下文条目复制到用户选择的目标章节（追加合并）。
+
+        复制时为每条生成新 uid 避免目标章内冲突，设 ``copied_from`` 为当前章
+        index，保留原 ``source_chapter_range``；目标章现有条目保留，复制条目
+        追加在后；持久化到目标章 cache_key（续写模式，无 ``:rewrite`` 后缀）。
+        """
+        from PySide6.QtWidgets import QInputDialog
+
+        if not self._current_chapter or not self._current_project_id:
+            return
+        context_panel = self.continuation_panel.context_preview_panel
+        source_entries = context_panel.get_all_entries()
+        if not source_entries:
+            self._on_toast_requested("当前章节无上下文条目可复制")
+            return
+
+        # 构建可选章节列表（排除当前章）
+        chapters = sorted(self._current_chapters, key=lambda c: c.index)
+        candidates = [c for c in chapters if c.id != self._current_chapter.id]
+        if not candidates:
+            self._on_toast_requested("没有可选的目标章节")
+            return
+        items = [
+            f"第{c.index}章 {c.title or ''}".strip() for c in candidates
+        ]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "复制到章节",
+            f"将当前章节（第{self._current_chapter.index}章）的 {len(source_entries)} 条上下文复制到：",
+            items,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        target_idx = items.index(choice)
+        target_chapter = candidates[target_idx]
+
+        # 构造复制条目：新 uid + copied_from + 保留原 source_chapter_range
+        from novelforge.utils.ids import generate_id
+
+        source_index = self._current_chapter.index
+        copied_entries: list = []
+        for e in source_entries:
+            copied_entries.append(
+                e.model_copy(update={
+                    "uid": generate_id("ctx_"),
+                    "copied_from": source_index,
+                })
+            )
+
+        # 加载目标章现有条目（优先内存 LRU，未命中同步查 SQLite）
+        existing: list = []
+        cached = self._context_entries_by_chapter.get(target_chapter.id)
+        if cached is not None:
+            existing = list(cached)
+        elif self._current_project_id:
+            try:
+                from novelforge.services.async_runner import AsyncLoopRunner
+
+                runner = AsyncLoopRunner.instance()
+                cached_data = runner.run(
+                    self.context_extractor.load_cached_entries(
+                        self._current_project_id, target_chapter.id
+                    ),
+                    timeout=5,
+                )
+                if cached_data is not None:
+                    existing = list(cached_data.get("entries", []))
+            except Exception as e:
+                logger.warning("加载目标章缓存条目失败: %s", e)
+
+        merged = existing + copied_entries
+
+        # 持久化到目标章（续写模式 cache_key，exclude_current=False）
+        from novelforge.services.async_runner import AsyncLoopRunner
+
+        runner = AsyncLoopRunner.instance()
+        loop = runner._loop
+        future = asyncio.run_coroutine_threadsafe(
+            self.context_extractor.save_edited_entries(
+                project_id=self._current_project_id,
+                chapter_id=target_chapter.id,
+                entries=merged,
+                exclude_current=False,
+            ),
+            loop,
+        )
+
+        def _on_copy_done(fut: "asyncio.Future") -> None:
+            try:
+                fut.result()
+            except Exception as e:
+                logger.warning("复制上下文到章节持久化失败: %s", e)
+
+        future.add_done_callback(_on_copy_done)
+
+        # 更新内存 LRU（含容量上限淘汰保护）
+        self._context_entries_by_chapter[target_chapter.id] = merged
+        if len(self._context_entries_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+            oldest = next(iter(self._context_entries_by_chapter))
+            del self._context_entries_by_chapter[oldest]
+
+        self._on_toast_requested(
+            f"已复制 {len(copied_entries)} 条到第{target_chapter.index}章"
+        )
+
     def _ensure_chapter_contents(self) -> None:
         """确保 _current_chapters 中所有章节的 content 已加载。
 
@@ -3361,6 +3483,70 @@ class MainWindow(QMainWindow):
         self._current_chapters = self.storage_service.load_chapter_contents(
             self._current_chapters
         )
+
+    def _get_latest_lookback_context(
+        self, lookback: int, current_chapter
+    ) -> tuple[list, int] | None:
+        """取回溯窗口内最新一章的有非空提取结果的上下文条目（功能 2）。
+
+        窗口计算镜像 ``ContextExtractor._get_lookback_chapters``，但排除当前章
+        （当前章条目已通过常规 ``context_entries`` 注入）。从窗口内按 index 降序
+        遍历，内存 LRU 优先、未命中同步查 SQLite，返回首个含启用条目的章节。
+
+        Args:
+            lookback: 回溯章节数（0=全部前文）
+            current_chapter: 当前续写章节（续写/预览为当前章，重写为待重写章）
+
+        Returns:
+            ``(entries, chapter_index)`` 或 None（窗口内无任何章有结果）
+        """
+        if not current_chapter or not self._current_project_id:
+            return None
+        chapters = sorted(self._current_chapters, key=lambda c: c.index)
+        current_idx = -1
+        for i, c in enumerate(chapters):
+            if c.id == current_chapter.id:
+                current_idx = i
+                break
+        if current_idx <= 0:
+            return None  # 当前章之前无章节
+        # 计算候选窗口（当前章之前的章节，排除当前章）
+        if lookback <= 0:
+            start = 0
+        else:
+            start = max(0, current_idx - lookback + 1)
+        candidates = chapters[start:current_idx]
+        if not candidates:
+            return None
+
+        from novelforge.services.async_runner import AsyncLoopRunner
+
+        runner = AsyncLoopRunner.instance()
+        # 按 index 降序（最新章节优先）
+        for ch in reversed(candidates):
+            entries = self._context_entries_by_chapter.get(ch.id)
+            if entries is None:
+                try:
+                    cached_data = runner.run(
+                        self.context_extractor.load_cached_entries(
+                            self._current_project_id, ch.id
+                        ),
+                        timeout=5,
+                    )
+                    if cached_data is not None:
+                        entries = cached_data.get("entries", [])
+                        self._context_entries_by_chapter[ch.id] = entries
+                        if len(self._context_entries_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+                            oldest = next(iter(self._context_entries_by_chapter))
+                            del self._context_entries_by_chapter[oldest]
+                    else:
+                        entries = []
+                except Exception as e:
+                    logger.warning("回溯上下文查询失败 (章节 %s): %s", ch.id, e)
+                    entries = []
+            if entries and any(e.enabled for e in entries):
+                return (entries, ch.index)
+        return None
 
     def _on_force_refresh_context(self) -> None:
         """F5 强制重新提取上下文（非阻塞）。
@@ -3664,6 +3850,15 @@ class MainWindow(QMainWindow):
         try:
             user_input = self.continuation_panel.get_user_input()
             lookback_chapters = params.get("lookback_chapters", 0)
+            # 功能 2：同步注入回溯上下文（预览需与生成一致）
+            lb_ctx_entries = None
+            lb_ctx_index = None
+            if params.get("inject_lookback_context"):
+                lb_ctx = self._get_latest_lookback_context(
+                    lookback_chapters, self._current_chapter
+                )
+                if lb_ctx is not None:
+                    lb_ctx_entries, lb_ctx_index = lb_ctx
             assemble_result = self.prompt_assembler.assemble(
                 preset=preset,
                 chapters=self._current_chapters,
@@ -3684,6 +3879,8 @@ class MainWindow(QMainWindow):
                 ),
                 custom_audit_rules=project.custom_audit_rules if project else None,
                 style_profile=project.style_profile if project else None,
+                lookback_context_entries=lb_ctx_entries,
+                lookback_context_source_index=lb_ctx_index,
             )
         except Exception as e:
             logger.error("提示词组装失败: %s", e, exc_info=True)
@@ -5668,6 +5865,7 @@ class MainWindow(QMainWindow):
             cont["default_temperature"] = params.get("temperature", 0.8)
             cont["default_target_words"] = params.get("target_words", 2000)
             cont["default_lookback_chapters"] = params.get("lookback_chapters", 5)
+            cont["inject_lookback_context"] = params.get("inject_lookback_context", False)
             self.config_manager.save()
         except Exception as e:
             logger.warning("保存续写参数失败: %s", e)
@@ -5944,6 +6142,16 @@ class MainWindow(QMainWindow):
 
         # 调用 PromptAssembler.assemble（exclude_current=True 让历史不含当前章节）
         try:
+            # 功能 2：同步注入回溯上下文（取待重写章之前窗口的最新结果）
+            rewrite_lookback = params.get("lookback_chapters", 0)
+            lb_ctx_entries = None
+            lb_ctx_index = None
+            if params.get("inject_lookback_context"):
+                lb_ctx = self._get_latest_lookback_context(
+                    rewrite_lookback, origin_chapter
+                )
+                if lb_ctx is not None:
+                    lb_ctx_entries, lb_ctx_index = lb_ctx
             assemble_result = self.prompt_assembler.assemble(
                 preset=preset,
                 chapters=self._current_chapters,
@@ -5957,13 +6165,15 @@ class MainWindow(QMainWindow):
                 project_id=self._current_project_id or "",
                 chapter_metadata=chapter_metadata,
                 user_input=analysis_text,
-                lookback_chapters=params.get("lookback_chapters", 0),
+                lookback_chapters=rewrite_lookback,
                 world_ontology=project.world_ontology if project else None,
                 protagonist_profile=self._protagonist_profile_by_chapter.get(rewrite_cid),
                 custom_audit_rules=project.custom_audit_rules if project else None,
                 style_profile=project.style_profile if project else None,
                 custom_characters=self._custom_characters_by_chapter.get(rewrite_cid),
                 exclude_current=True,
+                lookback_context_entries=lb_ctx_entries,
+                lookback_context_source_index=lb_ctx_index,
             )
         except Exception as e:
             logger.error("重写生成提示词组装失败: %s", e, exc_info=True)

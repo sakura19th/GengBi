@@ -43,6 +43,8 @@ class ContextEntry(BaseModel):
       导入 ST 世界书时由 ``disable`` 字段反序列化（disable=True → enabled=False）
     - ``source_chapter_range``：提取来源章节区间（闭区间，如 (0, 4)）；
       导入 ST 世界书时为 None
+    - ``copied_from``：复制来源章节 index（由「复制到章节」功能写入）；
+      非 None 表示该条目是从第 N 章复制而来，UI 显示 source=复制自第N章
     - ``extracted_at``：提取时间
     - ``_raw_st_fields``：未识别字段
 
@@ -62,6 +64,7 @@ class ContextEntry(BaseModel):
     role: str = "system"
     enabled: bool = True
     source_chapter_range: tuple[int, int] | None = None
+    copied_from: int | None = None
     extracted_at: datetime | None = None
     raw_st_fields: dict = Field(default_factory=dict, alias="_raw_st_fields")
 

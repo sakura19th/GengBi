@@ -232,6 +232,16 @@ class ContinuationPanel(QWidget):
         self._lookback_spin.setSizePolicy(_spin_policy)
         config_form.addRow("回溯章节数:", self._lookback_spin)
 
+        # 同步注入回溯上下文开关：开启后续写时从回溯窗口内取最近一次有提取
+        # 结果的章节，将其上下文以独立 system 消息注入提示词
+        self._inject_lookback_context_check = QCheckBox("同步注入回溯上下文")
+        self._inject_lookback_context_check.setChecked(False)
+        self._inject_lookback_context_check.setToolTip(
+            "开启后，续写时从回溯窗口内取最近一次有提取结果的章节，"
+            "将其上下文以独立消息注入提示词（仅取最新一章）"
+        )
+        config_form.addRow(self._inject_lookback_context_check)
+
         # 世界书选择（全局加载，与预设并列）
         self._worldbook_panel = WorldBookPanel()
         config_form.addRow(self._worldbook_panel)
@@ -623,6 +633,7 @@ class ContinuationPanel(QWidget):
             "temperature": self._temp_spin.value(),
             "target_words": self._target_words_spin.value(),
             "lookback_chapters": self._lookback_spin.value(),
+            "inject_lookback_context": self._inject_lookback_context_check.isChecked(),
             "preset_id": self.get_selected_preset_id(),
             "top_p": 1.0,
             "frequency_penalty": 0.0,
@@ -637,6 +648,10 @@ class ContinuationPanel(QWidget):
             self._target_words_spin.setValue(int(params["target_words"]))
         if "lookback_chapters" in params:
             self._lookback_spin.setValue(params["lookback_chapters"])
+        if "inject_lookback_context" in params:
+            self._inject_lookback_context_check.setChecked(
+                bool(params["inject_lookback_context"])
+            )
 
     # ===== 流式输出控制 =====
 

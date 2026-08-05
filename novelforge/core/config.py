@@ -109,6 +109,7 @@ def get_default_config() -> dict[str, Any]:
             "auto_save": True,
             "show_token_count": True,
             "selected_worldbook_ids": [],
+            "inject_lookback_context": False,
         },
         "volume": {},
         "context_extract": {

@@ -165,6 +165,7 @@ class _EntryEditorDialog(QDialog):
             role=self._role_edit.text() or self._entry.role,
             enabled=self._entry.enabled,
             source_chapter_range=self._entry.source_chapter_range,
+            copied_from=self._entry.copied_from,
             extracted_at=self._entry.extracted_at,
             raw_st_fields=dict(self._entry.raw_st_fields),
         )
@@ -249,6 +250,7 @@ class _AddEntryDialog(QDialog):
             depth=self._depth_spin.value(),
             role=self._role_combo.currentData(),
             source_chapter_range=None,
+            copied_from=None,
             extracted_at=None,
         )
 
@@ -285,6 +287,7 @@ class ContextPreviewPanel(QWidget):
     view_style_requested = Signal()
     add_custom_rule_requested = Signal()
     view_custom_rules_requested = Signal()
+    copy_to_chapter_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """初始化预览面板。"""
@@ -497,6 +500,10 @@ class ContextPreviewPanel(QWidget):
         self._view_prompt_btn = QPushButton("查看提示词")
         self._view_prompt_btn.clicked.connect(self._on_view_prompt_clicked)
         btn_layout.addWidget(self._view_prompt_btn)
+
+        self._copy_to_chapter_btn = QPushButton("复制到章节")
+        self._copy_to_chapter_btn.clicked.connect(self._on_copy_to_chapter_clicked)
+        btn_layout.addWidget(self._copy_to_chapter_btn)
 
         layout.addLayout(btn_layout)
 
@@ -807,7 +814,15 @@ class ContextPreviewPanel(QWidget):
             meta_parts.append(f"depth={entry.depth}")
         meta_parts.append(f"order={entry.order}")
         meta_parts.append(f"role={entry.role}")
-        if entry.source_chapter_range is not None:
+        if entry.copied_from is not None:
+            if entry.source_chapter_range is not None:
+                meta_parts.append(
+                    f"source=复制自第{entry.copied_from}章"
+                    f"（原第{entry.source_chapter_range[0]}-{entry.source_chapter_range[1]}章）"
+                )
+            else:
+                meta_parts.append(f"source=复制自第{entry.copied_from}章")
+        elif entry.source_chapter_range is not None:
             meta_parts.append(
                 f"source=第{entry.source_chapter_range[0]}-{entry.source_chapter_range[1]}章"
             )
@@ -937,6 +952,14 @@ class ContextPreviewPanel(QWidget):
     def _on_view_prompt_clicked(self) -> None:
         """查看提示词按钮点击。"""
         self.view_extract_prompt_requested.emit()
+
+    def _on_copy_to_chapter_clicked(self) -> None:
+        """复制到章节按钮点击。
+
+        发射 ``copy_to_chapter_requested`` 信号由 MainWindow 处理目标章节选择、
+        空条目保护与持久化。
+        """
+        self.copy_to_chapter_requested.emit()
 
     def get_lookback_config(self) -> dict:
         """获取前文章节配置与 token 限制。
