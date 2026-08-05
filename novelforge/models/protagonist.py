@@ -71,3 +71,4 @@ class ProtagonistProfile(BaseModel):
     # 提取元数据
     extracted_at: datetime | None = None
     source_chapter_range: tuple[int, int] | None = None  # 提取来源章节区间（闭区间）
+    copied_from: int | None = None  # 复制来源章节 index（None=原章提取，非 None=复制自第N章）

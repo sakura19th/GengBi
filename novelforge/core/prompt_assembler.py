@@ -365,6 +365,10 @@ class PromptAssembler:
         exclude_current: bool = False,
         lookback_context_entries: list[ContextEntry] | None = None,
         lookback_context_source_index: int | None = None,
+        lookback_protagonist_profile: Any = None,
+        lookback_protagonist_source_index: int | None = None,
+        lookback_custom_characters: Any = None,
+        lookback_custom_characters_source_index: int | None = None,
     ) -> AssembleResult:
         """组装提示词 messages。
 
@@ -389,6 +393,16 @@ class PromptAssembler:
                 消息注入，与当前章 worldInfoBefore 分开）
             lookback_context_source_index: 回溯上下文来源章节 index（用于消息标题
                 「前章上下文参考（第N章提取）」）
+            lookback_protagonist_profile: 回溯窗口内最新一章的主角形象档案（
+                「同步注入回溯主角形象」开启时由 MainWindow 传入，作为独立 system
+                消息注入，与当前章 {{protagonist_profile}} 宏分开）
+            lookback_protagonist_source_index: 回溯主角形象来源章节 index（用于
+                消息标题「前章主角形象参考（第N章提取）」）
+            lookback_custom_characters: 回溯窗口内最新一章的自定义角色档案 dict
+                （「同步注入回溯自定义角色」开启时由 MainWindow 传入，作为独立
+                system 消息注入，与当前章 {{custom_characters}} 宏分开）
+            lookback_custom_characters_source_index: 回溯自定义角色来源章节 index
+                （用于消息标题「前章自定义角色参考（第N章提取）」）
 
         Returns:
             AssembleResult 对象
@@ -528,6 +542,21 @@ class PromptAssembler:
         lookback_context_msg = self._build_lookback_context_message(
             lookback_context_entries, lookback_context_source_index
         )
+        # 回溯主角形象与自定义角色档案（独立 system 消息，注入顺序紧跟上下文之后）
+        lookback_protagonist_msg = self._build_lookback_protagonist_message(
+            lookback_protagonist_profile, lookback_protagonist_source_index
+        )
+        lookback_custom_characters_msg = self._build_lookback_custom_characters_message(
+            lookback_custom_characters, lookback_custom_characters_source_index
+        )
+        # 按固定顺序聚合所有回溯消息，统一在首个可用注入点一次性注入
+        lookback_msgs: list[dict[str, Any]] = [
+            m for m in (
+                lookback_context_msg,
+                lookback_protagonist_msg,
+                lookback_custom_characters_msg,
+            ) if m is not None
+        ]
 
         # ===== 组装最终 messages =====
         messages: list[dict[str, Any]] = []
@@ -537,16 +566,16 @@ class PromptAssembler:
             if prompt.marker == "worldInfoBefore":
                 if world_info_before_msg is not None:
                     messages.append(world_info_before_msg)
-                # 回溯上下文紧跟 worldInfoBefore 之后（独立 system 消息）
-                if not lookback_injected and lookback_context_msg is not None:
-                    messages.append(lookback_context_msg)
+                # 回溯消息紧跟 worldInfoBefore 之后（独立 system 消息）
+                if not lookback_injected and lookback_msgs:
+                    messages.extend(lookback_msgs)
                     lookback_injected = True
                 # 无条目时跳过 marker
                 continue
             if prompt.marker == "chatHistory":
-                # 无 worldInfoBefore marker 时，回溯上下文置于 chatHistory 之前
-                if not lookback_injected and lookback_context_msg is not None:
-                    messages.append(lookback_context_msg)
+                # 无 worldInfoBefore marker 时，回溯消息置于 chatHistory 之前
+                if not lookback_injected and lookback_msgs:
+                    messages.extend(lookback_msgs)
                     lookback_injected = True
                 # chatHistory marker：插入历史 + 注入
                 messages.extend(final_history)
@@ -565,13 +594,13 @@ class PromptAssembler:
             if prompt.marker == "worldInfoBefore":
                 if world_info_before_msg is not None:
                     messages.append(world_info_before_msg)
-                if not lookback_injected and lookback_context_msg is not None:
-                    messages.append(lookback_context_msg)
+                if not lookback_injected and lookback_msgs:
+                    messages.extend(lookback_msgs)
                     lookback_injected = True
                 continue
             if prompt.marker == "chatHistory":
-                if not lookback_injected and lookback_context_msg is not None:
-                    messages.append(lookback_context_msg)
+                if not lookback_injected and lookback_msgs:
+                    messages.extend(lookback_msgs)
                     lookback_injected = True
                 messages.extend(final_history)
                 continue
@@ -584,9 +613,9 @@ class PromptAssembler:
             if content or prompt.system_prompt:
                 messages.append({"role": prompt.role, "content": content})
 
-        # 若无 worldInfoBefore 与 chatHistory marker，回溯上下文兜底注入到历史之前
-        if not lookback_injected and lookback_context_msg is not None:
-            messages.append(lookback_context_msg)
+        # 若无 worldInfoBefore 与 chatHistory marker，回溯消息兜底注入到历史之前
+        if not lookback_injected and lookback_msgs:
+            messages.extend(lookback_msgs)
             lookback_injected = True
 
         # 如果没有 chatHistory marker，仍需插入历史
@@ -1382,3 +1411,65 @@ class PromptAssembler:
 
         combined = "\n".join(lines)
         return {"role": "system", "content": combined}
+
+    def _build_lookback_protagonist_message(
+        self,
+        profile: Any,
+        source_index: int | None,
+    ) -> dict[str, Any] | None:
+        """构建回溯章节主角形象的独立 system 消息。
+
+        镜像 ``_build_lookback_context_message``，将回溯窗口内最新一章提取的
+        主角形象档案序列化为独立 system 消息，与当前章 ``{{protagonist_profile}}``
+        宏注入分开，明确区分「当前章主角形象」与「前章主角形象参考」。
+
+        Args:
+            profile: 回溯章节的主角形象档案（ProtagonistProfile）
+            source_index: 来源章节 index（用于标题）
+
+        Returns:
+            消息字典，None/空档案时返回 None
+        """
+        if profile is None:
+            return None
+        source_label = (
+            f"第{source_index}章" if source_index is not None else "前文"
+        )
+        # 复用 _serialize_profile_or_placeholder 序列化 8 维度 JSON
+        body = self._serialize_profile_or_placeholder(
+            profile, "（无主角形象档案）"
+        )
+        if not body or body == "（无主角形象档案）":
+            return None
+        content = f"# 前章主角形象参考（{source_label}提取）\n\n{body}"
+        return {"role": "system", "content": content}
+
+    def _build_lookback_custom_characters_message(
+        self,
+        characters: Any,
+        source_index: int | None,
+    ) -> dict[str, Any] | None:
+        """构建回溯章节自定义角色档案的独立 system 消息。
+
+        镜像 ``_build_lookback_protagonist_message``，将回溯窗口内最新一章
+        提取的全部自定义角色档案序列化为独立 system 消息，与当前章
+        ``{{custom_characters}}`` 宏注入分开。
+
+        Args:
+            characters: 回溯章节的自定义角色 dict（角色名 → ProtagonistProfile）
+            source_index: 来源章节 index（用于标题）
+
+        Returns:
+            消息字典，None/空 dict 时返回 None
+        """
+        if not characters:
+            return None
+        source_label = (
+            f"第{source_index}章" if source_index is not None else "前文"
+        )
+        # 复用 _serialize_custom_characters_or_placeholder 序列化多角色分节
+        body = self._serialize_custom_characters_or_placeholder(characters)
+        if not body or body == "（无自定义角色档案）":
+            return None
+        content = f"# 前章自定义角色参考（{source_label}提取）\n\n{body}"
+        return {"role": "system", "content": content}

@@ -110,6 +110,8 @@ def get_default_config() -> dict[str, Any]:
             "show_token_count": True,
             "selected_worldbook_ids": [],
             "inject_lookback_context": False,
+            "inject_lookback_protagonist": False,
+            "inject_lookback_custom_characters": False,
         },
         "volume": {},
         "context_extract": {

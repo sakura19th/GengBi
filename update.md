@@ -2,6 +2,55 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-08-05：主角形象/自定义角色形象的复制到章节与前文回溯注入
+
+### 背景
+
+v0.2.16 已为「上下文条目」实现两个增强功能：①复制到章节（追加合并 + source 描述标明复制来源）②续写时同步注入回溯窗口最新一章提取结果作为独立 system 消息。本次将这两个机制**镜像拓展**到「主角形象」与「自定义角色形象」两类档案，使三类提取产物具备一致的复用与跨章节衔接能力。
+
+### 核心改动
+
+1. **功能 1：复制主角形象/自定义角色到章节**
+   - **`novelforge/models/protagonist.py`**：`ProtagonistProfile` 新增 `copied_from: int | None = None` 字段，记录复制来源章节 index；None=原章提取，非 None=复制自第N章。字段向后兼容（旧档案反序列化时默认 None）。
+   - **`novelforge/ui/context_preview_panel.py`**：
+     - 新增 `copy_protagonist_to_chapter_requested = Signal()` + `_copy_protagonist_to_chapter_btn` 按钮（"复制主角形象到章节"）+ `_on_copy_protagonist_to_chapter_clicked` 槽
+     - 新增 `copy_custom_character_to_chapter_requested = Signal()` + `_copy_custom_character_to_chapter_btn` 按钮（"复制自定义角色到章节"）+ `_on_copy_custom_character_to_chapter_clicked` 槽
+   - **`novelforge/ui/main_window.py`**：
+     - `_on_copy_protagonist_to_chapter`：取当前章主角档案；空则 toast 提示；`QInputDialog.getItem` 选目标章（排除当前章，按 index 排序）；目标章已有档案时弹确认覆盖对话框；`source_profile.model_copy(update={"copied_from": source_index}, deep=True)` 深拷贝避免内存 LRU 中源/目标档案耦合；`update_chapter_protagonist` 单列持久化；更新内存 LRU `_protagonist_profile_by_chapter` 含 `MAX_CONTEXT_CACHE_SIZE` 淘汰保护
+     - `_on_copy_custom_character_to_chapter`：取当前章 `custom_characters` dict；空则 toast 提示；`QInputDialog.getItem` 选要复制的角色名（按字母排序）；选目标章；目标章已有同名角色时弹确认覆盖；`model_copy(update={"copied_from": source_index}, deep=True)` 深拷贝；合并语义仅覆盖该角色其他角色保留（`merged = dict(target_chars); merged[name] = copied`）；`update_chapter_custom_characters` 单列持久化；更新内存 LRU `_custom_characters_by_chapter`
+     - 信号接线：`copy_protagonist_to_chapter_requested`/`copy_custom_character_to_chapter_requested` 连接对应 handler
+
+2. **功能 2：同步注入回溯主角形象/自定义角色**
+   - **`novelforge/core/config.py`**：`DEFAULT_CONFIG["continuation"]` 新增 `inject_lookback_protagonist: False` + `inject_lookback_custom_characters: False` 默认关闭
+   - **`novelforge/ui/continuation_panel.py`**：
+     - 新增 `_inject_lookback_protagonist_check` QCheckBox「同步注入回溯主角形象」，默认 False
+     - 新增 `_inject_lookback_custom_characters_check` QCheckBox「同步注入回溯自定义角色」，默认 False
+     - `get_parameters()` 返回两个布尔值；`set_parameters()` 从 params 恢复勾选状态
+   - **`novelforge/ui/main_window.py`**：
+     - `_get_latest_lookback_protagonist(lookback, current_chapter) -> tuple[ProtagonistProfile, int] | None`：窗口计算镜像 `_get_latest_lookback_context`（排除当前章），按 index 降序遍历，内存 LRU `_protagonist_profile_by_chapter` 优先、未命中同步查 SQLite（`load_chapter` 取 `protagonist_profile` 列），返回首个有档案章节 `(profile, chapter_index)`
+     - `_get_latest_lookback_custom_characters(lookback, current_chapter) -> tuple[dict, int] | None`：镜像逻辑取 `custom_characters` dict，返回首个有档案章节 `(dict, chapter_index)`
+     - 3 处 `prompt_assembler.assemble` 调用点（单章续写生成/续写预览/重写生成）均扩展：`params.get("inject_lookback_protagonist")` 为 True 时调 `_get_latest_lookback_protagonist`；`params.get("inject_lookback_custom_characters")` 为 True 时调 `_get_latest_lookback_custom_characters`；返回非 None 时传 `lookback_protagonist_profile`/`lookback_protagonist_source_index`/`lookback_custom_characters`/`lookback_custom_characters_source_index` 给 assemble
+   - **`novelforge/core/prompt_assembler.py`**：
+     - `assemble()` 新增 4 个参数：`lookback_protagonist_profile`/`lookback_protagonist_source_index`/`lookback_custom_characters`/`lookback_custom_characters_source_index`
+     - 新增 `_build_lookback_protagonist_message(profile, source_index) -> dict | None`：profile 为 None 返回 None；复用 `_serialize_profile_or_placeholder` 序列化为 JSON 文本，占位文本「（无主角形象档案）」时返回 None；标题 `# 前章主角形象参考（第N章提取）`（source_index 为 None 时用「前文」）
+     - 新增 `_build_lookback_custom_characters_message(characters, source_index) -> dict | None`：镜像主角版，空 dict 返回 None；复用 `_serialize_custom_characters_or_placeholder` 序列化（按角色名分节 `【角色：N】`）；标题 `# 前章自定义角色参考（第N章提取）`
+     - 注入逻辑：三类回溯消息 `lookback_context_msg`/`lookback_protagonist_msg`/`lookback_custom_characters_msg` 按序组装为 `lookback_msgs` 列表（**上下文 → 主角 → 自定义角色**顺序），统一注入到 worldInfoBefore marker 之后（或 chatHistory 之前/兜底历史之前）；`lookback_injected` 标记保证三类消息整体仅注入一次
+
+### 测试
+
+- 新增 `tests/test_protagonist_custom_character_copy_and_lookback.py`（20 用例，4 测试类）：
+  - `TestProtagonistProfileCopiedFrom`（4）：copied_from 默认值/序列化往返/model_copy(deep=True) 保留+更新/旧数据兼容
+  - `TestBuildLookbackProtagonistMessage`（3）：None 返回 None/有效档案返回消息/source_index=None 用「前文」
+  - `TestBuildLookbackCustomCharactersMessage`（4）：None 返回 None/空 dict 返回 None/有效 dict 多角色分节/source_index=None 用「前文」
+  - `TestAssembleLookbackInjection`（6）：三类全 None 无注入/仅主角注入/仅自定义角色注入/三类并存顺序（上下文<主角<自定义角色）/仅注入一次/worldInfoBefore 之后
+  - `TestCopyMergeSemantics`（3）：主角 model_copy(deep=True) 独立/自定义角色合并保留其他角色/同名覆盖
+- 全部 57 用例（含既有 `test_lookback_context_injection.py` 20 + `test_context_copy_to_chapter.py` 17 + 新增 20）通过，无回归
+
+### 文档同步
+
+- `agent.md`：`models/protagonist.py` 描述新增 `copied_from`；`core/prompt_assembler.py` 描述新增回溯主角/自定义角色消息构建；`ui/context_preview_panel.py` 新增两个复制按钮与信号；`ui/continuation_panel.py` 新增两个回溯注入复选框；`ui/main_window.py` 新增 4 个 handler/取数方法 + 3 处 assemble 扩展；`core/config.py` 默认配置新增两个开关；新增关键设计决策第 23 条「主角形象/自定义角色形象的复制与回溯注入」；第 22 条补充三类回溯消息统一注入说明
+- `update.md`：本条目
+
 ## 2026-08-05：v0.2.16 发版——上下文复制/回溯注入 + 网络代理修复 + 缓存过期修复
 
 ### 背景

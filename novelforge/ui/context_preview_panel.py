@@ -288,6 +288,8 @@ class ContextPreviewPanel(QWidget):
     add_custom_rule_requested = Signal()
     view_custom_rules_requested = Signal()
     copy_to_chapter_requested = Signal()
+    copy_protagonist_to_chapter_requested = Signal()
+    copy_custom_character_to_chapter_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """初始化预览面板。"""
@@ -504,6 +506,24 @@ class ContextPreviewPanel(QWidget):
         self._copy_to_chapter_btn = QPushButton("复制到章节")
         self._copy_to_chapter_btn.clicked.connect(self._on_copy_to_chapter_clicked)
         btn_layout.addWidget(self._copy_to_chapter_btn)
+
+        self._copy_protagonist_to_chapter_btn = QPushButton("复制主角形象到章节")
+        self._copy_protagonist_to_chapter_btn.setToolTip(
+            "将当前章节已提取的主角形象复制到其他章节（覆盖目标章已有档案）"
+        )
+        self._copy_protagonist_to_chapter_btn.clicked.connect(
+            self._on_copy_protagonist_to_chapter_clicked
+        )
+        btn_layout.addWidget(self._copy_protagonist_to_chapter_btn)
+
+        self._copy_custom_character_to_chapter_btn = QPushButton("复制自定义角色到章节")
+        self._copy_custom_character_to_chapter_btn.setToolTip(
+            "选择一个自定义角色，复制到其他章节（目标章同名覆盖、其他角色保留）"
+        )
+        self._copy_custom_character_to_chapter_btn.clicked.connect(
+            self._on_copy_custom_character_to_chapter_clicked
+        )
+        btn_layout.addWidget(self._copy_custom_character_to_chapter_btn)
 
         layout.addLayout(btn_layout)
 
@@ -960,6 +980,22 @@ class ContextPreviewPanel(QWidget):
         空条目保护与持久化。
         """
         self.copy_to_chapter_requested.emit()
+
+    def _on_copy_protagonist_to_chapter_clicked(self) -> None:
+        """复制主角形象到章节按钮点击。
+
+        发射 ``copy_protagonist_to_chapter_requested`` 信号由 MainWindow 处理
+        目标章节选择、空档案保护、覆盖确认与持久化。
+        """
+        self.copy_protagonist_to_chapter_requested.emit()
+
+    def _on_copy_custom_character_to_chapter_clicked(self) -> None:
+        """复制自定义角色到章节按钮点击。
+
+        发射 ``copy_custom_character_to_chapter_requested`` 信号由 MainWindow
+        处理角色名选择、目标章节选择、覆盖确认与持久化。
+        """
+        self.copy_custom_character_to_chapter_requested.emit()
 
     def get_lookback_config(self) -> dict:
         """获取前文章节配置与 token 限制。

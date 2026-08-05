@@ -552,6 +552,12 @@ class MainWindow(QMainWindow):
         context_panel.add_custom_rule_requested.connect(self._on_add_custom_rule_requested)
         context_panel.view_custom_rules_requested.connect(self._on_view_custom_rules_requested)
         context_panel.copy_to_chapter_requested.connect(self._on_copy_context_to_chapter)
+        context_panel.copy_protagonist_to_chapter_requested.connect(
+            self._on_copy_protagonist_to_chapter
+        )
+        context_panel.copy_custom_character_to_chapter_requested.connect(
+            self._on_copy_custom_character_to_chapter
+        )
         context_panel.view_extract_prompt_requested.connect(
             self._on_view_extract_prompt
         )
@@ -1294,6 +1300,8 @@ class MainWindow(QMainWindow):
                 "target_words": cont.get("default_target_words", 2000),
                 "lookback_chapters": cont.get("default_lookback_chapters", 5),
                 "inject_lookback_context": cont.get("inject_lookback_context", False),
+                "inject_lookback_protagonist": cont.get("inject_lookback_protagonist", False),
+                "inject_lookback_custom_characters": cont.get("inject_lookback_custom_characters", False),
             })
             # 恢复持久化的每端点模型记忆，供 _on_endpoint_changed 读取
             mapping = self.config_manager.get_last_model_per_endpoint()
@@ -1865,6 +1873,8 @@ class MainWindow(QMainWindow):
             cont["default_target_words"] = params.get("target_words", 2000)
             cont["default_lookback_chapters"] = params.get("lookback_chapters", 5)
             cont["inject_lookback_context"] = params.get("inject_lookback_context", False)
+            cont["inject_lookback_protagonist"] = params.get("inject_lookback_protagonist", False)
+            cont["inject_lookback_custom_characters"] = params.get("inject_lookback_custom_characters", False)
             self.config_manager.save()
         except Exception as e:
             logger.warning("保存续写参数失败: %s", e)
@@ -1966,6 +1976,24 @@ class MainWindow(QMainWindow):
                 )
                 if lb_ctx is not None:
                     lb_ctx_entries, lb_ctx_index = lb_ctx
+            # 同步注入回溯主角形象（取窗口内最新一章结果）
+            lb_protagonist_profile = None
+            lb_protagonist_index = None
+            if params.get("inject_lookback_protagonist"):
+                lb_prot = self._get_latest_lookback_protagonist(
+                    lookback_chapters, chapter_for_assemble
+                )
+                if lb_prot is not None:
+                    lb_protagonist_profile, lb_protagonist_index = lb_prot
+            # 同步注入回溯自定义角色（取窗口内最新一章结果）
+            lb_custom_characters = None
+            lb_custom_characters_index = None
+            if params.get("inject_lookback_custom_characters"):
+                lb_cc = self._get_latest_lookback_custom_characters(
+                    lookback_chapters, chapter_for_assemble
+                )
+                if lb_cc is not None:
+                    lb_custom_characters, lb_custom_characters_index = lb_cc
             assemble_result = self.prompt_assembler.assemble(
                 preset=preset,
                 chapters=self._current_chapters,
@@ -1988,6 +2016,10 @@ class MainWindow(QMainWindow):
                 style_profile=project.style_profile if project else None,
                 lookback_context_entries=lb_ctx_entries,
                 lookback_context_source_index=lb_ctx_index,
+                lookback_protagonist_profile=lb_protagonist_profile,
+                lookback_protagonist_source_index=lb_protagonist_index,
+                lookback_custom_characters=lb_custom_characters,
+                lookback_custom_characters_source_index=lb_custom_characters_index,
             )
         except Exception as e:
             logger.error("提示词组装失败: %s", e, exc_info=True)
@@ -3469,6 +3501,217 @@ class MainWindow(QMainWindow):
             f"已复制 {len(copied_entries)} 条到第{target_chapter.index}章"
         )
 
+    def _on_copy_protagonist_to_chapter(self) -> None:
+        """将当前章节的主角形象档案复制到用户选择的目标章节（覆盖合并）。
+
+        镜像 ``_on_copy_context_to_chapter``，差异：主角形象为单章单档案，
+        复制即覆盖目标章已有档案（目标章已有则弹确认对话框）。深拷贝时设
+        ``copied_from`` 为当前章 index，保留原 ``source_chapter_range``。
+        """
+        from PySide6.QtWidgets import QInputDialog
+
+        if not self._current_chapter or not self._current_project_id:
+            return
+
+        # 取当前章主角形象（内存 LRU 优先，未命中查 SQLite）
+        source_profile = self._protagonist_profile_by_chapter.get(
+            self._current_chapter.id
+        )
+        if source_profile is None:
+            try:
+                full_ch = self.storage_service.load_chapter(self._current_chapter.id)
+                if full_ch is not None:
+                    source_profile = full_ch.protagonist_profile
+            except Exception as e:
+                logger.warning("加载当前章主角形象失败: %s", e)
+        if source_profile is None:
+            self._on_toast_requested("当前章节无主角形象可复制")
+            return
+
+        # 构建可选章节列表（排除当前章）
+        chapters = sorted(self._current_chapters, key=lambda c: c.index)
+        candidates = [c for c in chapters if c.id != self._current_chapter.id]
+        if not candidates:
+            self._on_toast_requested("没有可选的目标章节")
+            return
+        items = [f"第{c.index}章 {c.title or ''}".strip() for c in candidates]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "复制主角形象到章节",
+            f"将当前章节（第{self._current_chapter.index}章）的主角形象复制到：",
+            items,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        target_idx = items.index(choice)
+        target_chapter = candidates[target_idx]
+
+        # 目标章已有主角形象时弹确认覆盖
+        target_existing = self._protagonist_profile_by_chapter.get(target_chapter.id)
+        if target_existing is None:
+            try:
+                target_full = self.storage_service.load_chapter(target_chapter.id)
+                if target_full is not None:
+                    target_existing = target_full.protagonist_profile
+            except Exception as e:
+                logger.warning("加载目标章主角形象失败: %s", e)
+        if target_existing is not None:
+            confirm = QMessageBox.question(
+                self,
+                "确认覆盖",
+                f"目标章（第{target_chapter.index}章）已有主角形象，是否覆盖？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+
+        # 深拷贝并设 copied_from（保留原 source_chapter_range）
+        source_index = self._current_chapter.index
+        copied_profile = source_profile.model_copy(
+            update={"copied_from": source_index},
+            deep=True,
+        )
+
+        # 持久化到目标章 protagonist_profile 列
+        try:
+            self.storage_service.update_chapter_protagonist(
+                target_chapter.id, copied_profile
+            )
+        except Exception as e:
+            logger.warning("主角形象复制持久化失败: %s", e)
+            self._on_toast_requested(f"复制失败: {e}")
+            return
+
+        # 更新内存 LRU（含容量上限淘汰保护）
+        self._protagonist_profile_by_chapter[target_chapter.id] = copied_profile
+        self._protagonist_profile_by_chapter.move_to_end(target_chapter.id)
+        if len(self._protagonist_profile_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+            self._protagonist_profile_by_chapter.popitem(last=False)
+
+        self._on_toast_requested(
+            f"已复制主角形象到第{target_chapter.index}章"
+        )
+
+    def _on_copy_custom_character_to_chapter(self) -> None:
+        """将当前章节的某个自定义角色档案复制到目标章节。
+
+        弹出角色名选择对话框（从当前章 custom_characters 键取），再选目标章。
+        目标章同名角色覆盖、其他角色保留。深拷贝时设 ``copied_from``。
+        """
+        from PySide6.QtWidgets import QInputDialog
+
+        if not self._current_chapter or not self._current_project_id:
+            return
+
+        # 取当前章自定义角色 dict（内存 LRU 优先，未命中查 SQLite）
+        source_chars = self._custom_characters_by_chapter.get(
+            self._current_chapter.id
+        )
+        if not source_chars:
+            try:
+                full_ch = self.storage_service.load_chapter(self._current_chapter.id)
+                if full_ch is not None:
+                    source_chars = full_ch.custom_characters
+            except Exception as e:
+                logger.warning("加载当前章自定义角色失败: %s", e)
+        if not source_chars:
+            self._on_toast_requested("当前章节无自定义角色可复制")
+            return
+
+        # 选择要复制的角色名
+        names = sorted(source_chars.keys())
+        name_choice, name_ok = QInputDialog.getItem(
+            self,
+            "选择角色",
+            "选择要复制的角色：",
+            names,
+            0,
+            False,
+        )
+        if not name_ok:
+            return
+        source_profile = source_chars.get(name_choice)
+        if source_profile is None:
+            self._on_toast_requested(f"未找到角色「{name_choice}」")
+            return
+
+        # 构建可选章节列表（排除当前章）
+        chapters = sorted(self._current_chapters, key=lambda c: c.index)
+        candidates = [c for c in chapters if c.id != self._current_chapter.id]
+        if not candidates:
+            self._on_toast_requested("没有可选的目标章节")
+            return
+        items = [f"第{c.index}章 {c.title or ''}".strip() for c in candidates]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "复制自定义角色到章节",
+            f"将角色「{name_choice}」复制到：",
+            items,
+            0,
+            False,
+        )
+        if not ok:
+            return
+        target_idx = items.index(choice)
+        target_chapter = candidates[target_idx]
+
+        # 加载目标章 custom_characters dict（内存 LRU 优先，未命中查 SQLite）
+        target_chars = self._custom_characters_by_chapter.get(target_chapter.id)
+        if target_chars is None:
+            try:
+                target_full = self.storage_service.load_chapter(target_chapter.id)
+                if target_full is not None:
+                    target_chars = target_full.custom_characters
+            except Exception as e:
+                logger.warning("加载目标章自定义角色失败: %s", e)
+        target_chars = dict(target_chars or {})
+
+        # 目标章已有同名角色时弹确认覆盖
+        if name_choice in target_chars:
+            confirm = QMessageBox.question(
+                self,
+                "确认覆盖",
+                f"目标章（第{target_chapter.index}章）已有角色「{name_choice}」，是否覆盖？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+
+        # 深拷贝并设 copied_from
+        source_index = self._current_chapter.index
+        copied_profile = source_profile.model_copy(
+            update={"copied_from": source_index},
+            deep=True,
+        )
+
+        # 合并：仅覆盖该角色，其他角色保留
+        merged = dict(target_chars)
+        merged[name_choice] = copied_profile
+
+        # 持久化到目标章 custom_characters 列
+        try:
+            self.storage_service.update_chapter_custom_characters(
+                target_chapter.id, merged
+            )
+        except Exception as e:
+            logger.warning("自定义角色复制持久化失败: %s", e)
+            self._on_toast_requested(f"复制失败: {e}")
+            return
+
+        # 更新内存 LRU
+        self._custom_characters_by_chapter[target_chapter.id] = merged
+        self._custom_characters_by_chapter.move_to_end(target_chapter.id)
+        if len(self._custom_characters_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+            self._custom_characters_by_chapter.popitem(last=False)
+
+        self._on_toast_requested(
+            f"已复制角色「{name_choice}」到第{target_chapter.index}章"
+        )
+
     def _ensure_chapter_contents(self) -> None:
         """确保 _current_chapters 中所有章节的 content 已加载。
 
@@ -3546,6 +3789,108 @@ class MainWindow(QMainWindow):
                     entries = []
             if entries and any(e.enabled for e in entries):
                 return (entries, ch.index)
+        return None
+
+    def _get_latest_lookback_protagonist(
+        self, lookback: int, current_chapter
+    ) -> tuple[Any, int] | None:
+        """取回溯窗口内最新一章的主角形象档案。
+
+        镜像 ``_get_latest_lookback_context``，遍历窗口内章节（排除当前章），
+        内存 LRU ``_protagonist_profile_by_chapter`` 优先、未命中同步查 SQLite
+        读 ``chapter.protagonist_profile``，返回首个非 None 的章节。
+
+        Args:
+            lookback: 回溯章节数（0=全部前文）
+            current_chapter: 当前续写章节
+
+        Returns:
+            ``(profile, chapter_index)`` 或 None
+        """
+        if not current_chapter or not self._current_project_id:
+            return None
+        chapters = sorted(self._current_chapters, key=lambda c: c.index)
+        current_idx = -1
+        for i, c in enumerate(chapters):
+            if c.id == current_chapter.id:
+                current_idx = i
+                break
+        if current_idx <= 0:
+            return None
+        if lookback <= 0:
+            start = 0
+        else:
+            start = max(0, current_idx - lookback + 1)
+        candidates = chapters[start:current_idx]
+        if not candidates:
+            return None
+
+        for ch in reversed(candidates):
+            profile = self._protagonist_profile_by_chapter.get(ch.id)
+            if profile is None:
+                try:
+                    full_ch = self.storage_service.load_chapter(ch.id)
+                    if full_ch is not None:
+                        profile = full_ch.protagonist_profile
+                        if profile is not None:
+                            self._protagonist_profile_by_chapter[ch.id] = profile
+                            self._protagonist_profile_by_chapter.move_to_end(ch.id)
+                            if len(self._protagonist_profile_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+                                self._protagonist_profile_by_chapter.popitem(last=False)
+                except Exception as e:
+                    logger.warning("回溯主角形象查询失败 (章节 %s): %s", ch.id, e)
+                    profile = None
+            if profile is not None:
+                return (profile, ch.index)
+        return None
+
+    def _get_latest_lookback_custom_characters(
+        self, lookback: int, current_chapter
+    ) -> tuple[dict, int] | None:
+        """取回溯窗口内最新一章的自定义角色档案 dict。
+
+        镜像 ``_get_latest_lookback_protagonist``，数据源为
+        ``_custom_characters_by_chapter``，未命中查 SQLite 读
+        ``chapter.custom_characters``，返回首个非空 dict 的章节。
+
+        Returns:
+            ``(characters_dict, chapter_index)`` 或 None
+        """
+        if not current_chapter or not self._current_project_id:
+            return None
+        chapters = sorted(self._current_chapters, key=lambda c: c.index)
+        current_idx = -1
+        for i, c in enumerate(chapters):
+            if c.id == current_chapter.id:
+                current_idx = i
+                break
+        if current_idx <= 0:
+            return None
+        if lookback <= 0:
+            start = 0
+        else:
+            start = max(0, current_idx - lookback + 1)
+        candidates = chapters[start:current_idx]
+        if not candidates:
+            return None
+
+        for ch in reversed(candidates):
+            chars = self._custom_characters_by_chapter.get(ch.id)
+            if chars is None:
+                try:
+                    full_ch = self.storage_service.load_chapter(ch.id)
+                    if full_ch is not None:
+                        chars = full_ch.custom_characters
+                        if chars:
+                            self._custom_characters_by_chapter[ch.id] = chars
+                            self._custom_characters_by_chapter.move_to_end(ch.id)
+                            if len(self._custom_characters_by_chapter) > MAX_CONTEXT_CACHE_SIZE:
+                                self._custom_characters_by_chapter.popitem(last=False)
+                except Exception as e:
+                    logger.warning("回溯自定义角色查询失败 (章节 %s): %s", ch.id, e)
+                    chars = None
+            if chars:
+                return (chars, ch.index)
         return None
 
     def _on_force_refresh_context(self) -> None:
@@ -3859,6 +4204,24 @@ class MainWindow(QMainWindow):
                 )
                 if lb_ctx is not None:
                     lb_ctx_entries, lb_ctx_index = lb_ctx
+            # 同步注入回溯主角形象（预览需与生成一致）
+            lb_protagonist_profile = None
+            lb_protagonist_index = None
+            if params.get("inject_lookback_protagonist"):
+                lb_prot = self._get_latest_lookback_protagonist(
+                    lookback_chapters, self._current_chapter
+                )
+                if lb_prot is not None:
+                    lb_protagonist_profile, lb_protagonist_index = lb_prot
+            # 同步注入回溯自定义角色（预览需与生成一致）
+            lb_custom_characters = None
+            lb_custom_characters_index = None
+            if params.get("inject_lookback_custom_characters"):
+                lb_cc = self._get_latest_lookback_custom_characters(
+                    lookback_chapters, self._current_chapter
+                )
+                if lb_cc is not None:
+                    lb_custom_characters, lb_custom_characters_index = lb_cc
             assemble_result = self.prompt_assembler.assemble(
                 preset=preset,
                 chapters=self._current_chapters,
@@ -3881,6 +4244,10 @@ class MainWindow(QMainWindow):
                 style_profile=project.style_profile if project else None,
                 lookback_context_entries=lb_ctx_entries,
                 lookback_context_source_index=lb_ctx_index,
+                lookback_protagonist_profile=lb_protagonist_profile,
+                lookback_protagonist_source_index=lb_protagonist_index,
+                lookback_custom_characters=lb_custom_characters,
+                lookback_custom_characters_source_index=lb_custom_characters_index,
             )
         except Exception as e:
             logger.error("提示词组装失败: %s", e, exc_info=True)
@@ -4700,7 +5067,18 @@ class MainWindow(QMainWindow):
             data = profile
         else:
             return f"（不支持的主角形象数据类型：{type(profile).__name__}）"
+        # 来源标识（copied_from 优先，回退 source_chapter_range）
+        copied_from = data.get("copied_from")
+        source_range = data.get("source_chapter_range")
+        source_header = ""
+        if copied_from is not None:
+            source_header = f"（复制自第{copied_from}章）\n\n"
+        elif source_range:
+            start, end = source_range[0], source_range[1]
+            source_header = f"（提取自第{start}-{end}章）\n\n"
         lines = ["# 主角形象心理学档案（8 维度）", ""]
+        if source_header:
+            lines.insert(0, source_header)
         for dim, label in labels.items():
             value = data.get(dim, {})
             lines.append(f"【{label}】({dim})")
@@ -5866,6 +6244,8 @@ class MainWindow(QMainWindow):
             cont["default_target_words"] = params.get("target_words", 2000)
             cont["default_lookback_chapters"] = params.get("lookback_chapters", 5)
             cont["inject_lookback_context"] = params.get("inject_lookback_context", False)
+            cont["inject_lookback_protagonist"] = params.get("inject_lookback_protagonist", False)
+            cont["inject_lookback_custom_characters"] = params.get("inject_lookback_custom_characters", False)
             self.config_manager.save()
         except Exception as e:
             logger.warning("保存续写参数失败: %s", e)
@@ -6152,6 +6532,24 @@ class MainWindow(QMainWindow):
                 )
                 if lb_ctx is not None:
                     lb_ctx_entries, lb_ctx_index = lb_ctx
+            # 同步注入回溯主角形象（取待重写章之前窗口的最新结果）
+            lb_protagonist_profile = None
+            lb_protagonist_index = None
+            if params.get("inject_lookback_protagonist"):
+                lb_prot = self._get_latest_lookback_protagonist(
+                    rewrite_lookback, origin_chapter
+                )
+                if lb_prot is not None:
+                    lb_protagonist_profile, lb_protagonist_index = lb_prot
+            # 同步注入回溯自定义角色（取待重写章之前窗口的最新结果）
+            lb_custom_characters = None
+            lb_custom_characters_index = None
+            if params.get("inject_lookback_custom_characters"):
+                lb_cc = self._get_latest_lookback_custom_characters(
+                    rewrite_lookback, origin_chapter
+                )
+                if lb_cc is not None:
+                    lb_custom_characters, lb_custom_characters_index = lb_cc
             assemble_result = self.prompt_assembler.assemble(
                 preset=preset,
                 chapters=self._current_chapters,
@@ -6174,6 +6572,10 @@ class MainWindow(QMainWindow):
                 exclude_current=True,
                 lookback_context_entries=lb_ctx_entries,
                 lookback_context_source_index=lb_ctx_index,
+                lookback_protagonist_profile=lb_protagonist_profile,
+                lookback_protagonist_source_index=lb_protagonist_index,
+                lookback_custom_characters=lb_custom_characters,
+                lookback_custom_characters_source_index=lb_custom_characters_index,
             )
         except Exception as e:
             logger.error("重写生成提示词组装失败: %s", e, exc_info=True)

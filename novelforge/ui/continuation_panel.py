@@ -242,6 +242,27 @@ class ContinuationPanel(QWidget):
         )
         config_form.addRow(self._inject_lookback_context_check)
 
+        # 同步注入回溯主角形象开关：从回溯窗口取最近一章已提取的主角形象档案
+        # 作为独立 system 消息注入（与「同步注入回溯上下文」独立控制）
+        self._inject_lookback_protagonist_check = QCheckBox("同步注入回溯主角形象")
+        self._inject_lookback_protagonist_check.setChecked(False)
+        self._inject_lookback_protagonist_check.setToolTip(
+            "开启后，续写时从回溯窗口内取最近一次提取主角形象的章节，"
+            "将其档案以独立消息注入提示词（仅取最新一章）"
+        )
+        config_form.addRow(self._inject_lookback_protagonist_check)
+
+        # 同步注入回溯自定义角色开关：从回溯窗口取最近一章已提取的自定义角色档案
+        self._inject_lookback_custom_characters_check = QCheckBox(
+            "同步注入回溯自定义角色"
+        )
+        self._inject_lookback_custom_characters_check.setChecked(False)
+        self._inject_lookback_custom_characters_check.setToolTip(
+            "开启后，续写时从回溯窗口内取最近一次提取自定义角色的章节，"
+            "将其全部角色档案以独立消息注入提示词（仅取最新一章）"
+        )
+        config_form.addRow(self._inject_lookback_custom_characters_check)
+
         # 世界书选择（全局加载，与预设并列）
         self._worldbook_panel = WorldBookPanel()
         config_form.addRow(self._worldbook_panel)
@@ -634,6 +655,8 @@ class ContinuationPanel(QWidget):
             "target_words": self._target_words_spin.value(),
             "lookback_chapters": self._lookback_spin.value(),
             "inject_lookback_context": self._inject_lookback_context_check.isChecked(),
+            "inject_lookback_protagonist": self._inject_lookback_protagonist_check.isChecked(),
+            "inject_lookback_custom_characters": self._inject_lookback_custom_characters_check.isChecked(),
             "preset_id": self.get_selected_preset_id(),
             "top_p": 1.0,
             "frequency_penalty": 0.0,
@@ -651,6 +674,14 @@ class ContinuationPanel(QWidget):
         if "inject_lookback_context" in params:
             self._inject_lookback_context_check.setChecked(
                 bool(params["inject_lookback_context"])
+            )
+        if "inject_lookback_protagonist" in params:
+            self._inject_lookback_protagonist_check.setChecked(
+                bool(params["inject_lookback_protagonist"])
+            )
+        if "inject_lookback_custom_characters" in params:
+            self._inject_lookback_custom_characters_check.setChecked(
+                bool(params["inject_lookback_custom_characters"])
             )
 
     # ===== 流式输出控制 =====
