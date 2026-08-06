@@ -112,11 +112,11 @@ def qapp() -> QApplication:
     return app
 
 
-def test_flow_endpoint_dialog_has_10_flows(qapp, tmp_path: Path) -> None:
-    """对话框包含 10 个流程下拉框。"""
+def test_flow_endpoint_dialog_has_13_flows(qapp, tmp_path: Path) -> None:
+    """对话框包含 13 个流程下拉框。"""
     cm = _make_config_manager(tmp_path)
     dialog = FlowEndpointDialog(cm)
-    assert len(dialog._endpoint_combos) == 10
+    assert len(dialog._endpoint_combos) == 13
     for flow_key, _ in FLOW_DEFINITIONS:
         assert flow_key in dialog._endpoint_combos
 

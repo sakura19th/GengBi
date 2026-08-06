@@ -355,16 +355,16 @@ def test_all_worker_instantiations_pass_proxy() -> None:
         block = source[open_idx : i + 1]
         call_sites.append((name, block))
 
-    # 必须找到 7 个 worker 构造调用（3 ContinuationWorker + 3 AuditWorker + 1 VolumeOrchestrator）
-    assert len(call_sites) == 7, (
-        f"预期 7 个 worker 构造调用，实际找到 {len(call_sites)} 个；"
+    # 必须找到 8 个 worker 构造调用（3 ContinuationWorker + 4 AuditWorker + 1 VolumeOrchestrator）
+    assert len(call_sites) == 8, (
+        f"预期 8 个 worker 构造调用，实际找到 {len(call_sites)} 个；"
         f"若新增 worker 实例化点请同步传 proxy 并更新本断言"
     )
 
     name_counts = Counter(name for name, _ in call_sites)
     assert name_counts == {
         "ContinuationWorker": 3,
-        "AuditWorker": 3,
+        "AuditWorker": 4,
         "VolumeOrchestrator": 1,
     }, f"worker 构造调用分布异常：{name_counts}"
 

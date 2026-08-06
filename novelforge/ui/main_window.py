@@ -2230,6 +2230,8 @@ class MainWindow(QMainWindow):
           调用 ``_on_rewrite_analysis_accepted``
         - ``created_by=="writing_mode"`` + ``_prev_output``：写作模式第 3 步，
           调用 ``_on_start_writing_mode_continuation``（精炼输出前置【写作参考】到 user_input）
+        - ``created_by=="planned_writing"`` + ``_prev_output``：规划写作第 2 步，
+          调用 ``_on_start_planned_writing_continuation``（采纳的细纲替换 user_input）
         - 其余：独立续写，调用 ``_on_start_continuation``
         """
         prev_output = params.get("_prev_output")
@@ -2239,6 +2241,9 @@ class MainWindow(QMainWindow):
         elif prev_output and stage.created_by == "writing_mode":
             # 写作模式第 3 步：prev_output 是阶段 2 精炼输出
             self._on_start_writing_mode_continuation(params, prev_output)
+        elif prev_output and stage.created_by == "planned_writing":
+            # 规划写作第 2 步：prev_output 是采纳的细纲，替换 user_input
+            self._on_start_planned_writing_continuation(params, prev_output)
         else:
             # 独立续写
             self._on_start_continuation(params)
@@ -5388,15 +5393,20 @@ class MainWindow(QMainWindow):
         - writing_mode 模式：若当前 swipe 缓存了 _writing_mode_refinement，
           直接调 _on_start_writing_mode_continuation 跳过阶段 1/2 生成新 swipe；
           否则走 _on_start_flow 重新分析
+        - planned_writing 模式：若当前 swipe 缓存了 _planned_writing_outline，
+          直接调 _on_start_planned_writing_continuation 跳过细纲生成阶段生成新 swipe；
+          否则走 _on_start_flow 重新分析
         - 其他模式：走 _on_start_continuation_routed（原逻辑）
         """
         # 沿用上次参数（含缓存的审计结果）
         cached_analysis = None
         cached_refinement = None
+        cached_outline = None
         if self.continuation_panel.current_swipe:
             last_params = dict(self.continuation_panel.current_swipe.parameters_snapshot)
             cached_analysis = last_params.pop("_rewrite_analysis_text", None)
             cached_refinement = last_params.pop("_writing_mode_refinement", None)
+            cached_outline = last_params.pop("_planned_writing_outline", None)
             # 移除缓存键后设置参数（避免缓存键污染面板参数）
             self.continuation_panel.set_parameters(last_params)
             params = self.continuation_panel.get_parameters()
@@ -5415,6 +5425,9 @@ class MainWindow(QMainWindow):
         elif mode == "writing_mode" and cached_refinement:
             # 已有阶段 2 精炼输出，跳过阶段 1/2 直接生成
             self._on_start_writing_mode_continuation(params, cached_refinement)
+        elif mode == "planned_writing" and cached_outline:
+            # 已有细纲，跳过细纲生成阶段直接生成
+            self._on_start_planned_writing_continuation(params, cached_outline)
         else:
             # 无缓存审计结果，走完整流程（重新分析）
             params["created_by"] = "rewrite"
@@ -6855,8 +6868,10 @@ class MainWindow(QMainWindow):
             parent=self,
         )
 
-        # 创建分析对话框
-        self._audit_dialog = AuditDialog(self)
+        # 创建分析对话框（细纲场景启用"修改"按钮）
+        self._audit_dialog = AuditDialog(
+            self, enable_revision=(phase == "planned_writing_outline")
+        )
         self._audit_dialog.setWindowTitle(phase_name)
 
         # 连接 worker 信号
@@ -6874,9 +6889,12 @@ class MainWindow(QMainWindow):
         self._audit_worker.auth_error.connect(self._on_auth_error)
         self._audit_worker.prompt_debug_requested.connect(self._on_prompt_debug_requested)
 
-        # 连接对话框信号（采纳→resume 推进；取消→cancel 清理）
+        # 连接对话框信号（采纳→resume 推进；取消→cancel 清理；修改→AI 修订）
         self._audit_dialog.accepted_text.connect(self._on_generic_analysis_accepted)
         self._audit_dialog.cancelled.connect(self._on_generic_analysis_cancelled)
+        self._audit_dialog.revision_requested.connect(
+            self._on_outline_revision_requested
+        )
 
         self._audit_dialog.show()
         self._audit_worker.start()
@@ -6895,6 +6913,119 @@ class MainWindow(QMainWindow):
         self._set_status_message(f"分析失败: {error}")
         if self.flow_executor.is_active:
             self.flow_executor.cancel()
+
+    def _on_outline_revision_requested(
+        self, current_text: str, feedback: str
+    ) -> None:
+        """用户要求根据反馈修改细纲：加载修订模板，启动 AuditWorker 流式修订。
+
+        复用 planned_writing_outline 的端点/模型/破限配置；加载
+        ``phase_planned_writing_outline_revise.txt`` 模板，注入原细纲与反馈意见；
+        修订结果通过 chunk 流式回填到 AuditDialog（用户可再次修改或采纳）。
+        修订失败时恢复原细纲，不 cancel 流程。
+        """
+        if self._audit_dialog is None:
+            return
+
+        flow_key = "planned_writing_outline"
+        endpoint = self.config_manager.get_flow_endpoint(flow_key)
+        if not endpoint:
+            endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            return
+
+        api_key = self.config_manager.decrypt_api_key(endpoint.get("id", ""))
+        if not api_key:
+            QMessageBox.warning(self, "提示", "API Key 无效，请检查设置")
+            return
+
+        model = self.config_manager.get_flow_model(flow_key)
+        if not model:
+            QMessageBox.warning(self, "提示", "请选择模型")
+            return
+
+        # 加载修订模板
+        try:
+            template_path = get_agent_prompt_path(
+                "planned_writing_outline_revise"
+            )
+            template = load_text_resource(template_path)
+        except Exception as e:
+            logger.error("加载细纲修订模板失败: %s", e, exc_info=True)
+            QMessageBox.critical(self, "修改失败", f"加载修订模板失败: {e}")
+            return
+
+        rendered = template.replace("{{original_outline}}", current_text)
+        rendered = rendered.replace("{{revision_feedback}}", feedback)
+
+        messages = [{"role": "system", "content": rendered}]
+        messages = self._inject_jailbreak(
+            messages, self._get_flow_jailbreak_text(flow_key)
+        )
+
+        # 清理旧 worker（断开所有信号）
+        old_audit_worker = getattr(self, "_audit_worker", None)
+        if old_audit_worker is not None:
+            try:
+                old_audit_worker.chunk_received.disconnect()
+                old_audit_worker.finished.disconnect()
+                old_audit_worker.error.disconnect()
+                old_audit_worker.rate_limit_warning.disconnect()
+                old_audit_worker.auth_error.disconnect()
+                old_audit_worker.token_count.disconnect()
+                old_audit_worker.prompt_debug_requested.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            old_audit_worker.deleteLater()
+        self._audit_worker = None
+
+        reasoning_effort = self._resolve_reasoning_effort(endpoint)
+
+        self._audit_worker = AuditWorker(
+            base_url=endpoint["base_url"],
+            api_key=api_key,
+            model=model,
+            messages=messages,
+            temperature=0.3,
+            max_tokens=6000,
+            reasoning_effort=reasoning_effort,
+            endpoint_id=endpoint.get("id", ""),
+            debug_mode=self._debug_mode,
+            phase_name="细纲修改",
+            extra_payload=endpoint.get("extra_payload") or {},
+            extra_headers=endpoint.get("extra_headers") or {},
+            proxy=self._get_network_proxy(),
+            parent=self,
+        )
+
+        # 连接 worker 信号（finished 复用 generic_analysis 回调，error 用修订专用）
+        self._audit_worker.chunk_received.connect(self._audit_dialog.append_chunk)
+        self._audit_worker.token_count.connect(
+            lambda count: self._token_count_label.setText(
+                f"Token: {count} (修改中)"
+            )
+        )
+        self._audit_worker.finished.connect(self._on_generic_analysis_finished)
+        self._audit_worker.error.connect(self._on_revision_error)
+        self._audit_worker.rate_limit_warning.connect(
+            lambda msg: self.continuation_panel.show_toast(msg)
+        )
+        self._audit_worker.auth_error.connect(self._on_auth_error)
+        self._audit_worker.prompt_debug_requested.connect(
+            self._on_prompt_debug_requested
+        )
+
+        # 切回流式状态（备份原文本、清空、只读）
+        self._audit_dialog.start_revision_streaming()
+        self._audit_worker.start()
+        self._set_status_message("根据反馈修改细纲中...")
+
+    def _on_revision_error(self, error: str) -> None:
+        """细纲修订出错：恢复原细纲，不 cancel 流程。"""
+        if self._audit_dialog is not None:
+            self._audit_dialog.fail_revision(error)
+        self._set_status_message(f"细纲修改失败: {error}")
 
     def _on_generic_analysis_cancelled(self) -> None:
         """用户取消通用分析：停止 worker，cancel 流程。"""
@@ -6946,6 +7077,27 @@ class MainWindow(QMainWindow):
         if self.flow_executor.is_active:
             self.flow_executor.cancel()
         self._on_start_continuation(params, user_input_override=combined)
+
+    def _on_start_planned_writing_continuation(
+        self, params: dict, prev_output: str
+    ) -> None:
+        """规划写作第 2 步：采纳的细纲替换 user_input，调单章续写。
+
+        将 ``prev_output``（阶段 1 采纳的细纲）直接作为 ``user_input_override``
+        传给 ``_on_start_continuation``，细纲即正文生成的唯一指令（用户原始指令不再注入）。
+        镜像 ``_on_start_writing_mode_continuation``，差异点：细纲**替换** user_input
+        （非前置【写作参考】）。缓存细纲到 params 供重写时复用。
+
+        Args:
+            params: 阶段参数（含面板参数 + 阶段 params）
+            prev_output: 阶段 1 采纳的细纲文本
+        """
+        # 缓存细纲到 params，供重写时复用（写入 swipe.parameters_snapshot）
+        params["_planned_writing_outline"] = prev_output
+        # 清理 FlowExecutor pending 状态（continuation 内部自管 worker）
+        if self.flow_executor.is_active:
+            self.flow_executor.cancel()
+        self._on_start_continuation(params, user_input_override=prev_output)
 
     def _on_accept_and_continue(self) -> None:
         """接受并继续续写。"""

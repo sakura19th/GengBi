@@ -2,6 +2,141 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-08-06：细纲 AI 修改功能（AuditDialog 修改按钮）
+
+### 背景
+
+规划写作流程阶段 1 生成细纲后，用户在 AuditDialog 中只能手动编辑文本。用户希望增加"修改"按钮，点击后弹出输入框，输入反馈意见后由 AI 根据反馈修改细纲，支持多次修改直到满意再采纳。
+
+### 核心改动
+
+1. **`novelforge/ui/audit_dialog.py`**：
+   - 新增 `revision_requested = Signal(str, str)` 信号（当前文本, 反馈意见）
+   - 构造参数新增 `enable_revision: bool = False`（仅细纲场景 True，控制"修改"按钮创建）
+   - 新增"修改"按钮 `_revise_btn`（左侧，finish_streaming 后启用；点击→`QInputDialog.getMultiLineText` 弹多行输入框获取反馈→emit revision_requested）
+   - 新增 `start_revision_streaming()`：备份当前文本到 `_revision_backup`、清空文本区、设只读、禁用所有按钮、状态"修改中..."
+   - 新增 `fail_revision(error_msg)`：修订失败恢复原文本、恢复可编辑、启用按钮（与 `fail` 不同——不禁用按钮，恢复修订前文本，用户可重新修改或采纳原文本）
+   - `finish_streaming` / `fail` 同步更新 `_revise_btn` 启用/禁用状态
+
+2. **`novelforge/resources/defaults/agent/phase_planned_writing_outline_revise.txt`**（新建）：
+   - 细纲修订模板，2 占位符 `{{original_outline}}` / `{{revision_feedback}}`
+   - 修改原则：严格执行反馈、保持格式一致、保留未涉及内容、格式硬性要求不变、beats 3~8 条
+
+3. **`novelforge/ui/main_window.py`**（3 处）：
+   - `_on_start_generic_analysis`：创建 AuditDialog 时 `enable_revision=(phase=="planned_writing_outline")`，连接 `revision_requested` 信号到 `_on_outline_revision_requested`
+   - 新增 `_on_outline_revision_requested(current_text, feedback)`：加载修订模板→str.replace 注入原细纲与反馈→复用 `planned_writing_outline` 端点/模型/破限配置→清理旧 worker→新 AuditWorker（temperature=0.3, max_tokens=6000）→连接 chunk/finished/error 信号（finished 复用 `_on_generic_analysis_finished`，error 用 `_on_revision_error`）→`dialog.start_revision_streaming()` 切回流式→`worker.start()`
+   - 新增 `_on_revision_error(error)`：调 `dialog.fail_revision(error)` 恢复原文本，不 cancel 流程（与 `_on_generic_analysis_error` 的关键差异——后者会 cancel FlowExecutor）
+
+4. **`tests/test_http_proxy.py`**：静态扫描断言更新 7→8 个 worker 构造调用（AuditWorker 3→4，新增细纲修订 worker 已传 proxy）
+
+### 交互流程
+
+1. 阶段 1 细纲生成完成 → AuditDialog 显示细纲，"修改"按钮启用
+2. 用户点击"修改" → 弹多行输入框 → 输入反馈意见（如"第 3 拍节奏太快，增加主角内心挣扎"）→ 确认
+3. AuditDialog 切回流式状态（备份原细纲、清空、只读、状态"修改中..."）
+4. AI 根据反馈修订细纲，流式回填对话框
+5. 修订完成 → 恢复可编辑（用户可手动微调、再次"修改"、或"采纳"）
+6. 修订失败 → 恢复原细纲（用户可重新修改或采纳原文本）
+7. 支持**多次修改**直到满意，最终采纳后 `flow_executor.resume` 推进阶段 2
+
+### 测试
+
+- 修复 `test_http_proxy.py` 静态扫描断言（7→8 个 worker，新增 AuditWorker 已传 proxy）
+- 全部测试通过（801 passed, 15 skipped, 12 deselected）
+
+### 文档同步
+
+- `agent.md`：audit_dialog.py 描述新增修改按钮/信号/方法；架构树新增 `phase_planned_writing_outline_revise.txt`；main_window.py 描述新增 `_on_outline_revision_requested`/`_on_revision_error`；决策 24 新增「细纲 AI 修改」条目
+- `update.md`：本条目
+
+## 2026-08-06：规划写作流程重命名（body_writing → planned_writing）
+
+### 背景
+
+用户反馈"正文写作"命名与"写作模式"易混淆且不够贴切，要求换一个类似「写作模式」风格的命名。选定「规划写作」（planned_writing），突出"先规划细纲再施工"的特点。
+
+### 核心改动
+
+全面重命名（id / 中文名 / created_by / flow_key / 模板文件名 / 破限文件名 / 缓存键 / 方法名），零 body_* 残留：
+
+1. **插件**：`body_writing.json` → `planned_writing.json`（id/name/description/flow_key/params.phase/created_by 全部更新）
+2. **模板**：`phase_body_outline.txt` → `phase_planned_writing_outline.txt`（内容不变，文件名映射新 phase）
+3. **破限**：`jb_body_outline.txt` → `jb_planned_writing_outline.txt`（内容不变，文件名映射新 flow_key）
+4. **flow_key**：`body_outline` → `planned_writing_outline`（显示名「正文细纲生成」→「规划写作细纲生成」）
+5. **config.py**：`FLOW_DEFAULT_JAILBREAKS` 键 `body_outline` → `planned_writing_outline`
+6. **flow_endpoint_dialog.py**：`FLOW_DEFINITIONS` 项更新
+7. **main_window.py**：`created_by=="body_writing"` → `"planned_writing"`；`_on_start_body_writing_continuation` → `_on_start_planned_writing_continuation`；缓存键 `_body_writing_outline` → `_planned_writing_outline`；注释/docstring「正文写作」→「规划写作」
+8. **flow_plugin_service.py**（关键 bug 修复）：`_BUILTIN_PLUGIN_IDS` 元组补 `"planned_writing"`（原仅 4 个 id，导致首启复制逻辑不会把新插件复制到用户目录，续写面板下拉框看不到「规划写作」）；docstring「四种模式」→「五种模式」；新增 `_cleanup_deprecated_builtins` 方法清理用户目录中 `builtin=True` 但 id 不在 `_BUILTIN_PLUGIN_IDS` 中的废弃旧内置插件（如重命名前的 `body_writing`），避免下拉框残留
+9. **旧文件清理**：删除 `body_writing.json` / `phase_body_outline.txt` / `jb_body_outline.txt`
+
+### 命名映射
+
+| 旧 | 新 |
+|----|----|
+| `body_writing`（插件 id/created_by） | `planned_writing` |
+| 「正文写作」（中文名） | 「规划写作」 |
+| `body_outline`（flow_key） | `planned_writing_outline` |
+| `phase_body_outline.txt` | `phase_planned_writing_outline.txt` |
+| `jb_body_outline.txt` | `jb_planned_writing_outline.txt` |
+| `_body_writing_outline`（缓存键） | `_planned_writing_outline` |
+| `_on_start_body_writing_continuation` | `_on_start_planned_writing_continuation` |
+| 「正文细纲生成」（显示名） | 「规划写作细纲生成」 |
+
+### 测试
+
+- 全局 Grep 确认零 `body_writing`/`body_outline`/`正文写作`/`jb_body_outline`/`phase_body_outline` 残留
+- 全部测试通过（801 passed, 15 skipped, 12 deselected，按 agent.md 约定排除 test_m5_polish.py 与 TestUIComponents）
+
+### 文档同步
+
+- `agent.md` / `FLOW_PLUGIN_GUIDE.md` / `README.md` / `update.md`：全局替换，计数不变（5 内置插件 / 13 flow_key / 14 phase 模板）
+- `tests/test_rewrite_current_mode.py`：计数断言描述中 `body_outline` → `planned_writing_outline`
+
+## 2026-08-06：新增规划写作流程（planned_writing 插件）
+
+### 背景
+
+用户需要一个新的规划写作流程：第一步根据用户指令生成场景级细纲（beats），用户审阅/修改/采纳后，第二步将细纲作为唯一施工指令传给正文生成阶段。细纲格式参考 `.trae/xujing` 软件的 drive_beats 细纲体系（章节标题 + 3~8 节拍 + 章末钩子 + 可选硬规则/因果注记/语气提示）。
+
+### 核心改动
+
+1. **新建内置插件 `planned_writing`**（`novelforge/resources/defaults/flow_plugins/planned_writing.json`）：
+   - 2 阶段流程：audit（细纲生成，flow_key=planned_writing_outline）→ continuation（正文生成，created_by=planned_writing）
+   - ui_mode=standard，accept_mode=promote（接受后提升为新章节）
+   - 阶段 2 `input_from="outline"` 接收采纳的细纲作为 `_prev_output`
+
+2. **新建细纲模板**（`novelforge/resources/defaults/agent/phase_planned_writing_outline.txt`）：
+   - 参考 xujing drive_beats 格式，输出纯文本【细纲】（title/beats 3~8 条/ending_hook/可选 hard_rules/causal_notes/tone_hint）
+   - 复用 `_on_start_generic_analysis` 已注入的 8 个占位符
+   - 核心要求：ending_hook 具体可感知对象、设定保真（精确数值或「未知」）、转折须有前置因、浅白表露、专名一致
+
+3. **新建破限模板**（`novelforge/resources/defaults/jailbreaks/jb_planned_writing_outline.txt`）：
+   - 三档结构（LOW/MID/HIGH），针对细纲规划场景（强调不拒绝敏感剧情的细纲规划）
+
+4. **`novelforge/ui/flow_endpoint_dialog.py`**：`FLOW_DEFINITIONS` 新增 `("planned_writing_outline", "规划写作细纲生成")`
+
+5. **`novelforge/core/config.py`**：`FLOW_DEFAULT_JAILBREAKS` 新增 `"planned_writing_outline": "low"`（默认 low，与提取类/写作要素分析类一致）
+
+6. **`novelforge/ui/main_window.py`**（3 处）：
+   - `_flow_handler_continuation`：新增 `created_by=="planned_writing"` 分支，调 `_on_start_planned_writing_continuation`
+   - 新增 `_on_start_planned_writing_continuation` 方法：细纲**替换** user_input（`user_input_override=prev_output`），缓存到 `params["_planned_writing_outline"]` 供重写复用
+   - `_on_rewrite`：新增 `planned_writing` 模式缓存复用（`_planned_writing_outline` 缓存键，跳过细纲生成阶段直接生成）
+
+7. **版本号**：`0.2.16` → `0.2.17`
+
+### 测试
+
+- 无新增自动化测试（功能为复用现有 writing_mode 模式，分派逻辑与缓存复用镜像既有实现）
+- 修复 2 处过时的 flow_key 计数断言：`tests/test_flow_endpoint_config.py::test_flow_endpoint_dialog_has_10_flows` → `has_13_flows`（10→13）、`tests/test_rewrite_current_mode.py::test_flow_definitions_count_is_11` → `is_13`（11→13），反映 planned_writing_outline 加入后 FLOW_DEFINITIONS 总数
+- 全部测试通过（801 passed, 15 skipped, 12 deselected，按 agent.md 约定排除 test_m5_polish.py 与 TestUIComponents）
+
+### 文档同步
+
+- `agent.md`：架构分层目录树新增 3 文件（phase_planned_writing_outline.txt/jb_planned_writing_outline.txt/planned_writing.json）；决策 18 内置插件列表加 planned_writing + 服务层 4→5；新增第 24 条设计决策「规划写作流程」；`flow_endpoint_dialog.py`/`config.py` 描述更新；「修改后必须更新」章节 flow_key 八→十三、内置插件三→五个 + 文件名补全；版本号同步
+- `FLOW_PLUGIN_GUIDE.md`：第 2 节内置插件表 4→5 加 planned_writing；第 4.1 节 continuation agent 行加 planned_writing 分支；第 4.4 节 flow_key 表十→十三加 planned_writing_outline；第 7 节四→五个 + 新增 7.5 planned_writing.json 完整 JSON 与使用说明/预期效果/重写缓存复用/与 writing_mode 对比；第 8 节 FAQ 12→13
+- `README.md`：版本号 + 更新记录 v0.2.17
+- `update.md`：本条目
+
 ## 2026-08-05：流程端点配置两段可折叠收纳
 
 ### 背景

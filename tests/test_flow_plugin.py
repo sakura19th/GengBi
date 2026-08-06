@@ -139,12 +139,13 @@ class TestFlowPluginService:
         return FlowPluginService(storage_path=tmp_path)
 
     def test_builtin_plugins_copied(self, service: FlowPluginService) -> None:
-        """首启复制 4 个内置插件。"""
+        """首启复制 5 个内置插件。"""
         ids = service.list_ids()
         assert "single" in ids
         assert "volume" in ids
         assert "rewrite_current" in ids
         assert "writing_mode" in ids
+        assert "planned_writing" in ids
 
     def test_load_builtin_single(self, service: FlowPluginService) -> None:
         """加载内置 single 插件。"""
@@ -237,10 +238,16 @@ class TestFlowPluginService:
         custom2 = FlowPlugin(id="apple", name="A")
         service.save_plugin(custom2)
         ids = service.list_plugin_ids_sorted()
-        # 内置 4 个在前（顺序不保证，用集合比较）
-        assert set(ids[:4]) == {"single", "volume", "rewrite_current", "writing_mode"}
+        # 内置 5 个在前（顺序不保证，用集合比较）
+        assert set(ids[:5]) == {
+            "single",
+            "volume",
+            "rewrite_current",
+            "writing_mode",
+            "planned_writing",
+        }
         # 自定义按 ID 排序
-        assert ids[4:] == ["apple", "zebra"]
+        assert ids[5:] == ["apple", "zebra"]
 
     def test_builtin_plugin_version_upgrade(
         self, service: FlowPluginService, tmp_path: Path

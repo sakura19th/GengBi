@@ -1,0 +1,35 @@
+{
+  "id": "planned_writing",
+  "name": "规划写作",
+  "description": "两步续写：生成细纲→采纳后正文生成，接受后提升为新章节",
+  "version": "1.0",
+  "author": "GengBi",
+  "builtin": true,
+  "ui_mode": "standard",
+  "accept_mode": "promote",
+  "stages": [
+    {
+      "id": "outline",
+      "name": "细纲生成",
+      "agent": "audit",
+      "flow_key": "planned_writing_outline",
+      "streaming": true,
+      "created_by": "",
+      "params": {
+        "phase": "planned_writing_outline",
+        "phase_name": "细纲生成"
+      },
+      "input_from": ""
+    },
+    {
+      "id": "generate",
+      "name": "正文生成",
+      "agent": "continuation",
+      "flow_key": "single_continuation",
+      "streaming": true,
+      "created_by": "planned_writing",
+      "params": {},
+      "input_from": "outline"
+    }
+  ]
+}

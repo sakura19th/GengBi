@@ -83,6 +83,7 @@ FLOW_DEFAULT_JAILBREAKS: dict[str, str] = {
     "custom_rule_parsing": "off",
     "writing_element_analysis": "low",
     "writing_element_refinement": "low",
+    "planned_writing_outline": "low",
 }
 
 

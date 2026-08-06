@@ -45,6 +45,7 @@ FLOW_DEFINITIONS: list[tuple[str, str]] = [
     ("custom_rule_parsing", "自定义设定解析"),
     ("writing_element_analysis", "写作要素分析"),
     ("writing_element_refinement", "写作要素深化"),
+    ("planned_writing_outline", "规划写作细纲生成"),
 ]
 
 # 正文流程（破限由预设控制，不在本对话框配置破限）

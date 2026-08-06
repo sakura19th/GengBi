@@ -5,7 +5,7 @@
 存储路径：``~/.novelforge/flow_plugins/{plugin_id}.json``
 
 主要功能：
-- 内置插件首启复制（single/volume/rewrite_current/writing_mode 四种模式）
+- 内置插件首启复制（single/volume/rewrite_current/writing_mode/planned_writing 五种模式）
 - 插件 CRUD 操作（基于 BaseJsonService + .bak 备份）
 - 导入插件 JSON：校验后强制 builtin=False，ID 冲突追加 ``_imported`` 后缀
 - 导出插件 JSON：单个 JSON 文件，可分享给其他用户
@@ -27,7 +27,13 @@ from novelforge.utils.paths import get_default_flow_plugin_path
 logger = logging.getLogger(__name__)
 
 # 内置插件 ID 列表（与原续写模式字符串一致以保兼容）
-_BUILTIN_PLUGIN_IDS: tuple[str, ...] = ("single", "volume", "rewrite_current", "writing_mode")
+_BUILTIN_PLUGIN_IDS: tuple[str, ...] = (
+    "single",
+    "volume",
+    "rewrite_current",
+    "writing_mode",
+    "planned_writing",
+)
 
 
 class FlowPluginService(BaseJsonService[FlowPlugin]):
@@ -67,10 +73,15 @@ class FlowPluginService(BaseJsonService[FlowPlugin]):
     def _ensure_builtin_plugins(self) -> None:
         """首次启动时将内置插件 JSON 复制到用户目录，已有旧版时按版本升级。
 
-        内置插件是四种续写模式的声明式描述，ID 与原模式字符串一致。
+        内置插件是五种续写模式的声明式描述，ID 与原模式字符串一致。
         用户目录已有同名文件时：若已安装版本为 builtin 且资源版本更高，覆盖升级；
         否则跳过（允许用户自定义修改内置插件）。
+
+        另外清理已废弃的旧内置插件（用户目录中 builtin=True 但 id 不在
+        ``_BUILTIN_PLUGIN_IDS`` 中的文件，如重命名前的旧 id），避免下拉框残留。
         """
+        # 清理已废弃的旧内置插件（如 body_writing → planned_writing 重命名后的残留）
+        self._cleanup_deprecated_builtins()
         for plugin_id in _BUILTIN_PLUGIN_IDS:
             target = self.plugins_dir / f"{plugin_id}.json"
             src = get_default_flow_plugin_path(plugin_id)
@@ -90,6 +101,31 @@ class FlowPluginService(BaseJsonService[FlowPlugin]):
                     logger.info("内置插件 %s 已升级到资源版本", plugin_id)
                 except OSError as e:
                     logger.error("升级内置插件失败 %s: %s", plugin_id, e)
+
+    def _cleanup_deprecated_builtins(self) -> None:
+        """清理用户目录中已废弃的旧内置插件。
+
+        遍历用户目录中的插件 JSON，若 ``builtin=True`` 且 id 不在
+        ``_BUILTIN_PLUGIN_IDS`` 中，视为已废弃的旧内置插件（如重命名前的
+        ``body_writing``），删除文件避免下拉框残留。用户自定义插件
+        （``builtin=False``）不受影响。
+        """
+        valid_ids = set(_BUILTIN_PLUGIN_IDS)
+        for json_path in self.plugins_dir.glob("*.json"):
+            try:
+                data, err = load_json_with_recovery(json_path)
+                if err is not None or data is None:
+                    continue
+                if not data.get("builtin", False):
+                    continue
+                plugin_id = data.get("id", "")
+                if plugin_id and plugin_id not in valid_ids:
+                    json_path.unlink(missing_ok=True)
+                    logger.info(
+                        "已清理废弃的旧内置插件: %s", plugin_id
+                    )
+            except Exception as e:
+                logger.warning("检查废弃内置插件失败 %s: %s", json_path, e)
 
     def _should_upgrade_builtin(self, target: Path, src: Path) -> bool:
         """判断是否应将用户目录的内置插件升级到资源版本。
