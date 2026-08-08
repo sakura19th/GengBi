@@ -2,6 +2,33 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-08-08：GitHub Actions 自动打包发布 Release
+
+### 背景
+
+用户希望新增"更新后自动打包发布 release"功能：代码更新后无需手动在本地打包上传，由 CI 自动完成 Windows exe 打包并发布到 GitHub Release。
+
+### 核心改动
+
+1. **`.github/workflows/release.yml`**（新建）：
+   - 触发方式：push `v*` 版本 tag（如 `v0.2.18`）+ `workflow_dispatch` 手动触发
+   - Windows runner（windows-latest）+ Python 3.11 + `cache: pip`
+   - 安装 `requirements.txt` + PyInstaller 后调 `python -m novelforge.resources.build` 打包（产物 `dist/GengBi_v{版本号}.exe`）
+   - `Read version & release notes` 一步从 `novelforge/__init__.py` 读取 `__version__`、从 `README.md`「更新记录」提取最新版本小节（`### v{version}` 到下一个 `### v` 标题间内容，无匹配时回退默认文本），经 `GITHUB_OUTPUT` 多行 heredoc 传递
+   - `softprops/action-gh-release@v2` 创建 Release：push tag 触发时 tag 用 `github.ref_name`，手动触发时用 `v{version}`（由 `github.ref_type` 表达式区分）；上传 exe 产物，`fail_on_unmatched_files: true`
+   - `permissions: contents: write` 供创建 Release 使用
+
+### 测试
+
+- YAML 语法经 PyYAML `safe_load` 校验通过
+- 版本与更新记录提取正则按当前 `README.md`/`__init__.py` 实际内容人工核对（`### v0.2.18` 小节可正确提取）
+
+### 文档同步
+
+- `agent.md`：技术栈追加 GitHub Actions 说明
+- `README.md`：打包章节追加「自动打包发布」说明（tag 触发 + Actions 手动触发）
+- `update.md`：本条目
+
 ## 2026-08-08：上下文预览面板布局重构与增量更新
 
 ### 背景

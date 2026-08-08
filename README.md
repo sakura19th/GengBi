@@ -50,6 +50,8 @@ python -m novelforge.resources.build
 pyinstaller --clean -y novelforge/resources/build.spec
 ```
 
+> **自动打包发布**：推送 `v*` 版本 tag（如 `v0.2.18`）后，GitHub Actions 会自动在 Windows 上打包 exe 并发布 GitHub Release（Release 说明自动提取自本文件「更新记录」对应版本小节）；也可在仓库 Actions 页面手动触发「Build & Release」工作流。
+
 ## 配置说明
 
 首次启动后，请前往"设置"配置：
