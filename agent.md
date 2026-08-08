@@ -13,7 +13,7 @@
 ## 技术栈
 
 - Python 3.11+ / PySide6 (Qt6) / pydantic v2 / aiohttp（LLM 流式调用）/ aiosqlite（异步 SQLite）+ JSON 文件 / pytest
-- GitHub Actions（`.github/workflows/release.yml`：push `v*` 版本 tag 或手动触发时，在 windows-latest 上经 `python -m novelforge.resources.build` 打包 exe 并发布 GitHub Release；release notes 自动提取自 README「更新记录」最新版本小节）
+- GitHub Actions（`.github/workflows/release.yml`：push `v*` 版本 tag 或手动触发时，在 windows-latest 上经 `python -m novelforge.resources.build` 打包 exe 并发布 GitHub Release；release notes 自动提取自 README「更新记录」最新版本小节；Build 步骤设 `PYTHONIOENCODING: utf-8`，build.py 在 main() 开头 `sys.stdout/stderr.reconfigure(encoding="utf-8")` 规避英文 runner cp1252 代码页无法编码中文输出的 UnicodeEncodeError）
 
 ## 架构分层
 

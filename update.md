@@ -2,6 +2,28 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-08-08：修复 GitHub Actions 打包 UnicodeEncodeError
+
+### 背景
+
+首次触发 GitHub Actions「Build & Release」时，`Build executable` 步骤在 `python -m novelforge.resources.build` 的 `main()` 中 `print(f"开始打包：{app_name}")` 抛出 `UnicodeEncodeError: 'charmap' codec can't encode characters in position 0-4`。根因：GitHub Actions Windows runner 为英文系统，Python stdout 默认 cp1252 代码页，无法编码中文输出；本地中文 Windows（代码页 936）可编码因此未暴露。
+
+### 核心改动
+
+1. **`novelforge/resources/build.py`**：`main()` 开头新增 `sys.stdout.reconfigure(encoding="utf-8", errors="replace")` + `sys.stderr.reconfigure(encoding="utf-8", errors="replace")`，保证任意 locale 下中文日志可输出（Python 3.7+ 支持，项目要求 3.11+）
+2. **`.github/workflows/release.yml`**：`Build executable` 步骤新增 `env: PYTHONIOENCODING: utf-8` 作为冗余防御（即使 build.py 重配置缺失也不因编码挂掉）
+
+### 测试
+
+- `py_compile` 校验 build.py 语法通过
+- PyYAML `safe_load` 校验 release.yml 通过
+- 本地模拟验证 UTF-8 重配置后中文 `print` 正常输出
+
+### 文档同步
+
+- `agent.md`：技术栈 GitHub Actions 描述补充编码处理说明
+- `update.md`：本条目
+
 ## 2026-08-08：GitHub Actions 自动打包发布 Release
 
 ### 背景
