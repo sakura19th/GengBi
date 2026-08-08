@@ -42,6 +42,7 @@ from novelforge.services.storage_service import StorageService, _generate_id
 from novelforge.utils.paths import (
     get_extract_custom_character_merge_prompt_path,
     get_extract_custom_character_prompt_path,
+    get_extract_incremental_prompt_path,
     get_extract_merge_prompt_path,
     get_extract_protagonist_merge_prompt_path,
     get_extract_protagonist_prompt_path,
@@ -518,6 +519,8 @@ class ContextExtractor:
         self._custom_character_prompt_template: str | None = None
         # 自定义角色形象合并提示词模板
         self._custom_character_merge_prompt_template: str | None = None
+        # 【增量更新】提示词模板
+        self._incremental_prompt_template: str | None = None
         # token 计数缓存：(chapter_id, content_hash) -> token_count
         # 避免同一章节内容在多次 extract 调用时重复计数（tiktoken 加载开销大）
         self._token_cache: dict[tuple[str, str], int] = {}
@@ -617,6 +620,102 @@ class ContextExtractor:
             "{{synopsis}}": synopsis,
             "{{world_setting}}": world_setting,
             "{{writing_style}}": writing_style,
+            "{{chapters_text}}": chapters_text,
+        }
+        prompt = template
+        for placeholder, value in replacements.items():
+            prompt = prompt.replace(placeholder, value)
+
+        return prompt
+
+    def _load_incremental_prompt_template(self) -> str:
+        """加载【增量更新】提示词模板（带缓存）。
+
+        Returns:
+            增量更新提示词模板字符串
+        """
+        if self._incremental_prompt_template is None:
+            path = get_extract_incremental_prompt_path()
+            try:
+                self._incremental_prompt_template = path.read_text(encoding="utf-8")
+            except OSError as e:
+                logger.error("加载增量更新提示词模板失败: %s", e)
+                # 返回最小可用模板
+                self._incremental_prompt_template = (
+                    "你是一位资深小说编辑。此前已从更早章节提取过上下文条目，"
+                    "现在请在已有条目基础上结合新增章节做增量更新。\n\n"
+                    "# 小说档案\n标题：{{title}}\n作者：{{author}}\n主角：{{protagonist}}\n"
+                    "简介：{{synopsis}}\n世界观设定：{{world_setting}}\n写作风格：{{writing_style}}\n\n"
+                    "# 已有上下文条目\n{{existing_entries}}\n\n"
+                    "# 新增章节内容\n{{chapters_text}}\n\n"
+                    "请保留仍成立条目（uid 不变）、更新被新剧情改变的条目、"
+                    "新增新实体条目、删除明确过时条目，"
+                    "输出更新后的完整 JSON 数组（字段含 uid/category/key/comment/content/"
+                    "order/position/depth/role）。只输出 JSON，不要 markdown 代码块。"
+                )
+        return self._incremental_prompt_template
+
+    def _build_incremental_prompt(
+        self,
+        project: Project | None,
+        chapters_text: str,
+        existing_entries: list[ContextEntry],
+        config: dict[str, Any],
+    ) -> str:
+        """构建上下文增量更新提示词。
+
+        以更早章节的已有条目为基准（``{{existing_entries}}``），结合新增章节
+        （``{{chapters_text}}``）做增量更新，输出更新后的完整条目集。
+
+        Args:
+            project: 项目对象
+            chapters_text: 本批次新增章节文本
+            existing_entries: 基准章节的已有 ContextEntry 列表
+            config: 提取配置
+
+        Returns:
+            填充后的提示词
+        """
+        override = config.get("extractor_prompt_override")
+        if override and isinstance(override, str) and override.strip():
+            template = override
+        else:
+            template = self._load_incremental_prompt_template()
+
+        # 获取小说档案
+        profile = project.novel_profile if project else None
+        title = getattr(profile, "title", "") if profile else ""
+        author = getattr(profile, "author", "") if profile else ""
+        protagonist = getattr(profile, "protagonist", "") if profile else ""
+        synopsis = getattr(profile, "synopsis", "") if profile else ""
+        world_setting = getattr(profile, "world_setting", "") if profile else ""
+        writing_style = getattr(profile, "writing_style", "") if profile else ""
+
+        # 已有条目序列化为 JSON 数组（截断 content 至 MAX_CONTENT_LENGTH 防超长）
+        condensed = []
+        for e in existing_entries:
+            condensed.append({
+                "uid": e.uid,
+                "category": e.category,
+                "key": e.key,
+                "comment": e.comment,
+                "content": (e.content or "")[:MAX_CONTENT_LENGTH],
+                "order": e.order,
+                "position": e.position,
+                "depth": e.depth,
+                "role": e.role,
+            })
+        existing_entries_text = json.dumps(condensed, ensure_ascii=False, indent=2)
+
+        # 宏替换
+        replacements = {
+            "{{title}}": title,
+            "{{author}}": author,
+            "{{protagonist}}": protagonist,
+            "{{synopsis}}": synopsis,
+            "{{world_setting}}": world_setting,
+            "{{writing_style}}": writing_style,
+            "{{existing_entries}}": existing_entries_text,
             "{{chapters_text}}": chapters_text,
         }
         prompt = template
@@ -1591,6 +1690,7 @@ class ContextExtractor:
         on_chunk: Callable[[str], None] | None,
         on_batch_complete: Callable[[list, int, int], None] | None,
         jailbreak_text: str = "",
+        initial_accumulated: dict[str, Any] | None = None,
     ) -> tuple[ProtagonistProfile | None, int, bool]:
         """主角形象提取（完整支持 token 拆分 + 增量更新 + 合并）。
 
@@ -1607,6 +1707,10 @@ class ContextExtractor:
            - 失败降级返回 accumulated_protagonist 不阻塞流程
         4. 返回 (ProtagonistProfile, batch_count, merged)
 
+        增量更新模式（``initial_accumulated`` 非 None 时）：以更早章节的已有档案
+        作为累积种子，使首批提示词即携带基准档案（``{{accumulated_protagonist}}``），
+        后续批次在该基准之上做深化/修正/补全。
+
         Args:
             project: 项目对象
             batches: 8 维度提取已计算的批次划分（复用）
@@ -1616,6 +1720,7 @@ class ContextExtractor:
             stream: 是否流式调用
             on_chunk: 流式 chunk 回调
             on_batch_complete: 流式批次完成回调
+            initial_accumulated: 增量更新基准档案字典（来自更早章节的已有提取结果）
 
         Returns:
             (ProtagonistProfile | None, batch_count, merged) 元组：
@@ -1626,7 +1731,8 @@ class ContextExtractor:
         log_prefix = "流式" if stream else ""
 
         # 逐批调用 LLM，每批携带前批累积的 ProtagonistProfile
-        accumulated_protagonist: dict[str, Any] = {}
+        # （增量更新模式以更早章节基准档案为初始累积种子）
+        accumulated_protagonist: dict[str, Any] = dict(initial_accumulated or {})
         batch_results: list[dict[str, Any]] = []  # 各批次独立结果，供汇总环节使用
         batch_ranges: list[tuple[int, int]] = []  # 各批次章节区间
 
@@ -1870,6 +1976,7 @@ class ContextExtractor:
         on_chunk: Callable[[str], None] | None,
         on_batch_complete: Callable[[list, int, int], None] | None,
         jailbreak_text: str = "",
+        initial_accumulated: dict[str, Any] | None = None,
     ) -> tuple[ProtagonistProfile | None, int, bool]:
         """自定义角色形象提取（镜像 ``_extract_protagonist``）。
 
@@ -1882,8 +1989,12 @@ class ContextExtractor:
 
         维度合并复用 ``_merge_protagonist_fields``（维度相同，见设计决策 4）。
 
+        增量更新模式（``initial_accumulated`` 非 None 时）：以更早章节该角色的
+        已有档案作为累积种子，使首批提示词即携带基准档案。
+
         Args:
             character_name: 目标角色名（注入 ``{{character_name}}`` 占位符）
+            initial_accumulated: 增量更新基准档案字典（来自更早章节该角色的已有提取结果）
 
         Returns:
             (ProtagonistProfile | None, batch_count, merged) 元组
@@ -1892,7 +2003,8 @@ class ContextExtractor:
         log_prefix = "流式" if stream else ""
 
         # 逐批调用 LLM，每批携带前批累积的 ProtagonistProfile
-        accumulated_protagonist: dict[str, Any] = {}
+        # （增量更新模式以更早章节基准档案为初始累积种子）
+        accumulated_protagonist: dict[str, Any] = dict(initial_accumulated or {})
         batch_results: list[dict[str, Any]] = []
         batch_ranges: list[tuple[int, int]] = []
 
@@ -2279,6 +2391,126 @@ class ContextExtractor:
             logger.warning("读取缓存失败: %s", e)
             return None
 
+    # ===== 增量更新基准查找（上下文/主角/自定义角色）=====
+
+    async def find_latest_context_base(
+        self,
+        project_id: str,
+        chapters: list[Chapter],
+        current_chapter: Chapter,
+    ) -> tuple[Chapter, list[ContextEntry]] | None:
+        """查找最近的已有上下文提取结果作为增量更新基准。
+
+        按 index 从当前章节的**前一章**往前扫描（当前章自身作为增量目标，
+        不作为基准），逐一检查对应章节的缓存（``ctx_extract:{project_id}:{chapter_id}``），
+        返回首个 entries 非空的缓存所在章节与条目列表。
+
+        注意：只检查缓存是否命中，不校验 chapters_hash——基准章节后续章节内容变化
+        不影响基准本身，因此不需要 hash 校验（增量提取会重新计算 delta 章节 hash）。
+
+        Args:
+            project_id: 项目 ID
+            chapters: 项目所有章节（按 index 排序）
+            current_chapter: 当前续写章节（增量目标）
+
+        Returns:
+            (基准章节, 基准条目列表) 元组；未找到任何有效基准时返回 None
+        """
+        sorted_chapters = sorted(chapters, key=lambda c: c.index)
+        current_idx = -1
+        for i, ch in enumerate(sorted_chapters):
+            if ch.id == current_chapter.id:
+                current_idx = i
+                break
+        if current_idx == -1:
+            return None
+        for base_chapter in reversed(sorted_chapters[:current_idx]):
+            cache_key = self._build_cache_key(project_id, base_chapter.id)
+            data = await self._get_cached_data(cache_key)
+            if data is None:
+                continue
+            entries = data.get("entries", [])
+            if entries:
+                logger.info(
+                    "找到上下文增量基准: 章节 %s (index=%d, %d 条)",
+                    base_chapter.title, base_chapter.index, len(entries),
+                )
+                return base_chapter, list(entries)
+        return None
+
+    def find_protagonist_base(
+        self,
+        chapters: list[Chapter],
+        current_chapter: Chapter,
+    ) -> tuple[Chapter, ProtagonistProfile] | None:
+        """查找最近的已有主角形象档案作为增量更新基准。
+
+        按 index 从当前章节的**前一章**往前扫描，返回首个
+        ``protagonist_profile`` 非空的章节与其档案（``list_chapters`` 的
+        ``SELECT *`` 已加载该列，无需额外查询）。
+
+        Args:
+            chapters: 项目所有章节（按 index 排序）
+            current_chapter: 当前续写章节（增量目标）
+
+        Returns:
+            (基准章节, ProtagonistProfile) 元组；未找到时返回 None
+        """
+        sorted_chapters = sorted(chapters, key=lambda c: c.index)
+        current_idx = -1
+        for i, ch in enumerate(sorted_chapters):
+            if ch.id == current_chapter.id:
+                current_idx = i
+                break
+        if current_idx == -1:
+            return None
+        for base_chapter in reversed(sorted_chapters[:current_idx]):
+            profile = base_chapter.protagonist_profile
+            if profile is not None:
+                logger.info(
+                    "找到主角形象增量基准: 章节 %s (index=%d)",
+                    base_chapter.title, base_chapter.index,
+                )
+                return base_chapter, profile
+        return None
+
+    def find_custom_character_base(
+        self,
+        chapters: list[Chapter],
+        current_chapter: Chapter,
+        character_name: str,
+    ) -> tuple[Chapter, ProtagonistProfile] | None:
+        """查找最近的已有指定自定义角色档案作为增量更新基准。
+
+        按 index 从当前章节的**前一章**往前扫描，返回首个
+        ``custom_characters`` 中该角色名对应的章节与其档案。
+
+        Args:
+            chapters: 项目所有章节（按 index 排序）
+            current_chapter: 当前续写章节（增量目标）
+            character_name: 目标角色名
+
+        Returns:
+            (基准章节, ProtagonistProfile) 元组；未找到时返回 None
+        """
+        sorted_chapters = sorted(chapters, key=lambda c: c.index)
+        current_idx = -1
+        for i, ch in enumerate(sorted_chapters):
+            if ch.id == current_chapter.id:
+                current_idx = i
+                break
+        if current_idx == -1:
+            return None
+        for base_chapter in reversed(sorted_chapters[:current_idx]):
+            profile = (base_chapter.custom_characters or {}).get(character_name)
+            if profile is not None:
+                logger.info(
+                    "找到自定义角色 %s 增量基准: 章节 %s (index=%d)",
+                    character_name, base_chapter.title, base_chapter.index,
+                )
+                return base_chapter, profile
+        return None
+
     async def _get_cached_entries(
         self, cache_key: str, current_chapters_hash: str
     ) -> dict[str, Any] | None:
@@ -2319,6 +2551,7 @@ class ContextExtractor:
         protagonist_profile: ProtagonistProfile | None = None,
         protagonist_batch_count: int = 1,
         protagonist_merged: bool = False,
+        incremental_base_index: int | None = None,
     ) -> None:
         """保存提取结果到缓存（按章节绑定，含元数据）。
 
@@ -2335,6 +2568,7 @@ class ContextExtractor:
             protagonist_profile: 主角形象档案（跟随章节缓存）
             protagonist_batch_count: 主角形象提取批次数
             protagonist_merged: 主角形象是否经合并环节
+            incremental_base_index: 增量更新的基准章节 index（None=非增量全量提取）
         """
         try:
             data = {
@@ -2352,6 +2586,7 @@ class ContextExtractor:
                 ),
                 "protagonist_batch_count": protagonist_batch_count,
                 "protagonist_merged": protagonist_merged,
+                "incremental_base_index": incremental_base_index,
             }
             await self.storage_service.storage.set_cache(
                 cache_key, data, ttl_hours=ttl_hours, category=CACHE_CATEGORY
@@ -2421,6 +2656,7 @@ class ContextExtractor:
         ttl_hours: int,
         batch_count: int = 1,
         merged: bool = False,
+        incremental_base_index: int | None = None,
     ) -> None:
         """保存主角形象到独立缓存（按章节绑定，含元数据）。
 
@@ -2431,6 +2667,7 @@ class ContextExtractor:
             ttl_hours: 缓存有效期（小时）
             batch_count: 拆分批次数
             merged: 是否经过【信息汇总】环节
+            incremental_base_index: 增量更新的基准章节 index（None=非增量全量提取）
         """
         try:
             data = {
@@ -2439,6 +2676,7 @@ class ContextExtractor:
                 "extracted_at": datetime.now().isoformat(),
                 "batch_count": batch_count,
                 "merged": merged,
+                "incremental_base_index": incremental_base_index,
             }
             await self.storage_service.storage.set_cache(
                 cache_key, data, ttl_hours=ttl_hours, category=CACHE_CATEGORY
@@ -2509,6 +2747,7 @@ class ContextExtractor:
         batch_count: int = 1,
         merged: bool = False,
         character_name: str = "",
+        incremental_base_index: int | None = None,
     ) -> None:
         """保存自定义角色形象到独立缓存（按章节+角色名绑定，含元数据）。
 
@@ -2520,6 +2759,7 @@ class ContextExtractor:
             batch_count: 拆分批次数
             merged: 是否经过【信息汇总】环节
             character_name: 角色名（仅用于日志）
+            incremental_base_index: 增量更新的基准章节 index（None=非增量全量提取）
         """
         try:
             data = {
@@ -2529,6 +2769,7 @@ class ContextExtractor:
                 "batch_count": batch_count,
                 "merged": merged,
                 "character_name": character_name,
+                "incremental_base_index": incremental_base_index,
             }
             await self.storage_service.storage.set_cache(
                 cache_key, data, ttl_hours=ttl_hours, category=CACHE_CATEGORY
@@ -2606,6 +2847,8 @@ class ContextExtractor:
         on_batch_complete: Callable[[list, int, int], None] | None = None,
         exclude_current: bool = False,
         jailbreak_text: str = "",
+        incremental_base: list[ContextEntry] | None = None,
+        incremental_base_index: int | None = None,
     ) -> ExtractResult:
         """统一的上下文提取实现（流式与非流式共享）。
 
@@ -2626,6 +2869,8 @@ class ContextExtractor:
             on_batch_complete: 流式模式下每批完成回调（累计 entries, 批次序号, 总批数）
             exclude_current: 排除当前章节（重写模式专用，True 时前文不含当前章节，
                 缓存 key 追加 :rewrite 后缀避免与续写模式互相覆盖）
+            incremental_base: 增量更新基准条目（来自更早章节的已有提取结果）
+            incremental_base_index: 基准章节在排序后 chapters 中的 index
 
         Returns:
             ExtractResult 对象
@@ -2682,8 +2927,50 @@ class ContextExtractor:
                 elapsed_seconds=time.time() - start_time,
             )
 
-        # 获取前 N 章
-        if current_chapter is not None:
+        # ===== 增量更新模式：基于更早章节已有提取结果，仅对新增章节做增量提取 =====
+        incremental_mode = (
+            incremental_base is not None and incremental_base_index is not None
+        )
+        if incremental_mode:
+            sorted_chapters = sorted(chapters, key=lambda c: c.index)
+            current_idx = -1
+            for i, ch in enumerate(sorted_chapters):
+                if current_chapter is not None and ch.id == current_chapter.id:
+                    current_idx = i
+                    break
+            if current_chapter is None or current_idx == -1:
+                logger.warning("增量更新：当前章节不在章节列表中，无法增量更新")
+                return ExtractResult(
+                    entries=[],
+                    status="failed",
+                    error="当前章节不在章节列表中，无法增量更新",
+                    elapsed_seconds=time.time() - start_time,
+                )
+            if current_idx <= incremental_base_index:
+                # 当前章节不晚于基准章节：直接返回基准结果（无需提取）
+                logger.info(
+                    "增量更新：当前章节 index=%d 不晚于基准章节 index=%d，"
+                    "直接返回基准结果 (%d 条)",
+                    current_idx, incremental_base_index, len(incremental_base),
+                )
+                return ExtractResult(
+                    entries=list(incremental_base),
+                    status="completed",
+                    elapsed_seconds=time.time() - start_time,
+                    from_cache=False,
+                    batch_count=1,
+                )
+            target_chapters = sorted_chapters[
+                incremental_base_index + 1: current_idx + 1
+            ]
+            logger.info(
+                "增量更新：基准章节 index=%d，delta 章节 %d 章（%d-%d）",
+                incremental_base_index,
+                len(target_chapters),
+                target_chapters[0].index,
+                target_chapters[-1].index,
+            )
+        elif current_chapter is not None:
             target_chapters = self._get_lookback_chapters(
                 chapters, current_chapter, lookback, exclude_current=exclude_current
             )
@@ -2762,6 +3049,8 @@ class ContextExtractor:
                 cache_ttl_hours=cache_ttl_hours,
                 lookback=lookback,
                 log_prefix=log_prefix,
+                incremental_base=incremental_base,
+                incremental_base_index=incremental_base_index,
             )
         finally:
             # 释放 aiohttp session，避免 Unclosed client session 警告
@@ -2790,6 +3079,8 @@ class ContextExtractor:
         cache_ttl_hours: int,
         lookback: int,
         log_prefix: str,
+        incremental_base: list[ContextEntry] | None = None,
+        incremental_base_index: int | None = None,
     ) -> ExtractResult:
         # 模型由流程端点配置 flow_models["context_extraction"] 控制
         # （_get_llm_client 已解析 get_flow_model → 端点 default_model → DEFAULT_EXTRACTOR_MODEL）
@@ -2839,11 +3130,24 @@ class ContextExtractor:
                 except Exception as e:
                     logger.warning("on_chunk 回调异常: %s", e)
 
-            # 构建 prompt（仅含该批章节；每批独立全量提取，不附已有条目）
+            # 构建 prompt（仅含该批章节；每批独立全量提取，不附已有条目；
+            # 增量模式改为基于基准条目构建增量更新 prompt）
             try:
-                prompt = self._build_prompt(
-                    project, batch_chapters, config,
-                )
+                if incremental_base is not None:
+                    chapters_text_parts: list[str] = []
+                    for ch in batch_chapters:
+                        chapters_text_parts.append(f"## {ch.title}\n\n{ch.content}")
+                    batch_chapters_text = "\n\n".join(chapters_text_parts)
+                    prompt = self._build_incremental_prompt(
+                        project,
+                        batch_chapters_text,
+                        incremental_base,
+                        config,
+                    )
+                else:
+                    prompt = self._build_prompt(
+                        project, batch_chapters, config,
+                    )
             except Exception as e:
                 logger.error("构建提取提示词失败: %s", e, exc_info=True)
                 return ExtractResult(
@@ -3131,6 +3435,7 @@ class ContextExtractor:
                 protagonist_profile=None,
                 protagonist_batch_count=1,
                 protagonist_merged=False,
+                incremental_base_index=incremental_base_index,
             )
 
         return ExtractResult(
@@ -3155,6 +3460,8 @@ class ContextExtractor:
         token_limit_override: int | None = None,
         exclude_current: bool = False,
         jailbreak_text: str = "",
+        incremental_base: list[ContextEntry] | None = None,
+        incremental_base_index: int | None = None,
     ) -> ExtractResult:
         """提取上下文条目（默认流式，on_chunk=None 时不推送 chunk 但仍用 stream_chat_completion）。
 
@@ -3166,6 +3473,8 @@ class ContextExtractor:
             lookback_override: 覆盖 lookback_chapters（0=全部前文，None=用配置默认值）
             token_limit_override: 覆盖 token_limit（0=不限制，None=用配置默认值）
             exclude_current: 排除当前章节（重写模式专用，True 时前文不含当前章节）
+            incremental_base: 增量更新基准条目（来自更早章节的已有提取结果）
+            incremental_base_index: 基准章节在排序后 chapters 中的 index
 
         Returns:
             ExtractResult 对象
@@ -3180,6 +3489,8 @@ class ContextExtractor:
             stream=True,
             exclude_current=exclude_current,
             jailbreak_text=jailbreak_text,
+            incremental_base=incremental_base,
+            incremental_base_index=incremental_base_index,
         )
 
     async def extract_streaming(
@@ -3194,6 +3505,8 @@ class ContextExtractor:
         on_batch_complete: Callable[[list, int, int], None] | None = None,
         exclude_current: bool = False,
         jailbreak_text: str = "",
+        incremental_base: list[ContextEntry] | None = None,
+        incremental_base_index: int | None = None,
     ) -> ExtractResult:
         """流式提取上下文（不阻塞，通过 on_chunk 回调推送进度）。
 
@@ -3212,6 +3525,8 @@ class ContextExtractor:
             token_limit_override: 覆盖 token_limit（0=不限制，None=用配置默认值）
             on_batch_complete: 每批完成回调（累计 entries, 批次序号, 总批数）
             exclude_current: 排除当前章节（重写模式专用，True 时前文不含当前章节）
+            incremental_base: 增量更新基准条目（来自更早章节的已有提取结果）
+            incremental_base_index: 基准章节在排序后 chapters 中的 index
 
         Returns:
             ExtractResult 对象
@@ -3228,6 +3543,8 @@ class ContextExtractor:
             on_batch_complete=on_batch_complete,
             exclude_current=exclude_current,
             jailbreak_text=jailbreak_text,
+            incremental_base=incremental_base,
+            incremental_base_index=incremental_base_index,
         )
 
     async def extract_protagonist_streaming(
@@ -3240,6 +3557,8 @@ class ContextExtractor:
         on_chunk: Callable[[str], None] | None = None,
         on_batch_complete: Callable[[int, int], None] | None = None,
         jailbreak_text: str = "",
+        incremental_base: ProtagonistProfile | None = None,
+        incremental_base_index: int | None = None,
     ) -> tuple[ProtagonistProfile | None, str]:
         """独立流式提取主角形象（镜像 OntologyExtractor.extract_ontology_streaming）。
 
@@ -3254,6 +3573,12 @@ class ContextExtractor:
         5. 保存到独立缓存 key
         6. 返回 (ProtagonistProfile | None, 状态消息)
 
+        增量更新模式（``incremental_base`` 与 ``incremental_base_index`` 均非 None 时）：
+        - 以更早章节已有主角档案为基准，跳过 lookback 计算，
+          仅对基准章节之后到当前章节的 delta 章节做增量提取
+        - 基准档案通过 ``initial_accumulated`` 注入首批提示词，
+          与现有累积链天然衔接
+
         Args:
             project: 项目对象
             chapters: 项目所有章节
@@ -3262,6 +3587,8 @@ class ContextExtractor:
             lookback: 回溯章节数（0=全部前文）
             on_chunk: 流式 chunk 回调（接收增量文本）
             on_batch_complete: 批次完成回调（batch_idx, total_batches）
+            incremental_base: 增量更新基准档案（来自更早章节的已有提取结果）
+            incremental_base_index: 基准章节在排序后 chapters 中的 index
 
         Returns:
             (ProtagonistProfile | None, str) 元组：
@@ -3287,10 +3614,36 @@ class ContextExtractor:
             logger.info("无前文可提取主角形象，跳过")
             return None, "无前文可提取"
 
-        # 获取前 N 章
-        target_chapters = self._get_lookback_chapters(
-            chapters, current_chapter, lookback
+        # 增量更新模式：基准档案注入 + delta 章节
+        incremental_mode = (
+            incremental_base is not None and incremental_base_index is not None
         )
+        # 获取目标章节（增量模式取基准之后的 delta 章节）
+        if incremental_mode:
+            sorted_chapters = sorted(chapters, key=lambda c: c.index)
+            current_idx = -1
+            for i, ch in enumerate(sorted_chapters):
+                if ch.id == current_chapter.id:
+                    current_idx = i
+                    break
+            if current_idx == -1:
+                return None, "当前章节不在章节列表中，无法增量更新"
+            if current_idx <= incremental_base_index:
+                return incremental_base, "当前章节不晚于基准章节，未执行提取"
+            target_chapters = sorted_chapters[
+                incremental_base_index + 1: current_idx + 1
+            ]
+            logger.info(
+                "主角形象增量更新：基准章节 index=%d，delta 章节 %d 章（%d-%d）",
+                incremental_base_index,
+                len(target_chapters),
+                target_chapters[0].index,
+                target_chapters[-1].index,
+            )
+        else:
+            target_chapters = self._get_lookback_chapters(
+                chapters, current_chapter, lookback
+            )
         if not target_chapters:
             return None, "无前文可提取"
 
@@ -3314,6 +3667,8 @@ class ContextExtractor:
                 cache_enabled=cache_enabled,
                 cache_ttl_hours=cache_ttl_hours,
                 start_time=start_time,
+                incremental_base=incremental_base,
+                incremental_base_index=incremental_base_index,
             )
         finally:
             # 释放 aiohttp session，避免 Unclosed client session 警告
@@ -3337,6 +3692,8 @@ class ContextExtractor:
         cache_enabled: bool,
         cache_ttl_hours: int,
         start_time: float,
+        incremental_base: ProtagonistProfile | None = None,
+        incremental_base_index: int | None = None,
     ) -> tuple[ProtagonistProfile | None, str]:
         # 模型由流程端点配置 flow_models["protagonist_extraction"] 控制
         model = default_model
@@ -3364,6 +3721,9 @@ class ContextExtractor:
 
         # 调用 _extract_protagonist 复用完整逻辑
         try:
+            initial_accumulated = None
+            if incremental_base is not None:
+                initial_accumulated = incremental_base.model_dump()
             protagonist_profile, protagonist_batch_count, protagonist_merged = (
                 await self._extract_protagonist(
                     project=project,
@@ -3375,6 +3735,7 @@ class ContextExtractor:
                     on_chunk=on_chunk,
                     on_batch_complete=adapted_batch_cb,
                     jailbreak_text=jailbreak_text,
+                    initial_accumulated=initial_accumulated,
                 )
             )
         except asyncio.CancelledError:
@@ -3406,6 +3767,7 @@ class ContextExtractor:
                 cache_ttl_hours,
                 batch_count=protagonist_batch_count,
                 merged=protagonist_merged,
+                incremental_base_index=incremental_base_index,
             )
 
         elapsed = time.time() - start_time
@@ -3427,6 +3789,8 @@ class ContextExtractor:
         on_chunk: Callable[[str], None] | None = None,
         on_batch_complete: Callable[[int, int], None] | None = None,
         jailbreak_text: str = "",
+        incremental_base: ProtagonistProfile | None = None,
+        incremental_base_index: int | None = None,
     ) -> tuple[ProtagonistProfile | None, str]:
         """独立流式提取自定义角色形象（镜像 ``extract_protagonist_streaming``）。
 
@@ -3441,6 +3805,11 @@ class ContextExtractor:
         5. 保存到独立缓存 key
         6. 返回 (ProtagonistProfile | None, 状态消息)
 
+        增量更新模式（``incremental_base`` 与 ``incremental_base_index`` 均非 None 时）：
+        - 以更早章节该角色的已有档案为基准，跳过 lookback 计算，
+          仅对基准章节之后到当前章节的 delta 章节做增量提取
+        - 基准档案通过 ``initial_accumulated`` 注入首批提示词
+
         Args:
             project: 项目对象
             chapters: 项目所有章节
@@ -3450,6 +3819,8 @@ class ContextExtractor:
             lookback: 回溯章节数（0=全部前文）
             on_chunk: 流式 chunk 回调（接收增量文本）
             on_batch_complete: 批次完成回调（batch_idx, total_batches）
+            incremental_base: 增量更新基准档案（来自更早章节该角色的已有提取结果）
+            incremental_base_index: 基准章节在排序后 chapters 中的 index
 
         Returns:
             (ProtagonistProfile | None, str) 元组：
@@ -3479,10 +3850,37 @@ class ContextExtractor:
         if not character_name or not character_name.strip():
             return None, "角色名不能为空"
 
-        # 获取前 N 章
-        target_chapters = self._get_lookback_chapters(
-            chapters, current_chapter, lookback
+        # 增量更新模式：基准档案注入 + delta 章节
+        incremental_mode = (
+            incremental_base is not None and incremental_base_index is not None
         )
+        # 获取目标章节（增量模式取基准之后的 delta 章节）
+        if incremental_mode:
+            sorted_chapters = sorted(chapters, key=lambda c: c.index)
+            current_idx = -1
+            for i, ch in enumerate(sorted_chapters):
+                if ch.id == current_chapter.id:
+                    current_idx = i
+                    break
+            if current_idx == -1:
+                return None, "当前章节不在章节列表中，无法增量更新"
+            if current_idx <= incremental_base_index:
+                return incremental_base, "当前章节不晚于基准章节，未执行提取"
+            target_chapters = sorted_chapters[
+                incremental_base_index + 1: current_idx + 1
+            ]
+            logger.info(
+                "自定义角色 %s 增量更新：基准章节 index=%d，delta 章节 %d 章（%d-%d）",
+                character_name,
+                incremental_base_index,
+                len(target_chapters),
+                target_chapters[0].index,
+                target_chapters[-1].index,
+            )
+        else:
+            target_chapters = self._get_lookback_chapters(
+                chapters, current_chapter, lookback
+            )
         if not target_chapters:
             return None, "无前文可提取"
 
@@ -3507,6 +3905,8 @@ class ContextExtractor:
                 cache_ttl_hours=cache_ttl_hours,
                 start_time=start_time,
                 character_name=character_name,
+                incremental_base=incremental_base,
+                incremental_base_index=incremental_base_index,
             )
         finally:
             # 释放 aiohttp session
@@ -3531,6 +3931,8 @@ class ContextExtractor:
         cache_ttl_hours: int,
         start_time: float,
         character_name: str,
+        incremental_base: ProtagonistProfile | None = None,
+        incremental_base_index: int | None = None,
     ) -> tuple[ProtagonistProfile | None, str]:
         # 模型由流程端点配置 flow_models["custom_character_extraction"] 控制
         model = default_model
@@ -3554,6 +3956,9 @@ class ContextExtractor:
 
         # 调用 _extract_custom_character 复用完整逻辑
         try:
+            initial_accumulated = None
+            if incremental_base is not None:
+                initial_accumulated = incremental_base.model_dump()
             character_profile, profile_batch_count, profile_merged = (
                 await self._extract_custom_character(
                     project=project,
@@ -3566,6 +3971,7 @@ class ContextExtractor:
                     on_chunk=on_chunk,
                     on_batch_complete=adapted_batch_cb,
                     jailbreak_text=jailbreak_text,
+                    initial_accumulated=initial_accumulated,
                 )
             )
         except asyncio.CancelledError:
@@ -3598,6 +4004,7 @@ class ContextExtractor:
                 batch_count=profile_batch_count,
                 merged=profile_merged,
                 character_name=character_name,
+                incremental_base_index=incremental_base_index,
             )
 
         elapsed = time.time() - start_time

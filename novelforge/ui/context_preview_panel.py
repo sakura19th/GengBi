@@ -255,6 +255,66 @@ class _AddEntryDialog(QDialog):
         )
 
 
+class _FeatureActionDialog(QDialog):
+    """功能操作选择对话框。
+
+    每个功能按钮（上下文/世界观底层/主角形象/自定义角色/文风档案/自定义设定）
+    点击后弹出本对话框，列出该功能支持的子操作（提取/增量更新/查看/复制等）。
+    用户点击某个操作按钮后，对话框记录所选动作键并关闭。
+    """
+
+    def __init__(
+        self,
+        feature_title: str,
+        actions: list[tuple[str, str]],
+        parent: QWidget | None = None,
+    ) -> None:
+        """初始化功能操作选择对话框。
+
+        Args:
+            feature_title: 功能标题（如"自定义角色"）
+            actions: (动作键, 按钮文本) 列表，按展示顺序排列
+            parent: 父控件
+        """
+        super().__init__(parent)
+        self.setWindowTitle(feature_title)
+        self.setMinimumWidth(280)
+        self._selected_action: str | None = None
+        self._setup_ui(feature_title, actions)
+
+    def _setup_ui(self, feature_title: str, actions: list[tuple[str, str]]) -> None:
+        """构建 UI：标题 + 垂直排布的操作按钮。"""
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        title_label = QLabel(feature_title)
+        title_label.setObjectName("panelTitle")
+        layout.addWidget(title_label)
+
+        for action_key, action_text in actions:
+            btn = QPushButton(action_text)
+            btn.setMinimumHeight(32)
+            btn.clicked.connect(lambda _, k=action_key: self._on_action_clicked(k))
+            layout.addWidget(btn)
+
+    def _on_action_clicked(self, action_key: str) -> None:
+        """操作按钮点击：记录动作键并关闭对话框。
+
+        Args:
+            action_key: 选中的动作键
+        """
+        self._selected_action = action_key
+        self.accept()
+
+    def get_selected_action(self) -> str | None:
+        """获取用户选中的动作键。
+
+        Returns:
+            动作键；用户未选择直接关闭时返回 None
+        """
+        return self._selected_action
+
+
 class ContextPreviewPanel(QWidget):
     """上下文提取预览面板。
 
@@ -290,6 +350,9 @@ class ContextPreviewPanel(QWidget):
     copy_to_chapter_requested = Signal()
     copy_protagonist_to_chapter_requested = Signal()
     copy_custom_character_to_chapter_requested = Signal()
+    incremental_context_requested = Signal(dict)
+    incremental_protagonist_requested = Signal(dict)
+    incremental_custom_character_requested = Signal(dict)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         """初始化预览面板。"""
@@ -367,104 +430,63 @@ class ContextPreviewPanel(QWidget):
         self._meta_label.setWordWrap(True)
         layout.addWidget(self._meta_label)
 
-        # ===== 提取操作行（流式布局，窄屏自动换行） =====
-        extract_row = QFlowLayout()
-        extract_row.setSpacing(4)
+        # ===== 功能按钮行（每个功能一个按钮，点击弹出操作选择对话框）=====
+        feature_row = QFlowLayout()
+        feature_row.setSpacing(4)
 
-        self._extract_btn = QPushButton("提取上下文")
-        self._extract_btn.setObjectName("primaryBtn")
-        self._extract_btn.clicked.connect(self._on_extract_clicked)
-        extract_row.addWidget(self._extract_btn)
+        self._feature_buttons: dict[str, QPushButton] = {}
 
-        self._extract_ontology_btn = QPushButton("提取世界观底层")
-        self._extract_ontology_btn.setObjectName("primaryBtn")
-        self._extract_ontology_btn.setToolTip(
-            "全文拆分分析提取 7 维度世界观元描述，固化到项目并绑定世界书"
-        )
-        self._extract_ontology_btn.clicked.connect(self._on_extract_ontology_clicked)
-        extract_row.addWidget(self._extract_ontology_btn)
+        self._context_btn = QPushButton("上下文")
+        self._context_btn.setObjectName("primaryBtn")
+        self._context_btn.setToolTip("上下文提取：全量提取/增量更新/复制到章节")
+        self._context_btn.clicked.connect(self._on_context_clicked)
+        feature_row.addWidget(self._context_btn)
+        self._feature_buttons["context"] = self._context_btn
 
-        self._view_ontology_btn = QPushButton("查看世界观底层")
-        self._view_ontology_btn.setObjectName("secondaryBtn")
-        self._view_ontology_btn.setToolTip(
-            "查看已提取的世界观底层 7 维度元描述"
-        )
-        self._view_ontology_btn.clicked.connect(self._on_view_ontology_clicked)
-        extract_row.addWidget(self._view_ontology_btn)
+        self._ontology_btn = QPushButton("世界观底层")
+        self._ontology_btn.setObjectName("primaryBtn")
+        self._ontology_btn.setToolTip("世界观底层：全文提取/查看 7 维度元描述")
+        self._ontology_btn.clicked.connect(self._on_ontology_clicked)
+        feature_row.addWidget(self._ontology_btn)
+        self._feature_buttons["ontology"] = self._ontology_btn
 
-        self._extract_protagonist_btn = QPushButton("提取主角形象")
-        self._extract_protagonist_btn.setObjectName("primaryBtn")
-        self._extract_protagonist_btn.setToolTip(
-            "全文拆分分析提取 8 维度主角心理学档案，缓存到当前章节"
-        )
-        self._extract_protagonist_btn.clicked.connect(
-            self._on_extract_protagonist_clicked
-        )
-        extract_row.addWidget(self._extract_protagonist_btn)
+        self._protagonist_btn = QPushButton("主角形象")
+        self._protagonist_btn.setObjectName("primaryBtn")
+        self._protagonist_btn.setToolTip("主角形象：提取/增量更新/查看/复制到章节")
+        self._protagonist_btn.clicked.connect(self._on_protagonist_clicked)
+        feature_row.addWidget(self._protagonist_btn)
+        self._feature_buttons["protagonist"] = self._protagonist_btn
 
-        self._view_protagonist_btn = QPushButton("查看主角形象")
-        self._view_protagonist_btn.setObjectName("secondaryBtn")
-        self._view_protagonist_btn.setToolTip(
-            "查看当前章节已提取的主角形象 8 维度档案"
+        self._custom_character_btn = QPushButton("自定义角色")
+        self._custom_character_btn.setObjectName("primaryBtn")
+        self._custom_character_btn.setToolTip(
+            "自定义角色：提取/增量更新/查看/复制到章节"
         )
-        self._view_protagonist_btn.clicked.connect(
-            self._on_view_protagonist_clicked
-        )
-        extract_row.addWidget(self._view_protagonist_btn)
+        self._custom_character_btn.clicked.connect(self._on_custom_character_clicked)
+        feature_row.addWidget(self._custom_character_btn)
+        self._feature_buttons["custom_character"] = self._custom_character_btn
 
-        self._extract_custom_character_btn = QPushButton("提取自定义角色")
-        self._extract_custom_character_btn.setObjectName("primaryBtn")
-        self._extract_custom_character_btn.setToolTip(
-            "输入角色名，全文拆分分析提取 8 维度角色心理学档案，缓存到当前章节"
-        )
-        self._extract_custom_character_btn.clicked.connect(
-            self._on_extract_custom_character_clicked
-        )
-        extract_row.addWidget(self._extract_custom_character_btn)
+        self._style_btn = QPushButton("文风档案")
+        self._style_btn.setObjectName("primaryBtn")
+        self._style_btn.setToolTip("文风档案：全文提取/查看 9 维度量化参数")
+        self._style_btn.clicked.connect(self._on_style_clicked)
+        feature_row.addWidget(self._style_btn)
+        self._feature_buttons["style"] = self._style_btn
 
-        self._view_custom_character_btn = QPushButton("查看自定义角色")
-        self._view_custom_character_btn.setObjectName("secondaryBtn")
-        self._view_custom_character_btn.setToolTip(
-            "查看当前章节已提取的自定义角色档案（可提取多个角色）"
-        )
-        self._view_custom_character_btn.clicked.connect(
-            self._on_view_custom_character_clicked
-        )
-        extract_row.addWidget(self._view_custom_character_btn)
+        self._custom_rule_btn = QPushButton("自定义设定")
+        self._custom_rule_btn.setObjectName("primaryBtn")
+        self._custom_rule_btn.setToolTip("自定义设定：新增/查看审计必查项")
+        self._custom_rule_btn.clicked.connect(self._on_custom_rule_clicked)
+        feature_row.addWidget(self._custom_rule_btn)
+        self._feature_buttons["custom_rule"] = self._custom_rule_btn
 
-        self._extract_style_btn = QPushButton("提取文风档案")
-        self._extract_style_btn.setObjectName("primaryBtn")
-        self._extract_style_btn.setToolTip(
-            "全文拆分分析提取 9 维度文笔风格参数，固化到项目"
-        )
-        self._extract_style_btn.clicked.connect(self._on_extract_style_clicked)
-        extract_row.addWidget(self._extract_style_btn)
+        layout.addLayout(feature_row)
 
-        self._view_style_btn = QPushButton("查看文风档案")
-        self._view_style_btn.setObjectName("secondaryBtn")
-        self._view_style_btn.setToolTip(
-            "查看已提取的文风档案 9 维度量化风格参数"
-        )
-        self._view_style_btn.clicked.connect(self._on_view_style_clicked)
-        extract_row.addWidget(self._view_style_btn)
+        # ===== 设置与条目管理行（流式布局，窄屏自动换行） =====
+        settings_row = QFlowLayout()
+        settings_row.setSpacing(4)
 
-        self._add_custom_rule_btn = QPushButton("新增自定义设定")
-        self._add_custom_rule_btn.setObjectName("primaryBtn")
-        self._add_custom_rule_btn.setToolTip(
-            "输入自定义设定，AI 结合世界观底层结构化为审计必查项（一票否决）"
-        )
-        self._add_custom_rule_btn.clicked.connect(self._on_add_custom_rule_clicked)
-        extract_row.addWidget(self._add_custom_rule_btn)
-
-        self._view_custom_rules_btn = QPushButton("查看自定义设定")
-        self._view_custom_rules_btn.setObjectName("secondaryBtn")
-        self._view_custom_rules_btn.setToolTip(
-            "查看已新增的自定义设定/审计必查项列表，可删除"
-        )
-        self._view_custom_rules_btn.clicked.connect(self._on_view_custom_rules_clicked)
-        extract_row.addWidget(self._view_custom_rules_btn)
-
-        extract_row.addWidget(QLabel("前文:"))
+        settings_row.addWidget(QLabel("前文:"))
 
         self._lookback_combo = QComboBox()
         self._lookback_combo.addItems([
@@ -472,9 +494,9 @@ class ContextPreviewPanel(QWidget):
         ])
         self._lookback_combo.setCurrentText("全部前文")
         self._lookback_combo.setMinimumWidth(100)
-        extract_row.addWidget(self._lookback_combo)
+        settings_row.addWidget(self._lookback_combo)
 
-        extract_row.addWidget(QLabel("Token:"))
+        settings_row.addWidget(QLabel("Token:"))
 
         self._token_limit_combo = QComboBox()
         self._token_limit_combo.addItems(["不限制", "50k", "100k", "250k", "500k"])
@@ -483,49 +505,21 @@ class ContextPreviewPanel(QWidget):
         self._token_limit_combo.setToolTip(
             "选中章节超出 token 限制时，自动按章节拆分成多次请求"
         )
-        extract_row.addWidget(self._token_limit_combo)
-
-        layout.addLayout(extract_row)
-
-        # ===== 操作按钮（流式布局，窄屏自动换行） =====
-        btn_layout = QFlowLayout()
-        btn_layout.setSpacing(4)
+        settings_row.addWidget(self._token_limit_combo)
 
         self._add_btn = QPushButton("添加条目")
         self._add_btn.clicked.connect(self._on_add_clicked)
-        btn_layout.addWidget(self._add_btn)
+        settings_row.addWidget(self._add_btn)
 
         self._clear_btn = QPushButton("清空")
         self._clear_btn.clicked.connect(self._on_clear_clicked)
-        btn_layout.addWidget(self._clear_btn)
+        settings_row.addWidget(self._clear_btn)
 
         self._view_prompt_btn = QPushButton("查看提示词")
         self._view_prompt_btn.clicked.connect(self._on_view_prompt_clicked)
-        btn_layout.addWidget(self._view_prompt_btn)
+        settings_row.addWidget(self._view_prompt_btn)
 
-        self._copy_to_chapter_btn = QPushButton("复制到章节")
-        self._copy_to_chapter_btn.clicked.connect(self._on_copy_to_chapter_clicked)
-        btn_layout.addWidget(self._copy_to_chapter_btn)
-
-        self._copy_protagonist_to_chapter_btn = QPushButton("复制主角形象到章节")
-        self._copy_protagonist_to_chapter_btn.setToolTip(
-            "将当前章节已提取的主角形象复制到其他章节（覆盖目标章已有档案）"
-        )
-        self._copy_protagonist_to_chapter_btn.clicked.connect(
-            self._on_copy_protagonist_to_chapter_clicked
-        )
-        btn_layout.addWidget(self._copy_protagonist_to_chapter_btn)
-
-        self._copy_custom_character_to_chapter_btn = QPushButton("复制自定义角色到章节")
-        self._copy_custom_character_to_chapter_btn.setToolTip(
-            "选择一个自定义角色，复制到其他章节（目标章同名覆盖、其他角色保留）"
-        )
-        self._copy_custom_character_to_chapter_btn.clicked.connect(
-            self._on_copy_custom_character_to_chapter_clicked
-        )
-        btn_layout.addWidget(self._copy_custom_character_to_chapter_btn)
-
-        layout.addLayout(btn_layout)
+        layout.addLayout(settings_row)
 
         # ===== 分组显示区（滚动） =====
         self._scroll_area = QScrollArea()
@@ -600,8 +594,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_text.setText("提取中...")
         self._loading_text.setVisible(True)
         self._cancel_btn.setEnabled(True)
-        self._add_btn.setEnabled(False)
-        self._clear_btn.setEnabled(False)
+        self._set_feature_buttons_enabled(False)
         self._set_label_state(self._status_label, "提取中", "textInfo")
         self._loading_timer.start()
         # 显示流式输出查看区并清空内容
@@ -634,8 +627,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
         self._cancel_btn.setEnabled(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._set_label_state(self._status_label, "提取完成", "textSuccess")
         # 更新流式输出查看区标题
         self._stream_group.setTitle("流式输出（接收完成）")
@@ -677,8 +669,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
         self._cancel_btn.setEnabled(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._set_label_state(self._status_label, "提取失败", "textDanger")
         self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
         # 更新流式输出查看区标题
@@ -692,8 +683,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
         self._cancel_btn.setEnabled(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._set_label_state(self._status_label, "已取消", "textWarning")
         self._set_label_state(self._meta_label, "提取已取消", "textWarning")
         # 更新流式输出查看区标题
@@ -924,6 +914,125 @@ class ContextPreviewPanel(QWidget):
         """取消提取按钮点击。"""
         self.cancel_requested.emit()
 
+    def _show_feature_dialog(
+        self, feature_title: str, actions: list[tuple[str, str]]
+    ) -> str | None:
+        """弹出功能操作选择对话框，返回用户选中的动作键。
+
+        Args:
+            feature_title: 功能标题
+            actions: (动作键, 按钮文本) 列表
+
+        Returns:
+            选中的动作键；未选择直接关闭时返回 None
+        """
+        dialog = _FeatureActionDialog(feature_title, actions, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return dialog.get_selected_action()
+
+    def _on_context_clicked(self) -> None:
+        """上下文功能按钮点击：弹出操作选择对话框。"""
+        action = self._show_feature_dialog(
+            "上下文",
+            [
+                ("extract", "提取上下文（全量）"),
+                ("incremental", "增量更新"),
+                ("copy", "复制到章节"),
+            ],
+        )
+        if action == "extract":
+            self._on_extract_clicked()
+        elif action == "incremental":
+            config = self.get_lookback_config()
+            self.incremental_context_requested.emit(config)
+        elif action == "copy":
+            self._on_copy_to_chapter_clicked()
+
+    def _on_ontology_clicked(self) -> None:
+        """世界观底层功能按钮点击：弹出操作选择对话框。"""
+        action = self._show_feature_dialog(
+            "世界观底层",
+            [
+                ("extract", "提取世界观底层"),
+                ("view", "查看世界观底层"),
+            ],
+        )
+        if action == "extract":
+            self._on_extract_ontology_clicked()
+        elif action == "view":
+            self._on_view_ontology_clicked()
+
+    def _on_protagonist_clicked(self) -> None:
+        """主角形象功能按钮点击：弹出操作选择对话框。"""
+        action = self._show_feature_dialog(
+            "主角形象",
+            [
+                ("extract", "提取主角形象（全量）"),
+                ("incremental", "增量更新"),
+                ("view", "查看主角形象"),
+                ("copy", "复制到章节"),
+            ],
+        )
+        if action == "extract":
+            self._on_extract_protagonist_clicked()
+        elif action == "incremental":
+            config = self.get_lookback_config()
+            self.incremental_protagonist_requested.emit(config)
+        elif action == "view":
+            self._on_view_protagonist_clicked()
+        elif action == "copy":
+            self._on_copy_protagonist_to_chapter_clicked()
+
+    def _on_custom_character_clicked(self) -> None:
+        """自定义角色功能按钮点击：弹出操作选择对话框。"""
+        action = self._show_feature_dialog(
+            "自定义角色",
+            [
+                ("extract", "提取自定义角色（全量）"),
+                ("incremental", "增量更新"),
+                ("view", "查看自定义角色"),
+                ("copy", "复制到章节"),
+            ],
+        )
+        if action == "extract":
+            self._on_extract_custom_character_clicked()
+        elif action == "incremental":
+            config = self.get_lookback_config()
+            self.incremental_custom_character_requested.emit(config)
+        elif action == "view":
+            self._on_view_custom_character_clicked()
+        elif action == "copy":
+            self._on_copy_custom_character_to_chapter_clicked()
+
+    def _on_style_clicked(self) -> None:
+        """文风档案功能按钮点击：弹出操作选择对话框。"""
+        action = self._show_feature_dialog(
+            "文风档案",
+            [
+                ("extract", "提取文风档案"),
+                ("view", "查看文风档案"),
+            ],
+        )
+        if action == "extract":
+            self._on_extract_style_clicked()
+        elif action == "view":
+            self._on_view_style_clicked()
+
+    def _on_custom_rule_clicked(self) -> None:
+        """自定义设定功能按钮点击：弹出操作选择对话框。"""
+        action = self._show_feature_dialog(
+            "自定义设定",
+            [
+                ("add", "新增自定义设定"),
+                ("view", "查看自定义设定"),
+            ],
+        )
+        if action == "add":
+            self._on_add_custom_rule_clicked()
+        elif action == "view":
+            self._on_view_custom_rules_clicked()
+
     def _on_extract_clicked(self) -> None:
         """提取上下文按钮点击。"""
         config = self.get_lookback_config()
@@ -1069,6 +1178,23 @@ class ContextPreviewPanel(QWidget):
             f"({len(entries)} 条)"
         )
 
+    # ===== 辅助方法 =====
+
+    def _set_feature_buttons_enabled(self, enabled: bool) -> None:
+        """统一启用/禁用功能按钮与条目管理按钮。
+
+        提取过程中禁用所有功能按钮与添加/清空/查看提示词按钮，
+        防止用户并发触发多个提取；结束后统一恢复。
+
+        Args:
+            enabled: True=启用，False=禁用
+        """
+        for btn in self._feature_buttons.values():
+            btn.setEnabled(enabled)
+        self._add_btn.setEnabled(enabled)
+        self._clear_btn.setEnabled(enabled)
+        self._view_prompt_btn.setEnabled(enabled)
+
     # ===== 世界观底层提取流式接口（复用 _stream_view）=====
 
     def start_ontology_extraction(self) -> None:
@@ -1080,16 +1206,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_text.setText("世界观提取中...")
         self._loading_text.setVisible(True)
         self._cancel_btn.setEnabled(False)
-        self._add_btn.setEnabled(False)
-        self._clear_btn.setEnabled(False)
-        self._extract_btn.setEnabled(False)
-        self._extract_ontology_btn.setEnabled(False)
-        self._extract_protagonist_btn.setEnabled(False)
-        self._extract_custom_character_btn.setEnabled(False)
-        self._extract_style_btn.setEnabled(False)
-        self._view_style_btn.setEnabled(False)
-        self._add_custom_rule_btn.setEnabled(False)
-        self._view_custom_rules_btn.setEnabled(False)
+        self._set_feature_buttons_enabled(False)
         self._set_label_state(self._status_label, "世界观提取中", "textInfo")
         self._loading_timer.start()
         # 显示流式输出查看区并清空内容
@@ -1145,16 +1262,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_timer.stop()
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
-        self._extract_btn.setEnabled(True)
-        self._extract_ontology_btn.setEnabled(True)
-        self._extract_protagonist_btn.setEnabled(True)
-        self._extract_custom_character_btn.setEnabled(True)
-        self._extract_style_btn.setEnabled(True)
-        self._view_style_btn.setEnabled(True)
-        self._add_custom_rule_btn.setEnabled(True)
-        self._view_custom_rules_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._set_label_state(self._status_label, "世界观提取完成", "textSuccess")
         self._stream_group.setTitle("世界观流式输出（接收完成）")
 
@@ -1168,16 +1276,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_timer.stop()
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
-        self._extract_btn.setEnabled(True)
-        self._extract_ontology_btn.setEnabled(True)
-        self._extract_protagonist_btn.setEnabled(True)
-        self._extract_custom_character_btn.setEnabled(True)
-        self._extract_style_btn.setEnabled(True)
-        self._view_style_btn.setEnabled(True)
-        self._add_custom_rule_btn.setEnabled(True)
-        self._view_custom_rules_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._set_label_state(self._status_label, "世界观提取失败", "textDanger")
         self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
         self._stream_group.setTitle("世界观流式输出（已中断）")
@@ -1193,16 +1292,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_text.setText("主角形象提取中...")
         self._loading_text.setVisible(True)
         self._cancel_btn.setEnabled(False)
-        self._add_btn.setEnabled(False)
-        self._clear_btn.setEnabled(False)
-        self._extract_btn.setEnabled(False)
-        self._extract_ontology_btn.setEnabled(False)
-        self._extract_protagonist_btn.setEnabled(False)
-        self._extract_custom_character_btn.setEnabled(False)
-        self._extract_style_btn.setEnabled(False)
-        self._view_style_btn.setEnabled(False)
-        self._add_custom_rule_btn.setEnabled(False)
-        self._view_custom_rules_btn.setEnabled(False)
+        self._set_feature_buttons_enabled(False)
         self._set_label_state(self._status_label, "主角形象提取中", "textInfo")
         self._loading_timer.start()
         # 显示流式输出查看区并清空内容
@@ -1258,16 +1348,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_timer.stop()
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
-        self._extract_btn.setEnabled(True)
-        self._extract_ontology_btn.setEnabled(True)
-        self._extract_protagonist_btn.setEnabled(True)
-        self._extract_custom_character_btn.setEnabled(True)
-        self._extract_style_btn.setEnabled(True)
-        self._view_style_btn.setEnabled(True)
-        self._add_custom_rule_btn.setEnabled(True)
-        self._view_custom_rules_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._set_label_state(self._status_label, "主角形象提取完成", "textSuccess")
         self._stream_group.setTitle("主角形象流式输出（接收完成）")
 
@@ -1281,16 +1362,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_timer.stop()
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
-        self._extract_btn.setEnabled(True)
-        self._extract_ontology_btn.setEnabled(True)
-        self._extract_protagonist_btn.setEnabled(True)
-        self._extract_custom_character_btn.setEnabled(True)
-        self._extract_style_btn.setEnabled(True)
-        self._view_style_btn.setEnabled(True)
-        self._add_custom_rule_btn.setEnabled(True)
-        self._view_custom_rules_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._set_label_state(self._status_label, "主角形象提取失败", "textDanger")
         self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
         self._stream_group.setTitle("主角形象流式输出（已中断）")
@@ -1306,16 +1378,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_text.setText("自定义角色提取中...")
         self._loading_text.setVisible(True)
         self._cancel_btn.setEnabled(False)
-        self._add_btn.setEnabled(False)
-        self._clear_btn.setEnabled(False)
-        self._extract_btn.setEnabled(False)
-        self._extract_ontology_btn.setEnabled(False)
-        self._extract_protagonist_btn.setEnabled(False)
-        self._extract_custom_character_btn.setEnabled(False)
-        self._extract_style_btn.setEnabled(False)
-        self._view_style_btn.setEnabled(False)
-        self._add_custom_rule_btn.setEnabled(False)
-        self._view_custom_rules_btn.setEnabled(False)
+        self._set_feature_buttons_enabled(False)
         self._set_label_state(self._status_label, "自定义角色提取中", "textInfo")
         self._loading_timer.start()
         # 显示流式输出查看区并清空内容
@@ -1371,16 +1434,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_timer.stop()
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
-        self._extract_btn.setEnabled(True)
-        self._extract_ontology_btn.setEnabled(True)
-        self._extract_protagonist_btn.setEnabled(True)
-        self._extract_custom_character_btn.setEnabled(True)
-        self._extract_style_btn.setEnabled(True)
-        self._view_style_btn.setEnabled(True)
-        self._add_custom_rule_btn.setEnabled(True)
-        self._view_custom_rules_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._set_label_state(self._status_label, "自定义角色提取完成", "textSuccess")
         self._stream_group.setTitle("自定义角色流式输出（接收完成）")
 
@@ -1394,16 +1448,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_timer.stop()
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
-        self._extract_btn.setEnabled(True)
-        self._extract_ontology_btn.setEnabled(True)
-        self._extract_protagonist_btn.setEnabled(True)
-        self._extract_custom_character_btn.setEnabled(True)
-        self._extract_style_btn.setEnabled(True)
-        self._view_style_btn.setEnabled(True)
-        self._add_custom_rule_btn.setEnabled(True)
-        self._view_custom_rules_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._set_label_state(self._status_label, "自定义角色提取失败", "textDanger")
         self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
         self._stream_group.setTitle("自定义角色流式输出（已中断）")
@@ -1419,16 +1464,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_text.setText("文风档案提取中...")
         self._loading_text.setVisible(True)
         self._cancel_btn.setEnabled(False)
-        self._add_btn.setEnabled(False)
-        self._clear_btn.setEnabled(False)
-        self._extract_btn.setEnabled(False)
-        self._extract_ontology_btn.setEnabled(False)
-        self._extract_protagonist_btn.setEnabled(False)
-        self._extract_custom_character_btn.setEnabled(False)
-        self._extract_style_btn.setEnabled(False)
-        self._view_style_btn.setEnabled(False)
-        self._add_custom_rule_btn.setEnabled(False)
-        self._view_custom_rules_btn.setEnabled(False)
+        self._set_feature_buttons_enabled(False)
         self._set_label_state(self._status_label, "文风档案提取中", "textInfo")
         self._loading_timer.start()
         # 显示流式输出查看区并清空内容
@@ -1484,16 +1520,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_timer.stop()
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
-        self._extract_btn.setEnabled(True)
-        self._extract_ontology_btn.setEnabled(True)
-        self._extract_protagonist_btn.setEnabled(True)
-        self._extract_custom_character_btn.setEnabled(True)
-        self._extract_style_btn.setEnabled(True)
-        self._view_style_btn.setEnabled(True)
-        self._add_custom_rule_btn.setEnabled(True)
-        self._view_custom_rules_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._set_label_state(self._status_label, "文风档案提取完成", "textSuccess")
         self._stream_group.setTitle("文风档案流式输出（接收完成）")
 
@@ -1507,16 +1534,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_timer.stop()
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
-        self._extract_btn.setEnabled(True)
-        self._extract_ontology_btn.setEnabled(True)
-        self._extract_protagonist_btn.setEnabled(True)
-        self._extract_custom_character_btn.setEnabled(True)
-        self._extract_style_btn.setEnabled(True)
-        self._view_style_btn.setEnabled(True)
-        self._add_custom_rule_btn.setEnabled(True)
-        self._view_custom_rules_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._set_label_state(self._status_label, "文风档案提取失败", "textDanger")
         self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
         self._stream_group.setTitle("文风档案流式输出（已中断）")
@@ -1532,16 +1550,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_text.setText("自定义设定结构化中...")
         self._loading_text.setVisible(True)
         self._cancel_btn.setEnabled(False)
-        self._add_btn.setEnabled(False)
-        self._clear_btn.setEnabled(False)
-        self._extract_btn.setEnabled(False)
-        self._extract_ontology_btn.setEnabled(False)
-        self._extract_protagonist_btn.setEnabled(False)
-        self._extract_custom_character_btn.setEnabled(False)
-        self._extract_style_btn.setEnabled(False)
-        self._view_style_btn.setEnabled(False)
-        self._add_custom_rule_btn.setEnabled(False)
-        self._view_custom_rules_btn.setEnabled(False)
+        self._set_feature_buttons_enabled(False)
         self._set_label_state(self._status_label, "自定义设定结构化中", "textInfo")
         self._loading_timer.start()
         # 显示流式输出查看区并清空内容
@@ -1584,16 +1593,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_timer.stop()
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
-        self._extract_btn.setEnabled(True)
-        self._extract_ontology_btn.setEnabled(True)
-        self._extract_protagonist_btn.setEnabled(True)
-        self._extract_custom_character_btn.setEnabled(True)
-        self._extract_style_btn.setEnabled(True)
-        self._view_style_btn.setEnabled(True)
-        self._add_custom_rule_btn.setEnabled(True)
-        self._view_custom_rules_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._set_label_state(self._status_label, "自定义设定结构化完成", "textSuccess")
         self._stream_group.setTitle("自定义设定流式输出（接收完成）")
 
@@ -1607,16 +1607,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_timer.stop()
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
-        self._extract_btn.setEnabled(True)
-        self._extract_ontology_btn.setEnabled(True)
-        self._extract_protagonist_btn.setEnabled(True)
-        self._extract_custom_character_btn.setEnabled(True)
-        self._extract_style_btn.setEnabled(True)
-        self._view_style_btn.setEnabled(True)
-        self._add_custom_rule_btn.setEnabled(True)
-        self._view_custom_rules_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._set_label_state(self._status_label, "自定义设定结构化失败", "textDanger")
         self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
         self._stream_group.setTitle("自定义设定流式输出（已中断）")
@@ -1659,31 +1650,14 @@ class ContextPreviewPanel(QWidget):
         self._cancel_btn.setEnabled(
             not is_ontology and not is_protagonist and not is_custom_character
         )
-        self._add_btn.setEnabled(False)
-        self._clear_btn.setEnabled(False)
+        self._set_feature_buttons_enabled(False)
         if is_custom_character:
-            self._extract_btn.setEnabled(False)
-            self._extract_ontology_btn.setEnabled(False)
-            self._extract_protagonist_btn.setEnabled(False)
-            self._extract_custom_character_btn.setEnabled(False)
             self._set_label_state(self._status_label, "自定义角色提取中", "textInfo")
         elif is_protagonist:
-            self._extract_btn.setEnabled(False)
-            self._extract_ontology_btn.setEnabled(False)
-            self._extract_protagonist_btn.setEnabled(False)
-            self._extract_custom_character_btn.setEnabled(False)
             self._set_label_state(self._status_label, "主角形象提取中", "textInfo")
         elif is_ontology:
-            self._extract_btn.setEnabled(False)
-            self._extract_ontology_btn.setEnabled(False)
-            self._extract_protagonist_btn.setEnabled(False)
-            self._extract_custom_character_btn.setEnabled(False)
             self._set_label_state(self._status_label, "世界观提取中", "textInfo")
         else:
-            self._extract_btn.setEnabled(False)
-            self._extract_ontology_btn.setEnabled(True)
-            self._extract_protagonist_btn.setEnabled(True)
-            self._extract_custom_character_btn.setEnabled(True)
             self._set_label_state(self._status_label, "提取中", "textInfo")
         self._loading_timer.start()
         # 显示流式输出区并回填缓冲文本
@@ -1723,8 +1697,7 @@ class ContextPreviewPanel(QWidget):
         self._loading_label.setVisible(False)
         self._loading_text.setVisible(False)
         self._cancel_btn.setEnabled(False)
-        self._add_btn.setEnabled(True)
-        self._clear_btn.setEnabled(True)
+        self._set_feature_buttons_enabled(True)
         self._stream_group.setVisible(False)
 
         # 更新条目显示
