@@ -29,6 +29,8 @@ jobs:
           pip install -r requirements.txt pyinstaller
 
       - name: Build executable
+        env:
+          PYTHONIOENCODING: utf-8
         run: python -m novelforge.resources.build
 
       - name: Read version & release notes

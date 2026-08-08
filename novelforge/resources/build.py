@@ -41,6 +41,10 @@ def _app_name(version: str) -> str:
 
 def main() -> None:
     """执行打包。"""
+    # GitHub Actions 等非中文环境 stdout/stderr 可能为 cp1252，无法编码中文输出
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     if not (ROOT / "main.py").is_file():
         print(f"错误：未找到项目入口 main.py（ROOT={ROOT}）", file=sys.stderr)
         raise SystemExit(1)
