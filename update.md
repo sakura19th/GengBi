@@ -2,6 +2,49 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-08-08：上下文预览面板布局重构与增量更新
+
+### 背景
+
+上下文提取预览面板原为 17 个按钮（提取/查看成对并列），布局拥挤。用户要求每个功能合并为一个按钮，点击后弹出操作选择对话框（提取/查看/增量更新/复制等）；并为三类按章节缓存的数据（上下文/主角形象/自定义角色）新增「增量更新」：向上找到最近的、已有提取内容的前文章节作为基准，在该基准之上仅对基准之后到当前章的新增章节做增量提取。已确认：无基准时仅弹提示不执行提取。
+
+### 核心改动
+
+1. **`novelforge/ui/context_preview_panel.py`**：
+   - 新增 `_FeatureActionDialog` 轻量对话框（标题 + 垂直排布操作按钮，点击记录动作键并关闭），`_show_feature_dialog` 辅助方法统一弹出
+   - 17 个按钮合并为 6 个功能按钮（上下文/世界观底层/主角形象/自定义角色/文风档案/自定义设定），QFlowLayout 排布，点击弹对话框分发动作到既有 `_on_*_clicked` 方法
+   - 新增 3 个增量信号 `incremental_context_requested`/`incremental_protagonist_requested`/`incremental_custom_character_requested`（Signal(dict)，dict 为 `get_lookback_config()` 含 lookback/token_limit）
+   - 新增 `_feature_buttons: dict[str, QPushButton]` + `_set_feature_buttons_enabled(bool)` 辅助方法统一禁用/恢复功能按钮与 `_add_btn`/`_clear_btn`/`_view_prompt_btn`，`start_*`/`finish_*`/`fail_*`/`restore_extraction_state` 替换原逐按钮 setEnabled
+
+2. **`novelforge/services/context_extractor.py`**：
+   - 新增 `find_latest_context_base`（异步）/`find_protagonist_base`/`find_custom_character_base` 三基准查找方法（从当前章前一章往前扫描，返回首个有提取内容的基准章节与数据）
+   - `extract`/`extract_streaming`/`_extract_common`/`_extract_common_body` 新增 `incremental_base`/`incremental_base_index` 参数：增量模式跳过 lookback 计算，`target_chapters = sorted[base_index+1 : current_idx+1]`；当前章不晚于基准章时直接返回基准条目
+   - 新增 `_build_incremental_prompt`：加载 `extract_incremental_prompt.txt` 模板，`existing_entries` 为基准条目序列化 JSON 数组，`chapters_text` 为 delta 章节文本
+   - `extract_protagonist_streaming`/`extract_custom_character_streaming` 新增增量参数，`_extract_protagonist`/`_extract_custom_character` 新增 `initial_accumulated` 将基准档案 `model_dump()` 注入首批提示词（复用 `{{accumulated_protagonist}}` 增量语义）
+   - `_save_cached_entries`/`_save_cached_protagonist`/`_save_cached_custom_character` 缓存元数据新增 `incremental_base_index`
+
+3. **`novelforge/resources/defaults/extract_incremental_prompt.txt`**（新建）+ `novelforge/utils/paths.py` 新增 `get_extract_incremental_prompt_path()`：上下文条目增量模板，指令保留仍成立条目（uid 不变）/更新已被新剧情改变的信息（体现演变，uid 不变）/新增新实体（新 uid）/删除过时条目，输出完整更新后的 JSON 数组
+
+4. **`novelforge/ui/main_window.py`**：
+   - 面板 3 个增量信号连接至 `_on_incremental_context_requested`/`_on_incremental_protagonist_requested`/`_on_incremental_custom_character_requested`
+   - 新增内部信号 `_incremental_no_base = Signal(str)`（槽 `_on_incremental_no_base` 弹 `QMessageBox.information`「未找到更早章节的XX提取结果，未执行提取」）+ `_extract_mode_msg = Signal(str)`（槽 `_set_status_message` 提示「基于第N章提取结果增量更新」）
+   - 增量 handler 复用既有校验骨架（章节/端点/API Key/项目加载），无基准提示后 return 不执行提取；有基准带增量参数调对应 streaming 方法，回调复用既有 `_extract_done`/`_protagonist_done`/`_custom_character_done`
+
+### 测试
+
+- 新建 `tests/test_incremental_context_extraction.py`（10 用例）：find_latest_context_base 命中/未命中/空条目跳过/排除当前章、_build_incremental_prompt 占位符/覆盖/无 project、增量 delta 章节与缓存元数据、当前章不晚于基准、多批合并每批携带基准
+- 新建 `tests/test_incremental_protagonist_extraction.py`（7 用例）：find_protagonist_base 命中/未命中/排除当前章/跳过空档案、delta 章节 + initial_accumulated 种子、当前章不晚于基准、多批合并
+- 新建 `tests/test_incremental_custom_character_extraction.py`（8 用例）：find_custom_character_base 命中/角色名不匹配/未命中/排除当前章/跳过空 dict、delta 章节 + 种子 + 缓存元数据、当前章不晚于基准、多批合并
+- 新建 `tests/test_context_preview_panel_layout.py`（25 用例）：6 功能按钮存在/文本/objectName/旧按钮移除、_FeatureActionDialog 动作键、动作分发信号（mock _show_feature_dialog）、_set_feature_buttons_enabled 统一禁用恢复、get_lookback_config
+- 更新 `tests/test_custom_character_extraction.py` / `tests/test_protagonist_extraction.py`：断言从旧独立提取/查看按钮改为新合并功能按钮 `_custom_character_btn`/`_protagonist_btn` 及其 isEnabled 状态
+- 全部测试通过（1 个预先存在失败 `test_m5_polish.py::test_history_panel_refresh`，stash 验证与本次改动无关）
+
+### 文档同步
+
+- `agent.md`：架构树 context_extractor/context_preview_panel 描述更新、resources/defaults 新增 extract_incremental_prompt.txt、新增设计决策 25「章节缓存增量更新」、测试要求新增增量测试说明
+- `update.md`：本条目
+- `README.md`：v0.2.18 更新要点 + `novelforge/__init__.py` 版本号同步
+
 ## 2026-08-06：细纲 AI 修改功能（AuditDialog 修改按钮）
 
 ### 背景

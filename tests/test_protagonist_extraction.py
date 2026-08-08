@@ -1032,10 +1032,10 @@ class TestExtractCommonNoProtagonist:
 
 
 class TestContextPanelProtagonistButtons:
-    """ContextPreviewPanel 主角按钮 UI 测试。"""
+    """ContextPreviewPanel 主角功能按钮 UI 测试。"""
 
-    def test_protagonist_buttons_exist(self) -> None:
-        """提取/查看主角形象按钮存在且 objectName 正确。"""
+    def test_protagonist_button_exists(self) -> None:
+        """主角形象功能按钮存在且 objectName 正确。"""
         from PySide6.QtWidgets import QApplication
 
         from novelforge.ui.context_preview_panel import ContextPreviewPanel
@@ -1043,13 +1043,11 @@ class TestContextPanelProtagonistButtons:
         app = QApplication.instance() or QApplication([])
         panel = ContextPreviewPanel()
 
-        assert panel._extract_protagonist_btn.text() == "提取主角形象"
-        assert panel._extract_protagonist_btn.objectName() == "primaryBtn"
-        assert panel._view_protagonist_btn.text() == "查看主角形象"
-        assert panel._view_protagonist_btn.objectName() == "secondaryBtn"
+        assert panel._protagonist_btn.text() == "主角形象"
+        assert panel._protagonist_btn.objectName() == "primaryBtn"
 
     def test_extract_protagonist_clicked_emits_signal(self) -> None:
-        """点击提取按钮发射 extract_protagonist_requested 信号。"""
+        """调用 _on_extract_protagonist_clicked 发射信号。"""
         from PySide6.QtTest import QSignalSpy
         from PySide6.QtWidgets import QApplication
 
@@ -1064,7 +1062,7 @@ class TestContextPanelProtagonistButtons:
         assert spy.count() == 1
 
     def test_view_protagonist_clicked_emits_signal(self) -> None:
-        """点击查看按钮发射 view_protagonist_requested 信号。"""
+        """调用 _on_view_protagonist_clicked 发射信号。"""
         from PySide6.QtTest import QSignalSpy
         from PySide6.QtWidgets import QApplication
 
@@ -1079,7 +1077,7 @@ class TestContextPanelProtagonistButtons:
         assert spy.count() == 1
 
     def test_start_protagonist_extraction_disables_buttons(self) -> None:
-        """start_protagonist_extraction 禁用提取按钮。"""
+        """start_protagonist_extraction 禁用功能按钮。"""
         from PySide6.QtWidgets import QApplication
 
         from novelforge.ui.context_preview_panel import ContextPreviewPanel
@@ -1089,10 +1087,11 @@ class TestContextPanelProtagonistButtons:
 
         panel.start_protagonist_extraction()
 
-        assert panel._extract_protagonist_btn.isEnabled() is False
+        assert panel._protagonist_btn.isEnabled() is False
+        assert panel._custom_character_btn.isEnabled() is False
 
     def test_finish_protagonist_extraction_enables_buttons(self) -> None:
-        """finish_protagonist_extraction 恢复提取按钮可用。"""
+        """finish_protagonist_extraction 恢复功能按钮可用。"""
         from PySide6.QtWidgets import QApplication
 
         from novelforge.ui.context_preview_panel import ContextPreviewPanel
@@ -1101,10 +1100,10 @@ class TestContextPanelProtagonistButtons:
         panel = ContextPreviewPanel()
 
         panel.start_protagonist_extraction()
-        assert panel._extract_protagonist_btn.isEnabled() is False
+        assert panel._protagonist_btn.isEnabled() is False
 
         panel.finish_protagonist_extraction("completed")
-        assert panel._extract_protagonist_btn.isEnabled() is True
+        assert panel._protagonist_btn.isEnabled() is True
 
 
 if __name__ == "__main__":

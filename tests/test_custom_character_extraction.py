@@ -720,10 +720,10 @@ class TestCustomCharacterCacheDecoupling:
 
 
 class TestContextPanelCustomCharacterButtons:
-    """ContextPreviewPanel 自定义角色按钮 UI 测试。"""
+    """ContextPreviewPanel 自定义角色功能按钮 UI 测试。"""
 
-    def test_custom_character_buttons_exist(self) -> None:
-        """提取/查看自定义角色按钮存在且 objectName 正确。"""
+    def test_custom_character_button_exists(self) -> None:
+        """自定义角色功能按钮存在且 objectName 正确。"""
         from PySide6.QtWidgets import QApplication
 
         from novelforge.ui.context_preview_panel import ContextPreviewPanel
@@ -731,13 +731,11 @@ class TestContextPanelCustomCharacterButtons:
         app = QApplication.instance() or QApplication([])
         panel = ContextPreviewPanel()
 
-        assert panel._extract_custom_character_btn.text() == "提取自定义角色"
-        assert panel._extract_custom_character_btn.objectName() == "primaryBtn"
-        assert panel._view_custom_character_btn.text() == "查看自定义角色"
-        assert panel._view_custom_character_btn.objectName() == "secondaryBtn"
+        assert panel._custom_character_btn.text() == "自定义角色"
+        assert panel._custom_character_btn.objectName() == "primaryBtn"
 
     def test_extract_custom_character_clicked_emits_signal(self) -> None:
-        """点击提取按钮发射 extract_custom_character_requested 信号。"""
+        """调用 _on_extract_custom_character_clicked 发射信号。"""
         from PySide6.QtTest import QSignalSpy
         from PySide6.QtWidgets import QApplication
 
@@ -752,7 +750,7 @@ class TestContextPanelCustomCharacterButtons:
         assert spy.count() == 1
 
     def test_view_custom_character_clicked_emits_signal(self) -> None:
-        """点击查看按钮发射 view_custom_character_requested 信号。"""
+        """调用 _on_view_custom_character_clicked 发射信号。"""
         from PySide6.QtTest import QSignalSpy
         from PySide6.QtWidgets import QApplication
 
@@ -767,7 +765,7 @@ class TestContextPanelCustomCharacterButtons:
         assert spy.count() == 1
 
     def test_start_custom_character_extraction_disables_buttons(self) -> None:
-        """start_custom_character_extraction 禁用提取按钮。"""
+        """start_custom_character_extraction 禁用功能按钮。"""
         from PySide6.QtWidgets import QApplication
 
         from novelforge.ui.context_preview_panel import ContextPreviewPanel
@@ -777,10 +775,11 @@ class TestContextPanelCustomCharacterButtons:
 
         panel.start_custom_character_extraction()
 
-        assert panel._extract_custom_character_btn.isEnabled() is False
+        assert panel._custom_character_btn.isEnabled() is False
+        assert panel._context_btn.isEnabled() is False
 
     def test_finish_custom_character_extraction_enables_buttons(self) -> None:
-        """finish_custom_character_extraction 恢复提取按钮可用。"""
+        """finish_custom_character_extraction 恢复功能按钮可用。"""
         from PySide6.QtWidgets import QApplication
 
         from novelforge.ui.context_preview_panel import ContextPreviewPanel
@@ -789,10 +788,10 @@ class TestContextPanelCustomCharacterButtons:
         panel = ContextPreviewPanel()
 
         panel.start_custom_character_extraction()
-        assert panel._extract_custom_character_btn.isEnabled() is False
+        assert panel._custom_character_btn.isEnabled() is False
 
         panel.finish_custom_character_extraction("completed")
-        assert panel._extract_custom_character_btn.isEnabled() is True
+        assert panel._custom_character_btn.isEnabled() is True
 
 
 # ===== 9. flow_key 注册测试 =====

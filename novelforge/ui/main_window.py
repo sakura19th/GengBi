@@ -208,6 +208,10 @@ class MainWindow(QMainWindow):
     _custom_character_batch_done = Signal(int, int) # 自定义角色提取批次完成（跨线程）
     _custom_rule_chunk_received = Signal(str)  # 自定义设定流式 chunk（跨线程）
     _custom_rule_done = Signal(object, str)    # 自定义设定完成（跨线程）：rule, status
+    # 增量更新：无基准提示（UI 线程内发射，直接连接槽弹 QMessageBox）
+    _incremental_no_base = Signal(str)
+    # 增量更新模式提示（"基于第 N 章提取结果增量更新"），连接状态栏
+    _extract_mode_msg = Signal(str)
 
     def __init__(self, config_manager: ConfigManager) -> None:
         """初始化主窗口。
@@ -561,6 +565,19 @@ class MainWindow(QMainWindow):
         context_panel.view_extract_prompt_requested.connect(
             self._on_view_extract_prompt
         )
+        # 增量更新信号
+        context_panel.incremental_context_requested.connect(
+            self._on_incremental_context_requested
+        )
+        context_panel.incremental_protagonist_requested.connect(
+            self._on_incremental_protagonist_requested
+        )
+        context_panel.incremental_custom_character_requested.connect(
+            self._on_incremental_custom_character_requested
+        )
+        # 增量更新内部信号：无基准提示 / 模式消息
+        self._incremental_no_base.connect(self._on_incremental_no_base)
+        self._extract_mode_msg.connect(self._set_status_message)
 
         # 状态消息
         self.status_message.connect(self._set_status_message)
@@ -4059,6 +4076,351 @@ class MainWindow(QMainWindow):
                     entries=[], status="failed", error=str(e)
                 )
                 self._extract_done.emit(err_result)
+
+        future.add_done_callback(on_done)
+
+    def _compute_chapter_index(self, target: Chapter | None) -> int | None:
+        """计算章节在排序后章节列表中的 index。
+
+        Args:
+            target: 目标章节
+
+        Returns:
+            排序后列表中的 index；章节不在列表中时返回 None
+        """
+        if target is None:
+            return None
+        sorted_chapters = sorted(self._current_chapters, key=lambda c: c.index)
+        for i, ch in enumerate(sorted_chapters):
+            if ch.id == target.id:
+                return i
+        return None
+
+    def _on_incremental_no_base(self, feature_name: str) -> None:
+        """增量更新无基准提示。
+
+        从当前章节往前未找到更早章节的已有提取结果时弹出提示，
+        说明未执行提取。
+
+        Args:
+            feature_name: 功能名（如"上下文"/"主角形象"/"自定义角色"）
+        """
+        QMessageBox.information(
+            self,
+            "增量更新",
+            f"未找到更早章节的{feature_name}提取结果，未执行增量更新。\n"
+            "请先对更早章节执行全量提取，或在当前章节直接执行全量提取。",
+        )
+
+    def _on_incremental_context_requested(self, config: dict) -> None:
+        """增量更新上下文：基于最近的已有提取结果，仅对新增章节做增量提取。
+
+        用户在面板"上下文"按钮选择"增量更新"时触发。
+        先查找基准章节（更早章节已有上下文缓存），无基准时提示并返回；
+        有基准时提交协程执行增量提取，完成后复用 ``_extract_done`` 链路。
+        """
+        if not self._current_chapter:
+            QMessageBox.warning(self, "提示", "请先选择章节")
+            return
+
+        # 确保章节正文已加载（list_chapters 只加载元数据）
+        self._ensure_chapter_contents()
+
+        endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            self._on_open_settings()
+            return
+
+        api_key = self.config_manager.decrypt_api_key(endpoint.get("id", ""))
+        if not api_key:
+            QMessageBox.warning(self, "提示", "API Key 无效，请检查设置")
+            self._on_open_settings()
+            return
+
+        if not self._current_chapters:
+            QMessageBox.warning(self, "提示", "无章节可增量更新")
+            return
+
+        # 加载项目对象
+        project = None
+        if self._current_project_id:
+            project = self.storage_service.load_project(self._current_project_id)
+        if project is None:
+            QMessageBox.warning(self, "提示", "项目加载失败")
+            return
+
+        token_limit_override = config.get("token_limit", 0)
+
+        context_panel = self.continuation_panel.context_preview_panel
+        context_panel.start_extraction()
+        self._extracting_chapter_id = self._current_chapter.id
+
+        # 非阻塞提交：先查找基准，有基准则执行增量提取
+        from novelforge.services.async_runner import AsyncLoopRunner
+
+        runner = AsyncLoopRunner.instance()
+        loop = runner._loop
+
+        def on_chunk(text: str) -> None:
+            self._extract_chunk_received.emit(text)
+
+        def on_batch_complete(
+            entries: list, batch_idx: int, total_batches: int
+        ) -> None:
+            self._extract_batch_done.emit(entries, batch_idx, total_batches)
+
+        async def _incremental_flow() -> ExtractResult:
+            base = await self.context_extractor.find_latest_context_base(
+                project_id=project.id,
+                chapters=self._current_chapters,
+                current_chapter=self._current_chapter,
+            )
+            if base is None:
+                self._incremental_no_base.emit("上下文")
+                return ExtractResult(
+                    entries=[], status="skipped", error="未找到增量基准"
+                )
+            base_chapter, base_entries = base
+            base_index = self._compute_chapter_index(base_chapter)
+            if base_index is None:
+                self._incremental_no_base.emit("上下文")
+                return ExtractResult(
+                    entries=[], status="skipped", error="基准章节不在章节列表中"
+                )
+            self._extract_mode_msg.emit(
+                f"基于第 {base_chapter.index + 1} 章提取结果增量更新上下文..."
+            )
+            return await self.context_extractor.extract_streaming(
+                project=project,
+                chapters=self._current_chapters,
+                current_chapter=self._current_chapter,
+                lookback_override=0,
+                token_limit_override=token_limit_override,
+                on_chunk=on_chunk,
+                on_batch_complete=on_batch_complete,
+                incremental_base=base_entries,
+                incremental_base_index=base_index,
+                jailbreak_text=self._get_flow_jailbreak_text("context_extraction"),
+            )
+
+        future = asyncio.run_coroutine_threadsafe(_incremental_flow(), loop)
+
+        def on_done(fut) -> None:
+            try:
+                result = fut.result()
+                self._extract_done.emit(result)
+            except Exception as e:
+                logger.error("上下文增量更新异常: %s", e, exc_info=True)
+                err_result = ExtractResult(
+                    entries=[], status="failed", error=str(e)
+                )
+                self._extract_done.emit(err_result)
+
+        future.add_done_callback(on_done)
+
+    def _on_incremental_protagonist_requested(self, config: dict) -> None:
+        """增量更新主角形象：基于最近的已有档案，仅对新增章节做增量提取。
+
+        无基准（更早章节无主角档案）时提示并返回，不执行提取。
+        有基准时提交协程执行增量提取，完成后复用 ``_protagonist_done`` 链路。
+        """
+        if not self._current_chapter:
+            QMessageBox.warning(self, "提示", "请先选择章节")
+            return
+
+        # 确保章节正文已加载
+        self._ensure_chapter_contents()
+
+        endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            self._on_open_settings()
+            return
+
+        if not self._current_chapters:
+            QMessageBox.warning(self, "提示", "无章节可增量更新")
+            return
+
+        # 加载项目对象
+        project = None
+        if self._current_project_id:
+            project = self.storage_service.load_project(self._current_project_id)
+        if project is None:
+            QMessageBox.warning(self, "提示", "项目加载失败")
+            return
+
+        token_limit_override = config.get("token_limit", 0)
+
+        # 同步查找基准（find_protagonist_base 依赖已加载的 protagonist_profile 列）
+        base = self.context_extractor.find_protagonist_base(
+            chapters=self._current_chapters,
+            current_chapter=self._current_chapter,
+        )
+        if base is None:
+            self._incremental_no_base.emit("主角形象")
+            return
+        base_chapter, base_profile = base
+        base_index = self._compute_chapter_index(base_chapter)
+        if base_index is None:
+            self._incremental_no_base.emit("主角形象")
+            return
+
+        context_panel = self.continuation_panel.context_preview_panel
+        self._protagonist_extracting = True
+        self._protagonist_stream_text = ""
+        self._extracting_chapter_id = self._current_chapter.id
+        context_panel.start_protagonist_extraction()
+        self._extract_mode_msg.emit(
+            f"基于第 {base_chapter.index + 1} 章提取结果增量更新主角形象..."
+        )
+
+        from novelforge.services.async_runner import AsyncLoopRunner
+
+        runner = AsyncLoopRunner.instance()
+        loop = runner._loop
+
+        def on_chunk(text: str) -> None:
+            self._protagonist_chunk_received.emit(text)
+
+        def on_batch_complete(batch_idx: int, total_batches: int) -> None:
+            self._protagonist_batch_done.emit(batch_idx, total_batches)
+
+        future = asyncio.run_coroutine_threadsafe(
+            self.context_extractor.extract_protagonist_streaming(
+                project=project,
+                chapters=self._current_chapters,
+                current_chapter=self._current_chapter,
+                token_limit=token_limit_override,
+                on_chunk=on_chunk,
+                on_batch_complete=on_batch_complete,
+                jailbreak_text=self._get_flow_jailbreak_text(
+                    "protagonist_extraction"
+                ),
+                incremental_base=base_profile,
+                incremental_base_index=base_index,
+            ),
+            loop,
+        )
+
+        def on_done(fut) -> None:
+            try:
+                profile, status = fut.result()
+                self._protagonist_done.emit(profile, status)
+            except Exception as e:
+                logger.error("主角形象增量更新异常: %s", e, exc_info=True)
+                self._protagonist_done.emit(None, f"failed: {e}")
+
+        future.add_done_callback(on_done)
+
+    def _on_incremental_custom_character_requested(self, config: dict) -> None:
+        """增量更新自定义角色：基于最近的已有档案，仅对新增章节做增量提取。
+
+        先弹出输入对话框获取角色名，再查找基准（更早章节该角色档案）。
+        无基准时提示并返回；有基准时提交协程执行增量提取，
+        完成后复用 ``_custom_character_done`` 链路。
+        """
+        if not self._current_chapter:
+            QMessageBox.warning(self, "提示", "请先选择章节")
+            return
+
+        # 弹出输入对话框获取角色名
+        from PySide6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(
+            self, "增量更新自定义角色", "请输入要增量更新的角色名："
+        )
+        if not ok:
+            return
+        name = name.strip()
+        if not name:
+            QMessageBox.warning(self, "提示", "角色名不能为空")
+            return
+
+        # 确保章节正文已加载
+        self._ensure_chapter_contents()
+
+        endpoint = self.continuation_panel.get_selected_endpoint()
+        if not endpoint:
+            QMessageBox.warning(self, "提示", "请先配置 API 端点")
+            self._on_open_settings()
+            return
+
+        if not self._current_chapters:
+            QMessageBox.warning(self, "提示", "无章节可增量更新")
+            return
+
+        # 加载项目对象
+        project = None
+        if self._current_project_id:
+            project = self.storage_service.load_project(self._current_project_id)
+        if project is None:
+            QMessageBox.warning(self, "提示", "项目加载失败")
+            return
+
+        token_limit_override = config.get("token_limit", 0)
+
+        # 同步查找基准（find_custom_character_base 依赖已加载的 custom_characters 列）
+        base = self.context_extractor.find_custom_character_base(
+            chapters=self._current_chapters,
+            current_chapter=self._current_chapter,
+            character_name=name,
+        )
+        if base is None:
+            self._incremental_no_base.emit(f"自定义角色「{name}」")
+            return
+        base_chapter, base_profile = base
+        base_index = self._compute_chapter_index(base_chapter)
+        if base_index is None:
+            self._incremental_no_base.emit(f"自定义角色「{name}」")
+            return
+
+        context_panel = self.continuation_panel.context_preview_panel
+        self._custom_character_extracting = True
+        self._custom_character_name = name
+        self._custom_character_stream_text = ""
+        self._extracting_chapter_id = self._current_chapter.id
+        context_panel.start_custom_character_extraction()
+        self._extract_mode_msg.emit(
+            f"基于第 {base_chapter.index + 1} 章提取结果增量更新自定义角色「{name}」..."
+        )
+
+        from novelforge.services.async_runner import AsyncLoopRunner
+
+        runner = AsyncLoopRunner.instance()
+        loop = runner._loop
+
+        def on_chunk(text: str) -> None:
+            self._custom_character_chunk_received.emit(text)
+
+        def on_batch_complete(batch_idx: int, total_batches: int) -> None:
+            self._custom_character_batch_done.emit(batch_idx, total_batches)
+
+        future = asyncio.run_coroutine_threadsafe(
+            self.context_extractor.extract_custom_character_streaming(
+                project=project,
+                chapters=self._current_chapters,
+                current_chapter=self._current_chapter,
+                character_name=name,
+                token_limit=token_limit_override,
+                on_chunk=on_chunk,
+                on_batch_complete=on_batch_complete,
+                jailbreak_text=self._get_flow_jailbreak_text(
+                    "custom_character_extraction"
+                ),
+                incremental_base=base_profile,
+                incremental_base_index=base_index,
+            ),
+            loop,
+        )
+
+        def on_done(fut) -> None:
+            try:
+                profile, status = fut.result()
+                self._custom_character_done.emit(name, profile, status)
+            except Exception as e:
+                logger.error("自定义角色增量更新异常: %s", e, exc_info=True)
+                self._custom_character_done.emit(name, None, f"failed: {e}")
 
         future.add_done_callback(on_done)
 

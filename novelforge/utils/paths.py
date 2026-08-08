@@ -64,6 +64,15 @@ def get_extract_merge_prompt_path() -> Path:
     return get_resource_path("defaults", "extract_merge_prompt.txt")
 
 
+def get_extract_incremental_prompt_path() -> Path:
+    """获取上下文提取【增量更新】环节提示词路径。
+
+    以更早章节已有提取结果为基准，结合新增章节内容做增量更新
+    （保留/更新/新增/删除），输出更新后的完整 ContextEntry 列表。
+    """
+    return get_resource_path("defaults", "extract_incremental_prompt.txt")
+
+
 def get_extract_ontology_prompt_path() -> Path:
     """获取底层世界观提取提示词路径。
 
