@@ -2,7 +2,7 @@
 
 > 古意盎然的小说续写桌面工具——辅助创作者在既有故事之后接续新篇，而非替代写作。
 
-**当前版本：v0.2.18**
+**当前版本：v0.2.19**
 
 赓笔（gēng bǐ）取"赓续笔墨"之意。"赓"本义为接续他人诗文，正契合本工具的定位：在你已写就的章节之后，借助大语言模型续写后续内容，让故事自然生长。
 
@@ -50,7 +50,7 @@ python -m novelforge.resources.build
 pyinstaller --clean -y novelforge/resources/build.spec
 ```
 
-> **自动打包发布**：推送 `v*` 版本 tag（如 `v0.2.18`）后，GitHub Actions 会自动在 Windows 上打包 exe 并发布 GitHub Release（Release 说明自动提取自本文件「更新记录」对应版本小节）；也可在仓库 Actions 页面手动触发「Build & Release」工作流。
+> **自动打包发布**：推送 `v*` 版本 tag（如 `v0.2.19`）后，GitHub Actions 会自动在 Windows 上打包 exe 并发布 GitHub Release（Release 说明自动提取自本文件「更新记录」对应版本小节）；也可在仓库 Actions 页面手动触发「Build & Release」工作流。
 
 ## 配置说明
 
@@ -270,6 +270,12 @@ API Key 使用 PBKDF2HMAC + Fernet 加密存储，不明文落盘。
 在主窗口菜单栏「调试」勾选「调试模式」，可在每个 LLM 调用前预览组装后的完整 messages（含宏替换与模板渲染后的最终文本），确认变量是否正确注入。
 
 ## 更新记录
+
+### v0.2.19
+
+- 修复 Gemini/Antigravity 等网关可能因 `presence_penalty`/`frequency_penalty` 导致的 `400 INVALID_ARGUMENT`（按模型过滤不支持参数；0.0 惩罚对其他模型也可省略）
+- 设置新增「优先使用非流式请求」全局开关（默认关=流式）
+- 续写指令输入框支持历史回顾（默认 5 条，设置可配 1–30）：发起流程时记录面板原文，下拉选择一键回填
 
 ### v0.2.18
 

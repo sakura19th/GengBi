@@ -70,6 +70,9 @@ CURSOR_BLINK_MS = 500
 USER_INPUT_MIN_HEIGHT = 36
 USER_INPUT_MAX_LINES = 6
 
+# 输入历史下拉展示截断长度
+USER_INPUT_HISTORY_PREVIEW_LEN = 40
+
 # 高亮颜色 4 色（黄/绿/蓝/红），背景半透明
 _HIGHLIGHT_COLORS: dict[str, str] = {
     "黄": "#FFFACD",
@@ -277,7 +280,28 @@ class ContinuationPanel(QWidget):
         self._user_input_group = QGroupBox("用户输入（续写指令）")
         user_input_layout = QVBoxLayout(self._user_input_group)
         user_input_layout.setContentsMargins(2, 2, 2, 2)
-        user_input_layout.setSpacing(0)
+        user_input_layout.setSpacing(2)
+
+        # 输入历史：紧凑下拉，点击项回填输入框
+        history_row = QHBoxLayout()
+        history_row.setContentsMargins(0, 0, 0, 0)
+        history_row.setSpacing(4)
+        self._user_input_history_combo = QComboBox()
+        self._user_input_history_combo.setObjectName("userInputHistoryCombo")
+        self._user_input_history_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        self._user_input_history_combo.setToolTip(
+            "最近使用的续写指令，选择后填入下方输入框（条数可在设置中配置）"
+        )
+        self._user_input_history_combo.activated.connect(
+            self._on_user_input_history_activated
+        )
+        history_row.addWidget(self._user_input_history_combo, 1)
+        user_input_layout.addLayout(history_row)
+        self._user_input_history: list[str] = []
+        self.set_user_input_history([])
+
         self._user_input_edit = QPlainTextEdit()
         self._user_input_edit.setPlaceholderText(
             "输入续写指令或额外要求（可选）...\n如：聚焦主角的心理变化，增加环境描写"
@@ -1084,6 +1108,56 @@ class ContinuationPanel(QWidget):
         """清空用户输入。"""
         self._user_input_edit.clear()
         self._adjust_user_input_height()
+
+    def set_user_input_history(self, items: list[str]) -> None:
+        """刷新输入历史下拉（最近在前）。
+
+        Args:
+            items: 历史文本列表；空列表时显示「暂无历史」并禁用
+        """
+        cleaned: list[str] = []
+        for item in items or []:
+            text = str(item).strip() if item is not None else ""
+            if text:
+                cleaned.append(text)
+        self._user_input_history = cleaned
+        combo = self._user_input_history_combo
+        combo.blockSignals(True)
+        combo.clear()
+        if not cleaned:
+            combo.addItem("暂无历史")
+            combo.setEnabled(False)
+            combo.setItemData(0, "", Qt.ItemDataRole.UserRole)
+        else:
+            combo.setEnabled(True)
+            combo.addItem("选择历史指令…")
+            combo.setItemData(0, "", Qt.ItemDataRole.UserRole)
+            for text in cleaned:
+                preview = text.replace("\n", " ").strip()
+                if len(preview) > USER_INPUT_HISTORY_PREVIEW_LEN:
+                    preview = preview[: USER_INPUT_HISTORY_PREVIEW_LEN - 1] + "…"
+                combo.addItem(preview)
+                idx = combo.count() - 1
+                combo.setItemData(idx, text, Qt.ItemDataRole.UserRole)
+                combo.setItemData(idx, text, Qt.ItemDataRole.ToolTipRole)
+            combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _on_user_input_history_activated(self, index: int) -> None:
+        """历史下拉选中：回填完整文本到输入框。"""
+        if index <= 0:
+            return
+        text = self._user_input_history_combo.itemData(
+            index, Qt.ItemDataRole.UserRole
+        )
+        if not text:
+            return
+        self._user_input_edit.setPlainText(str(text))
+        self._adjust_user_input_height()
+        # 回填后复位到占位项，便于再次选择同一条
+        self._user_input_history_combo.blockSignals(True)
+        self._user_input_history_combo.setCurrentIndex(0)
+        self._user_input_history_combo.blockSignals(False)
 
     def _user_input_extra_height(self) -> int:
         """计算输入框边框与文档边距占用的额外高度。"""

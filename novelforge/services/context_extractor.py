@@ -3479,6 +3479,7 @@ class ContextExtractor:
         Returns:
             ExtractResult 对象
         """
+        use_stream = not self.config_manager.is_prefer_non_stream()
         return await self._extract_common(
             project=project,
             chapters=chapters,
@@ -3486,7 +3487,7 @@ class ContextExtractor:
             force_refresh=force_refresh,
             lookback_override=lookback_override,
             token_limit_override=token_limit_override,
-            stream=True,
+            stream=use_stream,
             exclude_current=exclude_current,
             jailbreak_text=jailbreak_text,
             incremental_base=incremental_base,
@@ -3531,6 +3532,7 @@ class ContextExtractor:
         Returns:
             ExtractResult 对象
         """
+        use_stream = not self.config_manager.is_prefer_non_stream()
         return await self._extract_common(
             project=project,
             chapters=chapters,
@@ -3538,7 +3540,7 @@ class ContextExtractor:
             force_refresh=force_refresh,
             lookback_override=lookback_override,
             token_limit_override=token_limit_override,
-            stream=True,
+            stream=use_stream,
             on_chunk=on_chunk,
             on_batch_complete=on_batch_complete,
             exclude_current=exclude_current,
@@ -3724,6 +3726,7 @@ class ContextExtractor:
             initial_accumulated = None
             if incremental_base is not None:
                 initial_accumulated = incremental_base.model_dump()
+            use_stream = not self.config_manager.is_prefer_non_stream()
             protagonist_profile, protagonist_batch_count, protagonist_merged = (
                 await self._extract_protagonist(
                     project=project,
@@ -3731,7 +3734,7 @@ class ContextExtractor:
                     config=config,
                     client=client,
                     model=model,
-                    stream=True,
+                    stream=use_stream,
                     on_chunk=on_chunk,
                     on_batch_complete=adapted_batch_cb,
                     jailbreak_text=jailbreak_text,
@@ -3959,6 +3962,7 @@ class ContextExtractor:
             initial_accumulated = None
             if incremental_base is not None:
                 initial_accumulated = incremental_base.model_dump()
+            use_stream = not self.config_manager.is_prefer_non_stream()
             character_profile, profile_batch_count, profile_merged = (
                 await self._extract_custom_character(
                     project=project,
@@ -3967,7 +3971,7 @@ class ContextExtractor:
                     client=client,
                     model=model,
                     character_name=character_name,
-                    stream=True,
+                    stream=use_stream,
                     on_chunk=on_chunk,
                     on_batch_complete=adapted_batch_cb,
                     jailbreak_text=jailbreak_text,

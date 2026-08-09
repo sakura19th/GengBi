@@ -185,6 +185,7 @@ class ContinuationWorker(QThread):
         extra_payload: dict | None = None,
         extra_headers: dict | None = None,
         proxy: str | None = None,
+        prefer_non_stream: bool = False,
         parent=None,
     ) -> None:
         """初始化续写工作线程。
@@ -212,6 +213,7 @@ class ContinuationWorker(QThread):
             extra_payload: 自定义请求体字段（deep merge 到 payload）
             extra_headers: 自定义 HTTP 头（update 到 headers）
             proxy: HTTP/HTTPS 代理 URL（None 表示不走代理）
+            prefer_non_stream: True 时走 chat_completion，完成后一次性推送全文
             parent: 父 QObject
         """
         super().__init__(parent)
@@ -225,6 +227,8 @@ class ContinuationWorker(QThread):
         self.extra_headers: dict = extra_headers or {}
         # 网络代理（透传给 LLMClient）
         self.proxy = proxy
+        # 全局非流式开关（默认 False=流式）
+        self.prefer_non_stream = bool(prefer_non_stream)
         self.chapter_id = chapter_id
         self.created_by = created_by
         self.preset_id = preset_id
@@ -464,7 +468,7 @@ class ContinuationWorker(QThread):
         result = StreamResult(status="completed")
 
         try:
-            async for chunk in client.stream_chat_completion(
+            gen_kwargs = dict(
                 messages=self.messages,
                 model=self._effective_model(),
                 temperature=self.parameters.get("temperature", 0.8),
@@ -473,22 +477,39 @@ class ContinuationWorker(QThread):
                 frequency_penalty=self.parameters.get("frequency_penalty", 0.0),
                 presence_penalty=self.parameters.get("presence_penalty", 0.0),
                 stop_event=async_stop,
-            ):
-                if chunk.content:
-                    content_parts.append(chunk.content)
-                    char_count += len(chunk.content)
-                    self.chunk_received.emit(chunk.content)
+            )
+            if self.prefer_non_stream:
+                # 非流式：一次返回全文，再经既有 chunk 信号推送（UI 可复用）
+                response = await client.chat_completion(**gen_kwargs)
+                msg = (response.get("choices") or [{}])[0].get("message") or {}
+                content = msg.get("content") or ""
+                reasoning = msg.get("reasoning_content") or ""
+                if content:
+                    content_parts.append(content)
+                    char_count = len(content)
+                    self.chunk_received.emit(content)
                     self.token_count.emit(char_count)
+                if reasoning:
+                    reasoning_parts.append(reasoning)
+                    self.reasoning_received.emit(reasoning)
+                result.finish_reason = (
+                    (response.get("choices") or [{}])[0].get("finish_reason") or "stop"
+                )
+                result.status = "completed"
+            else:
+                async for chunk in client.stream_chat_completion(**gen_kwargs):
+                    if chunk.content:
+                        content_parts.append(chunk.content)
+                        char_count += len(chunk.content)
+                        self.chunk_received.emit(chunk.content)
+                        self.token_count.emit(char_count)
 
-                if chunk.reasoning_content:
-                    reasoning_parts.append(chunk.reasoning_content)
-                    self.reasoning_received.emit(chunk.reasoning_content)
+                    if chunk.reasoning_content:
+                        reasoning_parts.append(chunk.reasoning_content)
+                        self.reasoning_received.emit(chunk.reasoning_content)
 
-                if chunk.finish_reason:
-                    result.finish_reason = chunk.finish_reason
-                    if chunk.finish_reason == "done":
-                        result.status = "completed"
-                    else:
+                    if chunk.finish_reason:
+                        result.finish_reason = chunk.finish_reason
                         result.status = "completed"
 
             result.content = "".join(content_parts)

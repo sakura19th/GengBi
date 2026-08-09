@@ -660,6 +660,34 @@ class SettingsDialog(QDialog):
         )
         cont_form.addRow("温度:", self._temp_spin)
 
+        cont_settings = self._config_manager.get_continuation_settings()
+
+        # 全局优先非流式（默认关=流式实时输出）
+        self._prefer_non_stream_check = QCheckBox("优先使用非流式请求")
+        self._prefer_non_stream_check.setChecked(
+            bool(cont_settings.get("prefer_non_stream", False))
+        )
+        self._prefer_non_stream_check.setToolTip(
+            "开启后，续写/审计/提取等 LLM 调用优先走非流式（一次返回全文）。\n"
+            "默认关闭=流式实时输出。\n"
+            "部分网关对流式参数更挑剔时可开启；长生成超时与流式一致"
+            "（无总时长上限，仅空闲读超时）。"
+        )
+        cont_form.addRow("", self._prefer_non_stream_check)
+
+        # 用户输入历史条数
+        self._input_history_size_spin = QSpinBox()
+        self._input_history_size_spin.setRange(1, 30)
+        try:
+            hist_size = int(cont_settings.get("user_input_history_size", 5))
+        except (TypeError, ValueError):
+            hist_size = 5
+        self._input_history_size_spin.setValue(max(1, min(30, hist_size)))
+        self._input_history_size_spin.setToolTip(
+            "续写指令输入框保留的历史条数（最近在前，可回顾并一键回填）"
+        )
+        cont_form.addRow("输入历史条数:", self._input_history_size_spin)
+
         layout.addWidget(cont_group)
 
         # M5: 外观与维护组
@@ -889,6 +917,20 @@ class SettingsDialog(QDialog):
         cont_settings = self._config_manager.get_continuation_settings()
         cont_settings["default_lookback_chapters"] = self._lookback_spin.value()
         cont_settings["default_temperature"] = self._temp_spin.value()
+        cont_settings["prefer_non_stream"] = self._prefer_non_stream_check.isChecked()
+        hist_size = self._input_history_size_spin.value()
+        cont_settings["user_input_history_size"] = hist_size
+        # 截断历史到新 size
+        raw_hist = cont_settings.get("user_input_history", [])
+        if isinstance(raw_hist, list):
+            cleaned: list[str] = []
+            for item in raw_hist:
+                s = str(item).strip() if item is not None else ""
+                if s:
+                    cleaned.append(s)
+                if len(cleaned) >= hist_size:
+                    break
+            cont_settings["user_input_history"] = cleaned
         self._config_manager.config["continuation"] = cont_settings
 
         # 保存网络代理配置

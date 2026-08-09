@@ -257,27 +257,18 @@ class CustomAuditRuleService:
                 if stop_event is not None and stop_event.is_set():
                     return None, "用户取消"
                 try:
-                    # 真流式：逐 chunk 累积 + on_chunk 推送到 UI
-                    content_parts: list[str] = []
-                    async for chunk in client.stream_chat_completion(
+                    use_stream = not self.config_manager.is_prefer_non_stream()
+                    content, _fr = await client.complete_text(
                         messages=messages,
                         model=model,
+                        stream=use_stream,
                         temperature=temperature,
                         max_tokens=CUSTOM_RULE_PARSE_MAX_TOKENS,
                         stop_event=stop_event,
-                    ):
-                        if chunk.content:
-                            content_parts.append(chunk.content)
-                            if on_chunk is not None:
-                                try:
-                                    on_chunk(chunk.content)
-                                except Exception as e:
-                                    logger.warning("on_chunk 回调异常: %s", e)
-                        if chunk.finish_reason:
-                            break
+                        on_chunk=on_chunk,
+                    )
                     if stop_event is not None and stop_event.is_set():
                         return None, "用户取消"
-                    content = "".join(content_parts)
                     if not content:
                         last_error = "响应内容为空"
                         logger.warning(

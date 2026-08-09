@@ -113,6 +113,11 @@ def get_default_config() -> dict[str, Any]:
             "inject_lookback_context": False,
             "inject_lookback_protagonist": False,
             "inject_lookback_custom_characters": False,
+            # 全局优先非流式（默认关=流式；兼容部分网关；超时与流式对齐无 total 上限）
+            "prefer_non_stream": False,
+            # 用户输入历史（最近在前，默认保留 5 条）
+            "user_input_history_size": 5,
+            "user_input_history": [],
         },
         "volume": {},
         "context_extract": {
@@ -548,6 +553,92 @@ class ConfigManager:
     def get_continuation_settings(self) -> dict[str, Any]:
         """获取续写配置。"""
         return self.config.get("continuation", {})
+
+    def is_prefer_non_stream(self) -> bool:
+        """是否优先使用非流式 LLM 请求（默认 False=流式）。"""
+        cont = self.config.get("continuation", {})
+        return bool(cont.get("prefer_non_stream", False))
+
+    def get_user_input_history_size(self) -> int:
+        """用户输入历史最大条数（默认 5，钳制 1–30）。"""
+        cont = self.config.get("continuation", {})
+        try:
+            size = int(cont.get("user_input_history_size", 5))
+        except (TypeError, ValueError):
+            size = 5
+        return max(1, min(30, size))
+
+    def get_user_input_history(self) -> list[str]:
+        """获取用户输入历史（最近在前）。"""
+        cont = self.config.get("continuation", {})
+        items = cont.get("user_input_history", [])
+        if not isinstance(items, list):
+            return []
+        size = self.get_user_input_history_size()
+        result: list[str] = []
+        for item in items:
+            text = str(item).strip() if item is not None else ""
+            if text:
+                result.append(text)
+            if len(result) >= size:
+                break
+        return result
+
+    def push_user_input_history(self, text: str) -> list[str]:
+        """将一条用户输入推入历史（最近在前，与首条相同则不重复，超长截断）。
+
+        Args:
+            text: 用户输入原文（空串忽略）
+
+        Returns:
+            更新后的历史列表
+        """
+        text = (text or "").strip()
+        if not text:
+            return self.get_user_input_history()
+        with self._lock:
+            cont = self.config.setdefault("continuation", {})
+            try:
+                size = int(cont.get("user_input_history_size", 5))
+            except (TypeError, ValueError):
+                size = 5
+            size = max(1, min(30, size))
+            raw = cont.get("user_input_history", [])
+            history: list[str] = []
+            if isinstance(raw, list):
+                for item in raw:
+                    s = str(item).strip() if item is not None else ""
+                    if s:
+                        history.append(s)
+            # 与最新一条相同则不重复插入
+            if history and history[0] == text:
+                cont["user_input_history"] = history[:size]
+                self.save()
+                return list(cont["user_input_history"])
+            # 若历史中已有相同内容，先移除再置顶
+            history = [h for h in history if h != text]
+            history.insert(0, text)
+            cont["user_input_history"] = history[:size]
+            self.save()
+            return list(cont["user_input_history"])
+
+    def set_user_input_history_size(self, size: int) -> None:
+        """设置用户输入历史最大条数并截断现有历史。"""
+        size = max(1, min(30, int(size)))
+        with self._lock:
+            cont = self.config.setdefault("continuation", {})
+            cont["user_input_history_size"] = size
+            raw = cont.get("user_input_history", [])
+            if isinstance(raw, list):
+                cleaned: list[str] = []
+                for item in raw:
+                    s = str(item).strip() if item is not None else ""
+                    if s:
+                        cleaned.append(s)
+                    if len(cleaned) >= size:
+                        break
+                cont["user_input_history"] = cleaned
+            self.save()
 
     def get_selected_worldbook_ids(self) -> list[str]:
         """获取续写面板持久化的多选世界书 ID 列表。"""
