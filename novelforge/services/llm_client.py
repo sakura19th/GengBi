@@ -16,7 +16,7 @@ import codecs
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import aiohttp
 
@@ -127,7 +127,8 @@ class LLMClient:
         Args:
             base_url: API 基础 URL（如 ``https://api.openai.com/v1``）
             api_key: API Key
-            timeout: 超时秒数（非流式=total 总超时；流式=sock_read 分块间超时）
+            timeout: 超时秒数（流式/非流式生成均为 sock_read 分块间超时；
+                无 total 上限，避免长生成被总时长误杀；fetch_models 仍用短 total）
             reasoning_effort: 思考强度（OpenAI o 系列/DeepSeek V4 等 OpenAI 兼容网关
                 支持，取值 auto/minimal/low/medium/high/max；空串/none/off 表示不发送）
             extra_payload: 自定义请求体字段（deep merge 到 payload，如 zenmux
@@ -159,12 +160,15 @@ class LLMClient:
         self.extra_headers: dict = extra_headers or {}
         # HTTP/HTTPS 代理 URL（None 表示不走代理）
         self.proxy = proxy.strip() if proxy and proxy.strip() else None
-        # 非流式：total 总超时
+        # 短请求（如 GET /models）：保留 total 总超时
         self.timeout = aiohttp.ClientTimeout(total=timeout)
-        # 流式：无 total 限制，sock_read 控制分块间超时（检测死连接，不杀长流）
-        self.stream_timeout = aiohttp.ClientTimeout(
+        # 生成请求（流式 + 非流式）：无 total 限制，sock_read 控制分块/空闲超时
+        # （检测死连接，不杀长生成；非流式与流式对齐，避免 prefer_non_stream 时 300s 误杀）
+        self.request_timeout = aiohttp.ClientTimeout(
             total=None, sock_connect=30, sock_read=timeout
         )
+        # 兼容旧属性名（stream_timeout = request_timeout）
+        self.stream_timeout = self.request_timeout
         # 复用的 aiohttp.ClientSession（懒加载，绑定到首次使用的事件循环）
         self._session: aiohttp.ClientSession | None = None
 
@@ -210,9 +214,11 @@ class LLMClient:
     def _filter_unsupported_params(payload: dict, model: str) -> None:
         """按模型类型删除不支持的参数（原地修改）。
 
-        xAI Grok 系列不支持 presence_penalty 和 frequency_penalty，
-        发送会导致 400 错误。除 grok-3-mini 外的 Grok 模型不支持
-        reasoning_effort。
+        - xAI Grok 全系列不支持 presence_penalty / frequency_penalty；
+          除 grok-3-mini 外不支持 reasoning_effort。
+        - Gemini 多数型号不支持 presence_penalty / frequency_penalty
+         （含 0.0 时部分网关仍 400 INVALID_ARGUMENT）。
+        - 其余模型：penalty 为 0.0 时不发送（与默认行为等价，更兼容）。
         """
         if not model:
             return
@@ -224,6 +230,17 @@ class LLMClient:
             # 非 grok-3-mini 不支持 reasoning_effort
             if "grok-3-mini" not in model_lower:
                 payload.pop("reasoning_effort", None)
+            return
+        if LLMClient._is_gemini_model(model_lower):
+            # Gemini 2.5/3.x 等不支持 penalty，发送会 400 INVALID_ARGUMENT
+            payload.pop("presence_penalty", None)
+            payload.pop("frequency_penalty", None)
+            return
+        # 其他模型：0.0 为 no-op，省略可减少部分网关对未知/未启用字段的挑剔
+        if payload.get("presence_penalty") == 0.0:
+            payload.pop("presence_penalty", None)
+        if payload.get("frequency_penalty") == 0.0:
+            payload.pop("frequency_penalty", None)
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取复用的 aiohttp.ClientSession（懒加载）。
@@ -317,7 +334,7 @@ class LLMClient:
                     url,
                     json=payload,
                     headers=headers,
-                    timeout=self.stream_timeout,
+                    timeout=self.request_timeout,
                     proxy=self.proxy or None,
                 ) as response:
                     # 处理错误状态码（不调用 raise_for_status）
@@ -517,21 +534,26 @@ class LLMClient:
         messages: list[dict],
         model: str,
         temperature: float = 0.2,
-        max_tokens: int = 2000,
+        max_tokens: int | None = 2000,
         top_p: float = 1.0,
+        frequency_penalty: float = 0.0,
+        presence_penalty: float = 0.0,
         stop_event: asyncio.Event | None = None,
     ) -> dict:
         """非流式调用 chat/completions，返回完整响应 dict。
 
-        用于上下文提取等需要完整 JSON 响应的场景。
+        用于上下文提取、prefer_non_stream 续写等场景。
         使用 ``stream: false`` 直接获取完整响应，解析 ``choices[0].message.content``。
+        超时与流式一致：无 total 上限，仅 sock_read 检测死连接。
 
         Args:
             messages: 消息列表
             model: 模型名
             temperature: 温度（默认 0.2，低温保证稳定输出）
-            max_tokens: 最大生成 token 数
+            max_tokens: 最大生成 token 数（None 时不写入 payload）
             top_p: top_p 采样
+            frequency_penalty: 频率惩罚（Gemini/Grok 等会过滤）
+            presence_penalty: 存在惩罚（Gemini/Grok 等会过滤）
             stop_event: 停止事件（设置时中断请求）
 
         Returns:
@@ -552,13 +574,16 @@ class LLMClient:
             "temperature": temperature,
             "stream": False,
             "top_p": top_p,
-            "max_tokens": max_tokens,
+            "frequency_penalty": frequency_penalty,
+            "presence_penalty": presence_penalty,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         # 思考强度：根据模型类型解析（Gemini 等模型需映射不支持的值）
         effort = self._resolve_reasoning_effort_for_payload(model)
         if effort:
             payload["reasoning_effort"] = effort
-        # 按模型类型过滤不支持的参数（Grok 等）
+        # 按模型类型过滤不支持的参数（Grok/Gemini 等）
         self._filter_unsupported_params(payload, model)
         # 自定义 payload 字段 deep merge（如 zenmux provider_routing_strategy）
         if self.extra_payload:
@@ -588,7 +613,7 @@ class LLMClient:
                     url,
                     json=payload,
                     headers=headers,
-                    timeout=self.timeout,
+                    timeout=self.request_timeout,
                     proxy=self.proxy or None,
                 ) as response:
                     # 处理错误状态码
@@ -652,6 +677,87 @@ class LLMClient:
             raise LLMError(f"请求失败: {last_error}")
 
         raise LLMError("请求失败：未知原因")
+
+    async def complete_text(
+        self,
+        messages: list[dict],
+        model: str,
+        *,
+        stream: bool = True,
+        temperature: float = 0.2,
+        max_tokens: int | None = 2000,
+        top_p: float = 1.0,
+        frequency_penalty: float = 0.0,
+        presence_penalty: float = 0.0,
+        stop_event: asyncio.Event | None = None,
+        on_chunk: Any = None,
+    ) -> tuple[str, str | None]:
+        """统一文本生成：流式或非流式，返回 (content, finish_reason)。
+
+        流式时逐 chunk 可选回调 ``on_chunk(str)``；非流式完成后若提供
+        on_chunk 则一次性推送全文。超时策略与 stream/chat 路径一致。
+
+        Args:
+            messages: 消息列表
+            model: 模型名
+            stream: True=SSE 流式，False=一次返回
+            temperature: 温度
+            max_tokens: 最大生成 token
+            top_p: top_p
+            frequency_penalty: 频率惩罚
+            presence_penalty: 存在惩罚
+            stop_event: 取消事件
+            on_chunk: 可选 ``Callable[[str], None]`` 接收正文增量
+
+        Returns:
+            (完整正文, finish_reason 或 None)
+        """
+        # 延迟导入避免循环；on_chunk 类型用 Any 标注
+        if stream:
+            parts: list[str] = []
+            finish: str | None = None
+            async for chunk in self.stream_chat_completion(
+                messages=messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                frequency_penalty=frequency_penalty,
+                presence_penalty=presence_penalty,
+                stop_event=stop_event,
+            ):
+                if chunk.content:
+                    parts.append(chunk.content)
+                    if on_chunk is not None:
+                        try:
+                            on_chunk(chunk.content)
+                        except Exception as e:
+                            logger.warning("on_chunk 回调异常: %s", e)
+                if chunk.finish_reason:
+                    finish = chunk.finish_reason
+                    break
+            return "".join(parts), finish
+
+        response = await self.chat_completion(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens if max_tokens is not None else 2000,
+            top_p=top_p,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
+            stop_event=stop_event,
+        )
+        choice0 = (response.get("choices") or [{}])[0]
+        msg = choice0.get("message") or {}
+        content = msg.get("content") or ""
+        finish = choice0.get("finish_reason")
+        if content and on_chunk is not None:
+            try:
+                on_chunk(content)
+            except Exception as e:
+                logger.warning("on_chunk 回调异常: %s", e)
+        return content, finish
 
     async def fetch_models(self) -> list[str]:
         """获取可用模型列表（GET /models）。

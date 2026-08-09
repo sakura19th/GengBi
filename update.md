@@ -2,6 +2,32 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-08-09：v0.2.19 Gemini 兼容 + 全局非流式 + 输入历史
+
+### 背景
+
+1. Antigravity/Gemini 兼容网关在 OpenAI 风格请求中带 `presence_penalty`/`frequency_penalty` 时返回 `400 INVALID_ARGUMENT`。
+2. 若切非流式，旧 `chat_completion` 使用 `total=timeout`（默认 300s），长续写会被总超时杀掉。
+3. 续写指令输入框无历史回顾，不便复用常用指令。
+
+### 核心改动
+
+1. **`llm_client.py`**：`_filter_unsupported_params` 对 Gemini 删除 penalty；其余模型 0.0 时省略；生成超时 `request_timeout=total=None+sock_read`（流式/非流式对齐）；`chat_completion` 参数与过滤对齐；新增 `complete_text` 统一入口。
+2. **`config.py` / `settings_dialog.py`**：`prefer_non_stream`、`user_input_history_size`、`user_input_history` + 设置页控件。
+3. **Workers/Extractors**：ContinuationWorker/AuditWorker/VolumeOrchestrator 分支非流式；ontology/style/custom_rule/context 读全局开关；main_window 构造透传 `prefer_non_stream`。
+4. **`continuation_panel.py` / `main_window.py`**：历史下拉回填；`_on_start_flow` 前 push 面板原文；设置关闭后刷新。
+
+### 测试
+
+- `tests/test_reasoning_effort.py`：Gemini penalty 过滤 + 0.0 省略
+- `tests/test_prefer_non_stream.py`：配置/超时/`complete_text` 分支/main_window 透传
+- `tests/test_user_input_history.py`：push 去重截断 + 面板 UI
+- 上述合计 38 passed
+
+### 文档同步
+
+- `agent.md` / `README.md` / `__version__` → v0.2.19；`update.md` 本条目
+
 ## 2026-08-08：修复 GitHub Actions 打包 UnicodeEncodeError
 
 ### 背景

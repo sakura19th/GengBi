@@ -77,6 +77,7 @@ class AuditWorker(QThread):
         extra_payload: dict | None = None,
         extra_headers: dict | None = None,
         proxy: str | None = None,
+        prefer_non_stream: bool = False,
         parent=None,
     ) -> None:
         """初始化审计工作线程。
@@ -95,6 +96,7 @@ class AuditWorker(QThread):
             extra_payload: 自定义请求体字段（deep merge 到 payload）
             extra_headers: 自定义 HTTP 头（update 到 headers）
             proxy: HTTP/HTTPS 代理 URL（None 表示不走代理）
+            prefer_non_stream: True 时走 chat_completion，完成后一次性推送全文
             parent: 父 QObject
         """
         super().__init__(parent)
@@ -110,6 +112,8 @@ class AuditWorker(QThread):
         self.extra_headers: dict = extra_headers or {}
         # 网络代理（透传给 LLMClient）
         self.proxy = proxy
+        # 全局非流式开关（默认 False=流式）
+        self.prefer_non_stream = bool(prefer_non_stream)
 
         # 线程安全停止标志
         self._stop_event = threading.Event()
@@ -319,23 +323,37 @@ class AuditWorker(QThread):
         status = "completed"
 
         try:
-            async for chunk in client.stream_chat_completion(
-                messages=self.messages,
-                model=self._effective_model(),
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                stop_event=async_stop,
-            ):
-                if chunk.content:
-                    content_parts.append(chunk.content)
-                    char_count += len(chunk.content)
-                    self.chunk_received.emit(chunk.content)
+            if self.prefer_non_stream:
+                response = await client.chat_completion(
+                    messages=self.messages,
+                    model=self._effective_model(),
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    stop_event=async_stop,
+                )
+                msg = (response.get("choices") or [{}])[0].get("message") or {}
+                content = msg.get("content") or ""
+                if content:
+                    content_parts.append(content)
+                    char_count = len(content)
+                    self.chunk_received.emit(content)
                     self.token_count.emit(char_count)
+                status = "completed"
+            else:
+                async for chunk in client.stream_chat_completion(
+                    messages=self.messages,
+                    model=self._effective_model(),
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                    stop_event=async_stop,
+                ):
+                    if chunk.content:
+                        content_parts.append(chunk.content)
+                        char_count += len(chunk.content)
+                        self.chunk_received.emit(chunk.content)
+                        self.token_count.emit(char_count)
 
-                if chunk.finish_reason:
-                    if chunk.finish_reason == "done":
-                        status = "completed"
-                    else:
+                    if chunk.finish_reason:
                         status = "completed"
 
         except asyncio.CancelledError:

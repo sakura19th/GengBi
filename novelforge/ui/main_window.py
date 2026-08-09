@@ -1324,8 +1324,29 @@ class MainWindow(QMainWindow):
             mapping = self.config_manager.get_last_model_per_endpoint()
             if mapping:
                 self.continuation_panel._last_model_per_endpoint.update(mapping)
+            # 用户输入历史下拉
+            self._refresh_user_input_history_ui()
         except Exception as e:
             logger.warning("加载续写参数默认值失败: %s", e)
+
+    def _refresh_user_input_history_ui(self) -> None:
+        """从 config 刷新续写面板输入历史下拉。"""
+        try:
+            history = self.config_manager.get_user_input_history()
+            self.continuation_panel.set_user_input_history(history)
+        except Exception as e:
+            logger.warning("刷新用户输入历史失败: %s", e)
+
+    def _record_user_input_history(self) -> None:
+        """在真正发起流程前，将面板原文推入输入历史（空串忽略）。"""
+        try:
+            text = self.continuation_panel.get_user_input()
+            if not text:
+                return
+            history = self.config_manager.push_user_input_history(text)
+            self.continuation_panel.set_user_input_history(history)
+        except Exception as e:
+            logger.warning("记录用户输入历史失败: %s", e)
 
     def _load_volume_config(self) -> None:
         """从 config_manager 加载卷续写配置并回填到 VolumePanel。"""
@@ -2137,6 +2158,7 @@ class MainWindow(QMainWindow):
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
             proxy=self._get_network_proxy(),
+            prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
         )
 
@@ -2231,6 +2253,8 @@ class MainWindow(QMainWindow):
         if not plugin:
             QMessageBox.warning(self, "错误", f"流程插件不存在: {plugin_id}")
             return
+        # 真正发起流程时记录面板原文（不记录合成 override）
+        self._record_user_input_history()
         # 存储 plugin_id 到 params，供 accept 时查找 accept_mode
         params["_flow_plugin_id"] = plugin_id
         context = {
@@ -2564,6 +2588,7 @@ class MainWindow(QMainWindow):
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
             proxy=self._get_network_proxy(),
+            prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
         )
         self._volume_orchestrator.debug_mode = self._debug_mode
@@ -6258,6 +6283,7 @@ class MainWindow(QMainWindow):
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
             proxy=self._get_network_proxy(),
+            prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
         )
 
@@ -6501,6 +6527,7 @@ class MainWindow(QMainWindow):
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
             proxy=self._get_network_proxy(),
+            prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
         )
 
@@ -6740,6 +6767,7 @@ class MainWindow(QMainWindow):
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
             proxy=self._get_network_proxy(),
+            prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
         )
 
@@ -7048,6 +7076,7 @@ class MainWindow(QMainWindow):
             extra_payload=single_endpoint.get("extra_payload") or {},
             extra_headers=single_endpoint.get("extra_headers") or {},
             proxy=self._get_network_proxy(),
+            prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
         )
 
@@ -7227,6 +7256,7 @@ class MainWindow(QMainWindow):
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
             proxy=self._get_network_proxy(),
+            prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
         )
 
@@ -7358,6 +7388,7 @@ class MainWindow(QMainWindow):
             extra_payload=endpoint.get("extra_payload") or {},
             extra_headers=endpoint.get("extra_headers") or {},
             proxy=self._get_network_proxy(),
+            prefer_non_stream=self.config_manager.is_prefer_non_stream(),
             parent=self,
         )
 
@@ -7852,6 +7883,8 @@ class MainWindow(QMainWindow):
         self._refresh_endpoints()
         # M5: 字体设置可能变更，重新应用
         self._apply_font_settings()
+        # 输入历史条数/内容可能被设置页截断，同步面板下拉
+        self._refresh_user_input_history_ui()
 
     def _on_about(self) -> None:
         """关于对话框。"""

@@ -621,27 +621,18 @@ class StyleExtractor:
                 return accumulated_style
 
             try:
-                # 流式调用：逐 chunk 接收并推送 UI
-                content_parts: list[str] = []
-                async for chunk in llm_client.stream_chat_completion(
+                use_stream = not self.config_manager.is_prefer_non_stream()
+                content, _fr = await llm_client.complete_text(
                     messages=messages,
                     model=model,
+                    stream=use_stream,
                     temperature=temperature,
                     max_tokens=STYLE_EXTRACT_MAX_TOKENS,
                     stop_event=stop_event,
-                ):
-                    if stop_event is not None and stop_event.is_set():
-                        return accumulated_style
-                    if chunk.content:
-                        content_parts.append(chunk.content)
-                        if on_chunk is not None:
-                            try:
-                                on_chunk(chunk.content)
-                            except Exception as e:
-                                logger.warning("on_chunk 回调异常: %s", e)
-                    if chunk.finish_reason:
-                        break
-                content = "".join(content_parts)
+                    on_chunk=on_chunk,
+                )
+                if stop_event is not None and stop_event.is_set():
+                    return accumulated_style
 
                 # 解析 JSON
                 merged_style = _parse_style_response(content)
@@ -814,27 +805,18 @@ class StyleExtractor:
                     if stop_event is not None and stop_event.is_set():
                         return None, "用户取消提取"
                     try:
-                        # 流式调用：逐 chunk 接收并推送 UI
-                        content_parts: list[str] = []
-                        async for chunk in client.stream_chat_completion(
+                        use_stream = not self.config_manager.is_prefer_non_stream()
+                        content, _fr = await client.complete_text(
                             messages=messages,
                             model=model,
+                            stream=use_stream,
                             temperature=temperature,
                             max_tokens=STYLE_EXTRACT_MAX_TOKENS,
                             stop_event=stop_event,
-                        ):
-                            if stop_event is not None and stop_event.is_set():
-                                return None, "用户取消提取"
-                            if chunk.content:
-                                content_parts.append(chunk.content)
-                                if on_chunk is not None:
-                                    try:
-                                        on_chunk(chunk.content)
-                                    except Exception as e:
-                                        logger.warning("on_chunk 回调异常: %s", e)
-                            if chunk.finish_reason:
-                                break
-                        content = "".join(content_parts)
+                            on_chunk=on_chunk,
+                        )
+                        if stop_event is not None and stop_event.is_set():
+                            return None, "用户取消提取"
 
                         # 解析 JSON → dict（仅保留 9 大维度字段）
                         batch_style = _parse_style_response(content)

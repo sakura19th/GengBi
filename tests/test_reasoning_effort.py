@@ -256,7 +256,7 @@ def test_filter_unsupported_params_grok3_removes_penalties_and_reasoning() -> No
 
 
 def test_filter_unsupported_params_non_grok_unchanged() -> None:
-    """非 Grok 模型不修改 payload。"""
+    """非 Grok/Gemini 模型：非零 penalty 保留。"""
     payload = {
         "model": "gpt-4",
         "presence_penalty": 0.5,
@@ -267,3 +267,43 @@ def test_filter_unsupported_params_non_grok_unchanged() -> None:
     assert payload["presence_penalty"] == 0.5
     assert payload["frequency_penalty"] == 0.3
     assert payload["reasoning_effort"] == "medium"
+
+
+def test_filter_unsupported_params_gemini_removes_penalties() -> None:
+    """Gemini 模型删除 presence/frequency_penalty（含非零），避免 400 INVALID_ARGUMENT。"""
+    payload = {
+        "model": "gemini-2.5-pro",
+        "presence_penalty": 0.5,
+        "frequency_penalty": 0.3,
+        "temperature": 0.8,
+    }
+    LLMClient._filter_unsupported_params(payload, "gemini-2.5-pro")
+    assert "presence_penalty" not in payload
+    assert "frequency_penalty" not in payload
+    assert payload["temperature"] == 0.8
+
+
+def test_filter_unsupported_params_gemini_zero_penalties_removed() -> None:
+    """Gemini 即使 penalty=0.0 也不发送。"""
+    payload = {
+        "model": "google/gemini-3-flash",
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+    }
+    LLMClient._filter_unsupported_params(payload, "google/gemini-3-flash")
+    assert "presence_penalty" not in payload
+    assert "frequency_penalty" not in payload
+
+
+def test_filter_unsupported_params_other_model_zero_penalties_omitted() -> None:
+    """其他模型：penalty 为 0.0 时省略（与默认等价，更兼容）。"""
+    payload = {
+        "model": "gpt-4o",
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "temperature": 0.7,
+    }
+    LLMClient._filter_unsupported_params(payload, "gpt-4o")
+    assert "presence_penalty" not in payload
+    assert "frequency_penalty" not in payload
+    assert payload["temperature"] == 0.7
