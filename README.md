@@ -273,8 +273,8 @@ API Key 使用 PBKDF2HMAC + Fernet 加密存储，不明文落盘。
 
 ### v0.2.19
 
-- 修复 Gemini/Antigravity 等网关因 `presence_penalty`/`frequency_penalty` 导致的 `400 INVALID_ARGUMENT`（按模型过滤不支持参数；0.0 惩罚对其他模型也可省略）
-- 设置新增「优先使用非流式请求」全局开关（默认关=流式）；非流式生成超时与流式对齐（无总时长上限，仅空闲读超时），避免长生成被误杀
+- 修复 Gemini/Antigravity 等网关可能因 `presence_penalty`/`frequency_penalty` 导致的 `400 INVALID_ARGUMENT`（按模型过滤不支持参数；0.0 惩罚对其他模型也可省略）
+- 设置新增「优先使用非流式请求」全局开关（默认关=流式）
 - 续写指令输入框支持历史回顾（默认 5 条，设置可配 1–30）：发起流程时记录面板原文，下拉选择一键回填
 
 ### v0.2.18
