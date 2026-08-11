@@ -50,7 +50,7 @@ from PySide6.QtWidgets import (
 )
 
 from novelforge.models import ContextEntry
-from novelforge.ui.flow_layout import QFlowLayout
+from novelforge.ui.flow_layout import FlowContainer
 from novelforge.ui.helpers import parse_token_limit, set_label_state
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,9 @@ LOADING_ANIMATION_INTERVAL_MS = 100
 
 # loading 旋转字符序列
 LOADING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+# meta 错误文案最大显示长度（完整内容放 tooltip）
+_META_ERROR_MAX_LEN = 120
 
 
 class _EntryEditorDialog(QDialog):
@@ -431,7 +434,9 @@ class ContextPreviewPanel(QWidget):
         layout.addWidget(self._meta_label)
 
         # ===== 功能按钮行（每个功能一个按钮，点击弹出操作选择对话框）=====
-        feature_row = QFlowLayout()
+        # FlowContainer 保证 height-for-width 对父 QVBoxLayout 生效，避免换行后重叠
+        self._feature_host = FlowContainer()
+        feature_row = self._feature_host.flow_layout
         feature_row.setSpacing(4)
 
         self._feature_buttons: dict[str, QPushButton] = {}
@@ -480,10 +485,11 @@ class ContextPreviewPanel(QWidget):
         feature_row.addWidget(self._custom_rule_btn)
         self._feature_buttons["custom_rule"] = self._custom_rule_btn
 
-        layout.addLayout(feature_row)
+        layout.addWidget(self._feature_host)
 
         # ===== 设置与条目管理行（流式布局，窄屏自动换行） =====
-        settings_row = QFlowLayout()
+        self._settings_host = FlowContainer()
+        settings_row = self._settings_host.flow_layout
         settings_row.setSpacing(4)
 
         settings_row.addWidget(QLabel("前文:"))
@@ -519,7 +525,7 @@ class ContextPreviewPanel(QWidget):
         self._view_prompt_btn.clicked.connect(self._on_view_prompt_clicked)
         settings_row.addWidget(self._view_prompt_btn)
 
-        layout.addLayout(settings_row)
+        layout.addWidget(self._settings_host)
 
         # ===== 分组显示区（滚动） =====
         self._scroll_area = QScrollArea()
@@ -583,6 +589,35 @@ class ContextPreviewPanel(QWidget):
         """
         set_label_state(label, text, state)
 
+    def _set_meta_error(self, error: str) -> None:
+        """将错误写入 meta：过长截断，完整内容放 tooltip。"""
+        text = error or ""
+        if len(text) > _META_ERROR_MAX_LEN:
+            display = text[:_META_ERROR_MAX_LEN] + "…"
+        else:
+            display = text
+        self._set_label_state(self._meta_label, f"错误: {display}", "textDanger")
+        self._meta_label.setToolTip(text)
+
+    def _relayout_after_state_change(self) -> None:
+        """提取态切换后强制重算布局（Flow 多行高度）。"""
+        self._feature_host.updateGeometry()
+        self._settings_host.updateGeometry()
+        self.updateGeometry()
+        lay = self.layout()
+        if lay is not None:
+            lay.invalidate()
+            lay.activate()
+
+    def _stop_loading_ui(self) -> None:
+        """停止 loading 动画并恢复功能按钮（finish/fail/cancel 共用）。"""
+        self._is_extracting = False
+        self._loading_timer.stop()
+        self._loading_label.setVisible(False)
+        self._loading_text.setVisible(False)
+        self._cancel_btn.setEnabled(False)
+        self._set_feature_buttons_enabled(True)
+
     # ===== 公开接口 =====
 
     def start_extraction(self) -> None:
@@ -622,12 +657,7 @@ class ContextPreviewPanel(QWidget):
             from_cache: 是否命中缓存
             batch_count: 拆分批次数（1=未拆分）
         """
-        self._is_extracting = False
-        self._loading_timer.stop()
-        self._loading_label.setVisible(False)
-        self._loading_text.setVisible(False)
-        self._cancel_btn.setEnabled(False)
-        self._set_feature_buttons_enabled(True)
+        self._stop_loading_ui()
         self._set_label_state(self._status_label, "提取完成", "textSuccess")
         # 更新流式输出查看区标题
         self._stream_group.setTitle("流式输出（接收完成）")
@@ -650,12 +680,14 @@ class ContextPreviewPanel(QWidget):
                     f"Token: {total_tokens} (输入 {prompt_tokens} + 输出 {completion_tokens})"
                 )
         self._set_label_state(self._meta_label, " | ".join(meta_parts), "metaText")
+        self._meta_label.setToolTip("")
 
         # 更新条目显示
         self._entries = list(entries)
         # 从 entry.enabled 重建 _disabled_uids（enabled 字段为禁用状态真源）
         self._disabled_uids = {e.uid for e in self._entries if not e.enabled}
         self._refresh_entries_display()
+        self._relayout_after_state_change()
         self.extraction_finished.emit(list(self._entries))
 
     def fail_extraction(self, error: str) -> None:
@@ -664,30 +696,23 @@ class ContextPreviewPanel(QWidget):
         Args:
             error: 错误信息
         """
-        self._is_extracting = False
-        self._loading_timer.stop()
-        self._loading_label.setVisible(False)
-        self._loading_text.setVisible(False)
-        self._cancel_btn.setEnabled(False)
-        self._set_feature_buttons_enabled(True)
+        self._stop_loading_ui()
         self._set_label_state(self._status_label, "提取失败", "textDanger")
-        self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
+        self._set_meta_error(error)
         # 更新流式输出查看区标题
         self._stream_group.setTitle("流式输出（已中断）")
+        self._relayout_after_state_change()
         self.extraction_failed.emit(error)
 
     def cancel_extraction(self) -> None:
         """提取被取消：停止 loading，恢复状态。"""
-        self._is_extracting = False
-        self._loading_timer.stop()
-        self._loading_label.setVisible(False)
-        self._loading_text.setVisible(False)
-        self._cancel_btn.setEnabled(False)
-        self._set_feature_buttons_enabled(True)
+        self._stop_loading_ui()
         self._set_label_state(self._status_label, "已取消", "textWarning")
         self._set_label_state(self._meta_label, "提取已取消", "textWarning")
+        self._meta_label.setToolTip("")
         # 更新流式输出查看区标题
         self._stream_group.setTitle("流式输出（已中断）")
+        self._relayout_after_state_change()
         self.extraction_cancelled.emit()
 
     def get_entries(self) -> list[ContextEntry]:
@@ -1258,13 +1283,10 @@ class ContextPreviewPanel(QWidget):
         Args:
             status: 完成状态消息
         """
-        self._is_extracting = False
-        self._loading_timer.stop()
-        self._loading_label.setVisible(False)
-        self._loading_text.setVisible(False)
-        self._set_feature_buttons_enabled(True)
+        self._stop_loading_ui()
         self._set_label_state(self._status_label, "世界观提取完成", "textSuccess")
         self._stream_group.setTitle("世界观流式输出（接收完成）")
+        self._relayout_after_state_change()
 
     def fail_ontology_extraction(self, error: str) -> None:
         """世界观提取失败：停止 loading，显示错误。
@@ -1272,14 +1294,11 @@ class ContextPreviewPanel(QWidget):
         Args:
             error: 错误信息
         """
-        self._is_extracting = False
-        self._loading_timer.stop()
-        self._loading_label.setVisible(False)
-        self._loading_text.setVisible(False)
-        self._set_feature_buttons_enabled(True)
+        self._stop_loading_ui()
         self._set_label_state(self._status_label, "世界观提取失败", "textDanger")
-        self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
+        self._set_meta_error(error)
         self._stream_group.setTitle("世界观流式输出（已中断）")
+        self._relayout_after_state_change()
 
     # ===== 主角形象提取流式接口（复用 _stream_view，镜像 ontology）=====
 
@@ -1344,13 +1363,10 @@ class ContextPreviewPanel(QWidget):
         Args:
             status: 完成状态消息
         """
-        self._is_extracting = False
-        self._loading_timer.stop()
-        self._loading_label.setVisible(False)
-        self._loading_text.setVisible(False)
-        self._set_feature_buttons_enabled(True)
+        self._stop_loading_ui()
         self._set_label_state(self._status_label, "主角形象提取完成", "textSuccess")
         self._stream_group.setTitle("主角形象流式输出（接收完成）")
+        self._relayout_after_state_change()
 
     def fail_protagonist_extraction(self, error: str) -> None:
         """主角形象提取失败：停止 loading，显示错误。
@@ -1358,14 +1374,11 @@ class ContextPreviewPanel(QWidget):
         Args:
             error: 错误信息
         """
-        self._is_extracting = False
-        self._loading_timer.stop()
-        self._loading_label.setVisible(False)
-        self._loading_text.setVisible(False)
-        self._set_feature_buttons_enabled(True)
+        self._stop_loading_ui()
         self._set_label_state(self._status_label, "主角形象提取失败", "textDanger")
-        self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
+        self._set_meta_error(error)
         self._stream_group.setTitle("主角形象流式输出（已中断）")
+        self._relayout_after_state_change()
 
     # ===== 自定义角色提取流式接口（复用 _stream_view，镜像 protagonist）=====
 
@@ -1430,13 +1443,10 @@ class ContextPreviewPanel(QWidget):
         Args:
             status: 完成状态消息
         """
-        self._is_extracting = False
-        self._loading_timer.stop()
-        self._loading_label.setVisible(False)
-        self._loading_text.setVisible(False)
-        self._set_feature_buttons_enabled(True)
+        self._stop_loading_ui()
         self._set_label_state(self._status_label, "自定义角色提取完成", "textSuccess")
         self._stream_group.setTitle("自定义角色流式输出（接收完成）")
+        self._relayout_after_state_change()
 
     def fail_custom_character_extraction(self, error: str) -> None:
         """自定义角色提取失败：停止 loading，显示错误。
@@ -1444,14 +1454,11 @@ class ContextPreviewPanel(QWidget):
         Args:
             error: 错误信息
         """
-        self._is_extracting = False
-        self._loading_timer.stop()
-        self._loading_label.setVisible(False)
-        self._loading_text.setVisible(False)
-        self._set_feature_buttons_enabled(True)
+        self._stop_loading_ui()
         self._set_label_state(self._status_label, "自定义角色提取失败", "textDanger")
-        self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
+        self._set_meta_error(error)
         self._stream_group.setTitle("自定义角色流式输出（已中断）")
+        self._relayout_after_state_change()
 
     # ===== 文风档案提取流式接口（复用 _stream_view，镜像 ontology）=====
 
@@ -1516,13 +1523,10 @@ class ContextPreviewPanel(QWidget):
         Args:
             status: 完成状态消息
         """
-        self._is_extracting = False
-        self._loading_timer.stop()
-        self._loading_label.setVisible(False)
-        self._loading_text.setVisible(False)
-        self._set_feature_buttons_enabled(True)
+        self._stop_loading_ui()
         self._set_label_state(self._status_label, "文风档案提取完成", "textSuccess")
         self._stream_group.setTitle("文风档案流式输出（接收完成）")
+        self._relayout_after_state_change()
 
     def fail_style_extraction(self, error: str) -> None:
         """文风档案提取失败：停止 loading，显示错误。
@@ -1530,14 +1534,11 @@ class ContextPreviewPanel(QWidget):
         Args:
             error: 错误信息
         """
-        self._is_extracting = False
-        self._loading_timer.stop()
-        self._loading_label.setVisible(False)
-        self._loading_text.setVisible(False)
-        self._set_feature_buttons_enabled(True)
+        self._stop_loading_ui()
         self._set_label_state(self._status_label, "文风档案提取失败", "textDanger")
-        self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
+        self._set_meta_error(error)
         self._stream_group.setTitle("文风档案流式输出（已中断）")
+        self._relayout_after_state_change()
 
     # ===== 自定义设定结构化流式接口（复用 _stream_view，镜像 ontology）=====
 
@@ -1589,13 +1590,10 @@ class ContextPreviewPanel(QWidget):
         Args:
             status: 完成状态消息
         """
-        self._is_extracting = False
-        self._loading_timer.stop()
-        self._loading_label.setVisible(False)
-        self._loading_text.setVisible(False)
-        self._set_feature_buttons_enabled(True)
+        self._stop_loading_ui()
         self._set_label_state(self._status_label, "自定义设定结构化完成", "textSuccess")
         self._stream_group.setTitle("自定义设定流式输出（接收完成）")
+        self._relayout_after_state_change()
 
     def fail_custom_rule_parsing(self, error: str) -> None:
         """自定义设定结构化失败：停止 loading，显示错误。
@@ -1603,14 +1601,11 @@ class ContextPreviewPanel(QWidget):
         Args:
             error: 错误信息
         """
-        self._is_extracting = False
-        self._loading_timer.stop()
-        self._loading_label.setVisible(False)
-        self._loading_text.setVisible(False)
-        self._set_feature_buttons_enabled(True)
+        self._stop_loading_ui()
         self._set_label_state(self._status_label, "自定义设定结构化失败", "textDanger")
-        self._set_label_state(self._meta_label, f"错误: {error}", "textDanger")
+        self._set_meta_error(error)
         self._stream_group.setTitle("自定义设定流式输出（已中断）")
+        self._relayout_after_state_change()
 
     def restore_extraction_state(
         self,
