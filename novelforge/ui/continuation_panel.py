@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
 
 from novelforge.models import Continuation, VolumeRunConfig
 from novelforge.ui.context_preview_panel import ContextPreviewPanel
-from novelforge.ui.flow_layout import QFlowLayout
+from novelforge.ui.flow_layout import FlowContainer
 from novelforge.ui.helpers import select_combo_by_id
 from novelforge.ui.volume_panel import VolumePanel
 from novelforge.ui.wheel_filter import WheelEventFilter
@@ -342,7 +342,8 @@ class ContinuationPanel(QWidget):
         self._auto_scroll_check.setChecked(True)
 
         # ===== 按钮区（流式布局，窄屏自动换行） =====
-        btn_layout = QFlowLayout()
+        self._btn_host = FlowContainer()
+        btn_layout = self._btn_host.flow_layout
         btn_layout.setSpacing(4)
 
         self._start_btn = QPushButton("开始续写")
@@ -385,7 +386,7 @@ class ContinuationPanel(QWidget):
         btn_layout.addWidget(self._audit_btn)
         btn_layout.addWidget(self._compare_btn)
 
-        layout.addLayout(btn_layout)
+        layout.addWidget(self._btn_host)
 
         # 安装滚轮事件过滤器：未聚焦时不响应滚轮，转发给父级滚动区域
         self._wheel_filter = WheelEventFilter(self)
