@@ -2,6 +2,25 @@
 
 > 本文件按时间倒序记录每次代码修改的详细变更，与 `README.md` 的"更新记录"章节互补：README 仅列版本要点，本文件含完整背景、改动细节、测试与文档同步情况。
 
+## 2026-08-15：Claude Fable/Opus 4.7+ 采样参数过滤
+
+### 背景
+
+使用 Fable 5（及 Opus 4.7+ / Mythos）时，请求体中的 `top_p`/`temperature` 会触发上游 400：`` `top_p` is deprecated for this model. ``。赓笔 `LLMClient` 流式/非流式路径默认写入这些字段，而 `_filter_unsupported_params` 此前只处理 Grok/Gemini 的 penalty。
+
+### 核心改动
+
+1. **`llm_client.py`**：新增 `_is_sampling_deprecated_claude_model`（匹配 fable/mythos、opus-4-7/4.8/5，不误伤 opus-4-6 与 3.x）；`_filter_unsupported_params` 对命中型号删除 `temperature`/`top_p`/`top_k`，并继续走 0.0 penalty 省略。
+
+### 测试
+
+- `tests/test_reasoning_effort.py`：命中/误伤判定 + 过滤行为用例
+
+### 文档同步
+
+- `agent.md`：`llm_client.py` 一行补充 Claude 采样过滤说明
+- `update.md`：本条目（不升版本号）
+
 ## 2026-08-09：v0.2.19 Gemini 兼容 + 全局非流式 + 输入历史
 
 ### 背景

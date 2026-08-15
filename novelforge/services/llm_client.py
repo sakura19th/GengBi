@@ -182,6 +182,27 @@ class LLMClient:
         """检测是否为 xAI Grok 模型（通过模型名判断）。"""
         return "grok" in model.lower()
 
+    @staticmethod
+    def _is_sampling_deprecated_claude_model(model: str) -> bool:
+        """检测 Claude 是否已弃用 temperature/top_p/top_k。
+
+        Fable 5 / Mythos / Opus 4.7+ 发送采样参数会 400；
+        Claude 3.x / Opus 4.6 及更早仍支持，不可按 ``claude`` 全量匹配。
+        """
+        if not model:
+            return False
+        m = model.lower().replace("_", "-")
+        if "fable" in m or "mythos" in m:
+            return True
+        # opus-4-7 / opus-4.7 / opus-4-8 / opus-4.8 / opus-5（避免误伤 opus-4-6）
+        if "opus-4-7" in m or "opus-4.7" in m:
+            return True
+        if "opus-4-8" in m or "opus-4.8" in m:
+            return True
+        if "opus-5" in m:
+            return True
+        return False
+
     def _resolve_reasoning_effort_for_payload(self, model: str) -> str | None:
         """解析适用于当前模型的 reasoning_effort 值。
 
@@ -218,6 +239,8 @@ class LLMClient:
           除 grok-3-mini 外不支持 reasoning_effort。
         - Gemini 多数型号不支持 presence_penalty / frequency_penalty
          （含 0.0 时部分网关仍 400 INVALID_ARGUMENT）。
+        - Claude Fable/Mythos/Opus 4.7+ 不支持 temperature / top_p / top_k
+         （发送会 400 ``top_p is deprecated``）；随后仍走 0.0 penalty 省略。
         - 其余模型：penalty 为 0.0 时不发送（与默认行为等价，更兼容）。
         """
         if not model:
@@ -236,6 +259,11 @@ class LLMClient:
             payload.pop("presence_penalty", None)
             payload.pop("frequency_penalty", None)
             return
+        # Claude 新旗舰：去掉已弃用采样参数后继续走下方 0.0 penalty 省略
+        if LLMClient._is_sampling_deprecated_claude_model(model):
+            payload.pop("temperature", None)
+            payload.pop("top_p", None)
+            payload.pop("top_k", None)
         # 其他模型：0.0 为 no-op，省略可减少部分网关对未知/未启用字段的挑剔
         if payload.get("presence_penalty") == 0.0:
             payload.pop("presence_penalty", None)

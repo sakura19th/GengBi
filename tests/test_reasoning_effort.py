@@ -307,3 +307,77 @@ def test_filter_unsupported_params_other_model_zero_penalties_omitted() -> None:
     assert "presence_penalty" not in payload
     assert "frequency_penalty" not in payload
     assert payload["temperature"] == 0.7
+
+
+# ===== Claude 采样参数弃用（Fable/Mythos/Opus 4.7+）=====
+
+
+def test_is_sampling_deprecated_claude_model_hits() -> None:
+    """Fable/Mythos/Opus 4.7+ 判定为采样参数已弃用。"""
+    assert LLMClient._is_sampling_deprecated_claude_model("fable5") is True
+    assert LLMClient._is_sampling_deprecated_claude_model("claude-fable-5") is True
+    assert LLMClient._is_sampling_deprecated_claude_model("anthropic.claude-fable-5") is True
+    assert LLMClient._is_sampling_deprecated_claude_model("claude-mythos-5") is True
+    assert LLMClient._is_sampling_deprecated_claude_model("claude-opus-4-7") is True
+    assert LLMClient._is_sampling_deprecated_claude_model("claude-opus-4.8") is True
+    assert LLMClient._is_sampling_deprecated_claude_model("claude-opus-5") is True
+    assert LLMClient._is_sampling_deprecated_claude_model("claude_opus_4_7") is True
+
+
+def test_is_sampling_deprecated_claude_model_misses() -> None:
+    """旧 Claude / 非 Claude 不应判定为采样弃用。"""
+    assert LLMClient._is_sampling_deprecated_claude_model("claude-3-5-sonnet") is False
+    assert LLMClient._is_sampling_deprecated_claude_model("claude-opus-4-6") is False
+    assert LLMClient._is_sampling_deprecated_claude_model("gpt-4o") is False
+    assert LLMClient._is_sampling_deprecated_claude_model("") is False
+
+
+def test_filter_unsupported_params_claude_fable_removes_sampling() -> None:
+    """fable5 / claude-fable-5 删除 temperature/top_p/top_k，并省略 0.0 penalty。"""
+    for model in ("fable5", "claude-fable-5", "anthropic.claude-fable-5"):
+        payload = {
+            "model": model,
+            "temperature": 0.8,
+            "top_p": 1.0,
+            "top_k": 40,
+            "presence_penalty": 0.0,
+            "frequency_penalty": 0.0,
+            "max_tokens": 2000,
+        }
+        LLMClient._filter_unsupported_params(payload, model)
+        assert "temperature" not in payload
+        assert "top_p" not in payload
+        assert "top_k" not in payload
+        assert "presence_penalty" not in payload
+        assert "frequency_penalty" not in payload
+        assert payload["max_tokens"] == 2000
+
+
+def test_filter_unsupported_params_claude_opus47_and_opus5_removes_sampling() -> None:
+    """claude-opus-4-7 / claude-opus-5 删除采样参数。"""
+    for model in ("claude-opus-4-7", "claude-opus-5"):
+        payload = {
+            "model": model,
+            "temperature": 0.2,
+            "top_p": 0.95,
+            "top_k": 10,
+        }
+        LLMClient._filter_unsupported_params(payload, model)
+        assert "temperature" not in payload
+        assert "top_p" not in payload
+        assert "top_k" not in payload
+
+
+def test_filter_unsupported_params_legacy_claude_keeps_sampling() -> None:
+    """claude-3-5-sonnet / opus-4-6 / gpt-4o 保留采样参数。"""
+    for model in ("claude-3-5-sonnet", "claude-opus-4-6", "gpt-4o"):
+        payload = {
+            "model": model,
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "presence_penalty": 0.5,
+        }
+        LLMClient._filter_unsupported_params(payload, model)
+        assert payload["temperature"] == 0.7
+        assert payload["top_p"] == 0.9
+        assert payload["presence_penalty"] == 0.5
