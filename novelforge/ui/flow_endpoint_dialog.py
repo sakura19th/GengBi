@@ -27,26 +27,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from novelforge.core.config import ConfigManager
+from novelforge.core.config import FLOW_DEFINITIONS, ConfigManager
 from novelforge.ui.helpers import select_combo_by_id
 from novelforge.ui.jailbreak_custom_dialog import JailbreakCustomDialog
-
-# 流程清单：(flow_key, 显示名)
-FLOW_DEFINITIONS: list[tuple[str, str]] = [
-    ("single_continuation", "单章续写"),
-    ("volume_continuation", "卷续写"),
-    ("single_audit", "单章审计"),
-    ("rewrite_analysis", "重写当前章节分析"),
-    ("context_extraction", "上下文提取"),
-    ("ontology_extraction", "世界观底层提取"),
-    ("protagonist_extraction", "主角形象提取"),
-    ("custom_character_extraction", "自定义角色提取"),
-    ("style_extraction", "文风档案提取"),
-    ("custom_rule_parsing", "自定义设定解析"),
-    ("writing_element_analysis", "写作要素分析"),
-    ("writing_element_refinement", "写作要素深化"),
-    ("planned_writing_outline", "规划写作细纲生成"),
-]
 
 # 正文流程（破限由预设控制，不在本对话框配置破限）
 MAIN_FLOWS: set[str] = {"single_continuation", "volume_continuation"}

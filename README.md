@@ -45,11 +45,92 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### 命令行续写（Windows / macOS）
+
+CLI 不启动窗口，也不需要安装 Qt。Python 3.11+ 环境中运行：
+
+```bash
+python -m pip install -r requirements-cli.txt
+python -m novelforge.cli --help
+python -m novelforge.cli endpoints
+python -m novelforge.cli presets
+```
+
+已有桌面端配置时，使用默认续写流程的端点与模型：
+
+```bash
+python -m novelforge.cli continue --input "前文.txt" --output "续写.txt" --prompt "接着末章继续，保持原文风格" --target-words 2000
+```
+
+也可单独提供 API 地址、模型和环境变量密钥。Windows PowerShell：
+
+```powershell
+$env:GENGBI_API_KEY = "你的 API Key"
+python -m novelforge.cli continue -i "前文.txt" -o "续写.txt" --base-url "https://你的服务/v1" --model "模型名称"
+```
+
+macOS 终端（先通过 `python3 -m venv .venv` 创建环境，并执行 `source .venv/bin/activate`）：
+
+```bash
+export GENGBI_API_KEY="你的 API Key"
+python -m novelforge.cli continue -i "前文.txt" -o "续写.txt" --base-url "https://你的服务/v1" --model "模型名称"
+```
+
+API 地址与模型也可通过 `GENGBI_BASE_URL`、`GENGBI_MODEL` 设置。密钥不作为命令行参数；已有其他变量时可指定 `--api-key-env OPENAI_API_KEY`。未提供环境变量密钥时使用选中端点的加密密钥；本地免认证服务允许空密钥。显式设置新 API 地址时，不继承保存端点的密钥、HTTP 头或其他请求扩展。
+
+| 选项 | 用途 |
+|---|---|
+| `--config PATH` | 在子命令后指定桌面配置；默认读取 `~/.novelforge/config.json` |
+| `--endpoint ID` / `--model NAME` | 选择已保存端点、覆盖模型 |
+| `--preset ID` / `--preset-file PATH` | 已保存预设或赓笔 / SillyTavern JSON 预设 |
+| `--jailbreak off\|low\|mid\|high\|cot` | 本次破限模块：关闭 / 低 / 中 / 高 / 思维链；省略沿用预设 |
+| `--prompt TEXT` / `--prompt-file PATH` | 本次续写要求；指令文件使用 UTF-8 |
+| `--lookback N` | 最近 N 章，包含末章；0 表示全部前文 |
+| `--temperature N` / `--target-words N` | 温度 0–2；目标字数 100–50000（非硬性字数保证） |
+| `--max-tokens N` / `--max-context N` | 输出及上下文 Token 上限，后者必须大于前者 |
+| `--stream` / `--no-stream` | API 使用 SSE / 普通 JSON；均在完整接收、后处理后输出正文 |
+| `--regex` / `--no-regex` | 是否对生成正文应用正则；输入与预设处理沿用桌面端规则 |
+| `--reasoning-effort LEVEL` | 思考强度；空字符串表示不发送，`none` 表示禁止推理 |
+| `--encoding NAME` | 输入文本编码；默认 `utf-8-sig`，支持 UTF-8 BOM，也可指定 `gb18030` |
+| `--proxy URL` / `--timeout SECONDS` | HTTP 代理与网络读取超时；`--proxy ""` 禁用配置代理 |
+| `--dry-run` | 仅输出提示词、模型和参数 JSON，不请求模型或解密密钥 |
+| `--force` | 允许替换已有输出文件；始终禁止覆盖显式指定的输入文件 |
+
+参数优先级为命令行覆盖、环境变量（连接信息）、已保存配置 / 预设默认值。温度、目标字数和回溯数继承桌面续写默认值；输出 Token 上限、top_p、频率与存在惩罚来自预设。
+
+直接选择本次破限等级，无需在桌面修改预设（沿用已配置的 API 端点）：
+
+```powershell
+.\GengBi_CLI_v0.2.22.exe continue -i "前文.txt" -o "续写.txt" --jailbreak high
+```
+
+源码入口同样支持 `python -m novelforge.cli continue -i 前文.txt --jailbreak high`，加 `--dry-run` 可查看组装后的请求。指定 `low` / `mid` / `high` / `cot` 时，仅启用当前预设对应的 `nf_jb_*` 模块并关闭另外三个互斥模块，助手预填充沿用预设；`off` 关闭这四个模块及 `nf_jb_prefill`。不传参数时完全沿用预设开关。此覆盖仅对本次调用生效，不改写预设或配置，也不会移除自定义预设其他位置的文本。自定义预设需包含所选模块及全局 `prompt_order` 排序项，否则在请求前报错；不会自动注入其他预设的文本。
+
+不指定 `--output` 时，UTF-8 正文写入标准输出，错误写入标准错误；`--input -` 接收管道中的前文。Windows PowerShell 的旧版本可能重新编码管道内容，中文文本建议直接使用 `--input 文件` 和 `--output 文件`。退出码：0 成功、1 请求或运行失败、2 输入 / 文件错误、130 用户中断。失败、中断、空正文或生成被 Token 上限截断时，不提交输出文件；默认不覆盖已有文件，文件提交使用同目录临时文件与原子链接（输出文件系统需支持硬链接，Windows NTFS / macOS APFS 均支持）。
+
+TXT 续写复用桌面端的拆章、预设、宏、模板、正则与 API 客户端；预设变量在单次调用的临时目录中隔离。CLI 已接入项目章节、世界书、档案提取、项目续写、审稿修订、整卷、多阶段流程和资源管理。Windows 源码 CLI 77 项通过，独立 EXE 73 项通过、4 项源码专用检查跳过；完整验收与边界见 [CLI_PARITY.md](CLI_PARITY.md)。
+
+源码运行 `python -m novelforge.cli wizard` 可打开终端任务菜单，完整步骤见 [CLI_GUIDE.md](CLI_GUIDE.md)。已有文章可先提取世界书，再引用设定续写：
+
+```bash
+python -m novelforge.cli extract worldbook -i 小说.txt --name 小说设定 -o 世界书.json
+python -m novelforge.cli continue --project PROJECT_ID --worldbook WORLD_ID --dry-run
+python -m novelforge.cli continue --project PROJECT_ID --worldbook WORLD_ID --save -o 续写.txt
+```
+
+将 `PROJECT_ID`、`WORLD_ID` 替换为提取结果返回的实际 ID。提取会调用配置的模型；结果可以先用 `worldbooks show` 检查、用 `worldbooks save` 修改。底层世界观、主角/指定角色和文风有独立提取流程；运行 `python -m novelforge.cli guide extract` 查看完整步骤、长文分批和增量提取用法。
+
+Windows 控制台版为 `GengBi_CLI_v{版本号}.exe`，可将上述 `python -m novelforge.cli` 替换成它的路径；原 GUI `.exe` 的启动方式不变。macOS 使用相同 Python 入口；本次未进行 macOS 实机验证。
+
 ### 打包为可执行文件
 
 ```bash
 # 当前平台打包（生成 dist/GengBi_v{版本号} 可执行文件，如 GengBi_v0.2.22.exe）
 python -m novelforge.resources.build
+
+# 构建独立 CLI（当前平台，控制台程序，不含 Qt）
+python -m pip install pyinstaller
+python -m novelforge.resources.build --cli
 
 # 或直接调用 PyInstaller
 pyinstaller --clean -y novelforge/resources/build.spec
@@ -418,3 +499,5 @@ API Key 使用 PBKDF2HMAC + Fernet 加密存储，不明文落盘。
 ## 免责声明
 
 赓笔是辅助续写工具，生成内容由你所配置的 LLM 服务商处理并返回。使用者应自行承担生成内容的使用与发布责任，并遵守所使用 LLM 服务商的服务条款与当地法律法规。本工具不存储、不审核、不对生成内容负责。
+
+CLI 错误现在包含类别、阶段、恢复入口及脱敏诊断路径；可加 `--debug`、`--error-format json`、`--diagnostics-dir`。详见 [错误诊断与恢复](CLI_GUIDE.md#错误诊断与恢复)；验收范围见 [CLI_ERROR_HANDLING.md](CLI_ERROR_HANDLING.md)。

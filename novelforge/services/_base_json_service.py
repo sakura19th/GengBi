@@ -90,6 +90,9 @@ class BaseJsonService(Generic[T]):
         try:
             return self._model_class.model_validate(data)
         except ValueError as e:
+            from novelforge.core.runtime_mode import strict_cli
+            if strict_cli.get():
+                raise
             logger.error("数据校验失败 %s: %s", file_path, e)
             return None
 
@@ -122,6 +125,9 @@ class BaseJsonService(Generic[T]):
                 bak_path.unlink()
             return True
         except OSError as e:
+            from novelforge.core.runtime_mode import strict_cli
+            if strict_cli.get():
+                raise
             logger.error("删除文件失败 %s: %s", file_path, e)
             return False
 

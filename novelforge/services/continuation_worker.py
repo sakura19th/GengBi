@@ -40,6 +40,7 @@ from novelforge.services.llm_client import (
 )
 from novelforge.services.storage_service import _generate_id
 from novelforge.core.post_processor import (
+    contains_html as _contains_html,
     extract_native_think_content,
     post_process_content,
 )
@@ -55,29 +56,6 @@ DEFAULT_SYSTEM_PROMPT = (
 
 # 流式中断保留的最小字符数
 MIN_INTERRUPT_CHARS = 100
-
-# HTML 标签特征检测模式
-# 匹配 < 后跟字母、/ 或 !（真实 HTML 标签），或 /?word>（半残标签碎片）
-import re as _re
-
-_HTML_PATTERN = _re.compile(r"<[a-zA-Z/!]|/?[a-zA-Z_]\w*>")
-
-
-def _contains_html(text: str) -> bool:
-    """检测文本是否含 HTML 标签特征。
-
-    匹配真实 HTML 标签（``<div>``、``</p>``、``<!--``）和半残标签碎片
-    （``cliche>``、``ai_last_output>``，由 trimStrings 剥离 ``<`` 后产生）。
-    不匹配数学表达式如 ``x < 5``（``<`` 后跟空格）。
-
-    Args:
-        text: 待检测文本
-
-    Returns:
-        含 HTML 特征返回 True，纯文本返回 False
-    """
-    return bool(_HTML_PATTERN.search(text))
-
 
 def assemble_simple_messages(
     chapters: list[Chapter],
@@ -192,6 +170,7 @@ class ContinuationWorker(QThread):
         proxy: str | None = None,
         prefer_non_stream: bool = False,
         parent=None,
+        model_prompts: dict[str, str] | None = None,
     ) -> None:
         """初始化续写工作线程。
 
@@ -231,6 +210,7 @@ class ContinuationWorker(QThread):
         # 自定义请求扩展（透传给 LLMClient）
         self.extra_payload: dict = extra_payload or {}
         self.extra_headers: dict = extra_headers or {}
+        self.model_prompts = model_prompts if model_prompts is not None else {}
         self.merge_system_messages = coerce_merge_system_messages(merge_system_messages)
         # 网络代理（透传给 LLMClient）
         self.proxy = proxy
@@ -360,6 +340,7 @@ class ContinuationWorker(QThread):
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
                 extra_payload=self._debug_override_endpoint.get("extra_payload") or {},
                 extra_headers=self._debug_override_endpoint.get("extra_headers") or {},
+                model_prompts=self._debug_override_endpoint.get("model_prompts", {}),
                 merge_system_messages=coerce_merge_system_messages(
                     self._debug_override_endpoint.get(
                         "merge_system_messages", self.merge_system_messages
@@ -470,6 +451,7 @@ class ContinuationWorker(QThread):
                 reasoning_effort=self.parameters.get("reasoning_effort", ""),
                 extra_payload=self.extra_payload,
                 extra_headers=self.extra_headers,
+                model_prompts=self.model_prompts,
                 merge_system_messages=self.merge_system_messages,
                 proxy=self.proxy,
             )

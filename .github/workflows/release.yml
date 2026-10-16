@@ -33,6 +33,11 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python -m novelforge.resources.build
 
+      - name: Build CLI executable
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -m novelforge.resources.build --cli
+
       - name: Read version & release notes
         id: meta
         shell: python
@@ -65,5 +70,7 @@ jobs:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || steps.meta.outputs.tag }}
           name: ${{ github.ref_type == 'tag' && github.ref_name || steps.meta.outputs.tag }}
           body: ${{ steps.meta.outputs.notes }}
-          files: dist/GengBi_v${{ steps.meta.outputs.version }}.exe
+          files: |
+            dist/GengBi_v${{ steps.meta.outputs.version }}.exe
+            dist/GengBi_CLI_v${{ steps.meta.outputs.version }}.exe
           fail_on_unmatched_files: true

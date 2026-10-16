@@ -255,9 +255,12 @@ class TestOntologyExtractor:
         result3 = extractor._merge_ontology_fields(accumulated3, new_batch3)
         assert result3["spatio_temporal_ontology"] == {}
 
-    def test_save_ontology_to_worldbook(self) -> None:
-        """验证 7 维度被拆分为 ContextEntry 对象并返回非空 worldbook_id。"""
+    def test_save_ontology_to_worldbook(self, tmp_path: Path) -> None:
+        """验证七维条目真正落盘，重复提取更新维度并保留用户条目。"""
+        from novelforge.services.worldbook_service import WorldBookService
+
         extractor = self._make_extractor()
+        extractor.storage_service.storage_path = tmp_path
         project = make_project()
         # project.worldbook_id 初始为空
         assert project.worldbook_id == ""
@@ -286,6 +289,19 @@ class TestOntologyExtractor:
             assert kwargs["position"] == "before"
             assert kwargs["role"] == "system"
             assert kwargs["depth"] == 4
+
+        service = WorldBookService(tmp_path)
+        book = service.load_worldbook(worldbook_id)
+        assert book is not None and len(book.entries) == 7
+        book.entries.append(ContextEntry(uid="manual", content="手工设定", enabled=False))
+        service.save_worldbook(book)
+        updated = WorldOntology(existential_topology={"key": "新规则"})
+        assert extractor._save_ontology_to_worldbook(project, updated) == worldbook_id
+        stored = service.load_worldbook(worldbook_id)
+        assert stored is not None and len(stored.entries) == 2
+        manual = next(entry for entry in stored.entries if entry.uid == "manual")
+        assert manual.content == "手工设定" and not manual.enabled
+        assert any("新规则" in entry.content for entry in stored.entries)
 
     def test_extract_ontology_streaming_single_batch(self) -> None:
         """单批次提取返回 WorldOntology。"""

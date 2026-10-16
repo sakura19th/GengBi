@@ -17,6 +17,13 @@ from novelforge.models.regex import PLACEMENT_AI_OUTPUT
 
 logger = logging.getLogger(__name__)
 
+_HTML_PATTERN = re.compile(r"<[a-zA-Z/!]|/?[a-zA-Z_]\w*>")
+
+
+def contains_html(text: str) -> bool:
+    """检测 HTML 标签特征，避免破坏普通文本中的比较符。"""
+    return bool(_HTML_PATTERN.search(text))
+
 _THINKING_TAG_RE = re.compile(
     r"<novelforge_thinking>\s*(.*?)\s*</novelforge_thinking>",
     re.DOTALL,
@@ -141,10 +148,6 @@ def post_process_content(
     Returns:
         处理后的文本；若中途出错则返回最近一次成功处理的结果
     """
-    # 延迟导入 _contains_html 以避免与 continuation_worker 的循环依赖
-    # （continuation_worker 会在顶部导入本模块的 post_process_content）
-    from novelforge.services.continuation_worker import _contains_html
-
     final_content = strip_native_think_blocks(content) if content else content
 
     # 1. 应用 AI_OUTPUT 正则替换
@@ -173,7 +176,7 @@ def post_process_content(
 
     # 3. HTML 标签剥离
     # 仅当内容含 HTML 标签特征时才执行，避免破坏纯文本输出
-    if final_content and _contains_html(final_content):
+    if final_content and contains_html(final_content):
         try:
             final_content = strip_html_tags(final_content)
         except Exception as e:

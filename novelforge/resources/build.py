@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import subprocess
@@ -45,6 +46,10 @@ def main() -> None:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+    parser = argparse.ArgumentParser(description="打包赓笔桌面程序或命令行程序")
+    parser.add_argument("--cli", action="store_true", help="生成独立控制台程序（不包含 Qt）")
+    args = parser.parse_args()
+
     if not (ROOT / "main.py").is_file():
         print(f"错误：未找到项目入口 main.py（ROOT={ROOT}）", file=sys.stderr)
         raise SystemExit(1)
@@ -65,9 +70,12 @@ def main() -> None:
 
     version = _read_version()
     app_name = _app_name(version)
+    if args.cli:
+        app_name = f"GengBi_CLI_v{version}"
     # 供 build.spec 读取，避免在 spec 内 import 包引发环境差异
     env = os.environ.copy()
     env["GENGBI_BUILD_NAME"] = app_name
+    env["GENGBI_BUILD_CLI"] = "1" if args.cli else "0"
 
     print(f"开始打包：{app_name}")
     print(f"项目根目录：{ROOT}")

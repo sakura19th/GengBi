@@ -241,6 +241,15 @@ def export_project_backup(
         "exported_at": datetime.now().isoformat(),
         "version": MANIFEST_VERSION,
     }
+    from novelforge.services.worldbook_service import WorldBookService
+
+    if project.worldbook_id:
+        book = WorldBookService(storage_service.storage_path).load_worldbook(project.worldbook_id)
+        if book is not None:
+            manifest["worldbook"] = book.model_dump(mode="json")
+    variable_path = storage_service.storage_path / "projects" / project_id / "variables.json"
+    if variable_path.exists():
+        manifest["project_variables"] = json.loads(variable_path.read_text(encoding="utf-8"))
 
     # 收集所有续写
     all_continuations: list[dict[str, Any]] = []
@@ -281,6 +290,8 @@ def export_project_backup(
                     "title": chapter.title,
                     "word_count": chapter.word_count,
                     "metadata": chapter.metadata,
+                    "protagonist_profile": chapter.protagonist_profile.model_dump(mode="json") if chapter.protagonist_profile else None,
+                    "custom_characters": {name: profile.model_dump(mode="json") for name, profile in chapter.custom_characters.items()},
                     "created_at": chapter.created_at.isoformat()
                     if hasattr(chapter.created_at, "isoformat")
                     else str(chapter.created_at),
@@ -292,6 +303,11 @@ def export_project_backup(
                     f"chapters/{chapter.id}.meta.json",
                     json.dumps(chapter_meta, ensure_ascii=False, indent=2),
                 )
+                for suffix in ("", ":rewrite"):
+                    cached = storage_service._runner.run(storage_service.storage.get_cache(f"ctx_extract:{project_id}:{chapter.id}{suffix}"))
+                    if cached is not None:
+                        zf.writestr(f"chapters/{chapter.id}{'-rewrite' if suffix else ''}.context.json",
+                                    json.dumps(cached, ensure_ascii=False, indent=2))
         logger.info(
             "导出项目备份: %s（%d 章, %d 续写, %d 预设, %d 正则）",
             output_path,
@@ -414,20 +430,24 @@ def import_project_backup(
                 if not script_id:
                     continue
                 # 检查是否已存在（按 id 查找）
-                existing = regex_service.load_scripts(scope)
+                preset_id = project.preset_id if scope == "preset" else ""
+                existing = regex_service.load_scripts(scope, project_id=new_project_id, preset_id=preset_id)
                 if not any(s.id == script_id for s in existing):
                     from novelforge.models import RegexScript
 
                     script = RegexScript.model_validate(script_data)
                     regex_service.add_script(
-                        script, scope=scope, project_id=new_project_id
+                        script, scope=scope, project_id=new_project_id, preset_id=preset_id
                     )
                     logger.info("已恢复正则脚本: %s (scope=%s)", script_id, scope)
             except Exception as e:
                 logger.warning("恢复正则脚本失败: %s", e)
 
         # 恢复章节
+        from novelforge.utils.ids import validate_id
+
         chapters_dir = tmp_path / "chapters"
+        chapter_id_map: dict[str, str] = {}
         if chapters_dir.exists():
             # 收集章节元数据
             meta_files = sorted(
@@ -444,6 +464,7 @@ def import_project_backup(
                     continue
 
                 old_chapter_id = meta.get("id", "")
+                validate_id(old_chapter_id)
                 new_chapter_id = "chap_" + uuid.uuid4().hex[:12]
                 chapter_id_map[old_chapter_id] = new_chapter_id
 
@@ -465,8 +486,18 @@ def import_project_backup(
                     content=content,
                     word_count=meta.get("word_count", len(content)),
                     metadata=meta.get("metadata", {}),
+                    protagonist_profile=meta.get("protagonist_profile"),
+                    custom_characters=meta.get("custom_characters", {}),
                 )
                 storage_service.save_chapter(chapter)
+                for suffix in ("", ":rewrite"):
+                    cache_path = chapters_dir / f"{old_chapter_id}{'-rewrite' if suffix else ''}.context.json"
+                    if cache_path.exists():
+                        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                        if isinstance(cached, dict) and isinstance(cached.get("entries"), list):
+                            cached["chapters_hash"] = "manual_edit"
+                            storage_service._runner.run(storage_service.storage.set_cache(
+                                f"ctx_extract:{new_project_id}:{new_chapter_id}{suffix}", cached, ttl_hours=0, category="context_extraction"))
 
         # 恢复续写
         continuations_path = tmp_path / "continuations.json"
@@ -479,6 +510,7 @@ def import_project_backup(
                 logger.warning("continuations.json 解析失败: %s", e)
                 all_conts = []
 
+            continuation_id_map = {item.get("id"): "cont_" + uuid.uuid4().hex[:12] for item in all_conts}
             for cont_data in all_conts:
                 old_chapter_id = cont_data.get("chapter_id", "")
                 new_chapter_id = chapter_id_map.get(old_chapter_id, "")
@@ -489,12 +521,36 @@ def import_project_backup(
                     continue
 
                 # 生成新 continuation id
-                cont_data["id"] = "cont_" + uuid.uuid4().hex[:12]
+                cont_data["id"] = continuation_id_map[cont_data.get("id")]
+                if cont_data.get("parent_id"):
+                    cont_data["parent_id"] = continuation_id_map.get(cont_data["parent_id"])
                 try:
                     cont = Continuation.model_validate(cont_data)
                     storage_service.save_continuation(cont, new_chapter_id)
                 except Exception as e:
                     logger.warning("恢复续写失败: %s", e)
+
+        if manifest.get("worldbook"):
+            from novelforge.models.worldbook import WorldBook
+            from novelforge.services.worldbook_service import WorldBookService
+
+            book = WorldBook.model_validate(manifest["worldbook"])
+            old_book_id = book.id
+            book.id = "wb_" + uuid.uuid4().hex[:12]
+            from novelforge.services.ontology_extractor import ONTOLOGY_DIMENSIONS
+
+            generated = {f"{old_book_id}_{dimension}": f"{book.id}_{dimension}" for dimension in ONTOLOGY_DIMENSIONS}
+            for entry in book.entries:
+                entry.uid = generated.get(entry.uid, entry.uid)
+            WorldBookService(storage_service.storage_path).save_worldbook(book)
+            project.worldbook_id = book.id
+            storage_service.save_project(project)
+        variables = manifest.get("project_variables")
+        if isinstance(variables, dict):
+            from novelforge.core.storage import atomic_write_file
+
+            atomic_write_file(storage_service.storage_path / "projects" / new_project_id / "variables.json",
+                              json.dumps(variables, ensure_ascii=False, indent=2))
 
     logger.info("项目导入完成: %s", new_project_id)
     return new_project_id

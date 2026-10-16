@@ -4,6 +4,22 @@
 
 ## 项目概述
 
+### CLI 全业务接入
+
+- CLI 已按业务拆为 `cli_workspace`（配置/世界书/主题指南）、`cli_wizard`（交互菜单）、`cli_projects`（项目/章节/候选/历史）、`cli_extract`（文章提取/档案）、`cli_audit`（审稿/修订）、`cli_volume`（整卷/阶段恢复）、`cli_assets`（预设/正则/流程定义管理）。帮助解析不加载 Qt。
+- `extract worldbook -i TXT` 自动导入项目、提取章节上下文、保存原生世界书并可导出 ST JSON；返回 project/chapter/worldbook ID。`guide extract` 说明校对、选用、续写及接受候选的完整路径；世界书创建后不自动改变默认选择。
+- `headless.prepare_continuation` 支持真实项目章节、世界书、角色/世界观/文风/约束与回溯资料。项目续写可 `--save` 保存候选，默认不替换正文。
+- `FLOW_DEFINITIONS` 移至无 Qt 的 `core.config`，桌面端和 CLI 共用。`VolumeLogic` 位于 `services/volume_engine.py`，桌面 `VolumeOrchestrator` 保留 QThread/Signal 外壳；CLI `VolumeEngine` 使用异步入口及普通事件。
+- 世界观提取通过 WorldBookService 落盘对应世界书，保留已有用户条目。全范围验收维护于 `CLI_PARITY.md`；Windows CLI/诊断 129 项通过，独立 EXE 109 项通过、4 项源码专用检查跳过。macOS 尚未实机验证，远端 CI 以 PR 页面为准。
+- 世界书持久化测试必须使用 `tmp_path` 真实目录，不能让 MagicMock 路径进入文件服务；复提时校验替换旧维度并保留手工条目及其启用状态。
+- `cli_flows` 提供声明式流程五类 agent 的执行、阶段产物编辑和恢复，正文始终保存候选。`input_from` 校验为已执行的更早阶段 ID，按 ID 取对应产物；流程定义随运行保存快照。`cli_runtime` 共用源资料指纹和卷引擎构造/暂停点，恢复校验项目档案与章节，非法暂停点回答不自动通过。
+- `cli_settings` 支持写作/提取/卷/代理设置、端点扩展、模型列表保存和复制、流程模型重置、流程自定义破限；端点扩展仅显示字段名，不输出请求头/载荷内容。参数校验失败不得写入配置。回溯开关省略时继承全局默认，可用 `--no-lookback-*` 明确关闭。
+- 项目 ZIP 导入导出复用 exporter；新增档案/上下文/项目世界书/变量备份，恢复用新 ID，保留已有项目。正则 `test` 不改源文件；候选 `edit` 保留 API raw_content，支持人工正文/标题/高亮，未完成候选不可直接替换正文。
+- 卷和通用流程的 `--dry-run` 可在共享引擎发送前截获下个实际请求；不调用模型、不保存运行。恢复还验证预设/世界书/正则指纹，候选 parent_id 编辑禁止环，ZIP 恢复重映射候选父引用和世界观条目 ID。完整指引见 `CLI_GUIDE.md` 与终端 `guide`，向导含多阶段流程入口。
+- 卷参数优先级为命令行显式值、指定 JSON/已保存卷设置、模型默认值；通用流程预览与执行使用同一阶段设置。CLI 免认证端点用 allow_empty_key 标记，提取服务只有显式允许时才接受空密钥，原 GUI 未标记端点的检查保留。
+- LLMClient 的流式、非流式、模型列表请求在空密钥时不添加 Authorization；显式 extra_headers 仍按原规则覆盖，避免本地免认证服务收到空 Bearer。
+- 测试使用隔离配置和本机 HTTP/SSE 服务；CLI 不输出 API 密钥、认证头和原始服务错误体。不得用用户付费密钥重复跑开发测试。
+
 赓笔 (GengBi) 是一个 SillyTavern (ST) 兼容的小说续写工具，提供从 TXT 导入、章节管理、上下文提取、提示词组装到 LLM 流式续写的完整工作流。
 
 **当前版本：v0.2.22**（定义于 `novelforge/__init__.py` 的 `__version__`，由"关于"对话框引用，README 顶部同步标注）
@@ -19,6 +35,7 @@
 
 ```
 novelforge/
+├── cli.py           # argparse 命令行入口及业务模块注册（配置、项目、提取、写作、流程与资源管理），UTF-8 管道与退出码；cli_main.py 为独立控制台打包入口
 ├── models/          # 数据模型（pydantic v2）
 │   ├── chapter.py        # Chapter、Continuation（raw_content 后处理前原文；reasoning_content API 推理；accept=promote_continuation_to_chapter 提升为新章节插入当前章之后；Continuation.generated_title LLM 生成标题从 <novelforge_title> 标签提取；Continuation.highlights 输出栏高亮持久化；Chapter.protagonist_profile 主角形象档案持久化；Chapter.custom_characters 自定义角色档案 dict[str, ProtagonistProfile] 持久化，按角色名键每章可存多个；protagonist.py 的 ProtagonistProfile.copied_from 记录复制来源章节 index，None=原章提取、非 None=复制自第N章，用于主角/自定义角色形象「复制到章节」功能 source 描述）
 │   ├── context.py        # ContextEntry（条目级 enabled 开关控制注入；copied_from 字段记录复制来源章节 index 用于「复制到章节」功能 source 描述）、VALID_CATEGORIES/POSITIONS/ROLES
@@ -390,6 +407,18 @@ novelforge/
 - **UI 入口**：上下文/主角形象/自定义角色功能按钮的 `_FeatureActionDialog` 动作列表含「增量更新」项，选中即发射对应增量信号
 - **测试覆盖**：`tests/test_incremental_context_extraction.py`（10 用例：find_latest_context_base 命中/未命中/空条目跳过/排除当前章、_build_incremental_prompt 占位符/覆盖/无 project、增量 delta 章节与缓存元数据、当前章不晚于基准、多批合并）+ `tests/test_incremental_protagonist_extraction.py`（7 用例）+ `tests/test_incremental_custom_character_extraction.py`（8 用例）+ `tests/test_context_preview_panel_layout.py`（25 用例：6 功能按钮/对话框动作键/动作分发信号/按钮统一禁用恢复）
 
+### 26. 无界面文本续写 CLI
+
+- `novelforge/services/headless.py` 复用 `TxtImporter.split_text`、PromptAssembler、TemplateEngine、RegexEngine、LLMClient 与 post_process_content；不依赖 Qt、不修改桌面项目数据库。
+- `continue` 支持 TXT/标准输入、桌面默认端点或环境变量、预设选择、采样参数、提示词预览与文件输出；`endpoints`/`presets` 提供可脚本化 JSON 清单。API 密钥仅从环境变量或桌面加密配置读取。
+- 参数优先级：显式参数 > 连接环境变量 > 保存的续写配置/预设。显式自定义 URL 不继承旧端点密钥、HTTP 头、请求扩展。
+- 预设与变量渲染位于一次性临时目录；PromptAssembler 优先复用已注入 TemplateEngine 的 variable_store，避免越过调用者指定的存储位置。
+- `continue --jailbreak off|low|mid|high|cot` 仅在内存覆盖本次预设的四个互斥 `nf_jb_*` 模块，同时更新 prompt.enabled 和首个全局 prompt_order 的 enabled；省略保持原值，off 同时禁用 nf_jb_prefill，其余等级保留预填充开关。所选模块或全局排序项缺失时在调用 API 前报错，不注入默认文本、不回写文件。
+- HTML 特征检测归入 `core/post_processor.py`；ContinuationWorker 保留 `_contains_html` 导入别名，解除核心模块反向依赖 Qt 的循环导入。
+- CLI 在完整生成并清理正文后提交输出，拒绝覆盖输入，默认不覆盖已有输出；不完整响应、失败与取消不提交文件。返回码 0/1/2/130 分别表示成功/运行失败/输入错误/用户中断。
+- `requirements-cli.txt` 包含非 Qt 依赖；`requirements.txt` 引用它并保留 PySide6。`build --cli` 生成 `GengBi_CLI_v{版本号}` 控制台程序，显式排除 Qt；默认 GUI 构建不变。
+- Windows CI 使用本机 HTTP/SSE 测试服务对源码和打包产物执行同一套 `tests/test_cli.py`，不依赖模型账号；macOS 实机验证未执行。
+
 ## 代码风格规范
 
 - `from __future__ import annotations` 启用延迟类型注解
@@ -451,3 +480,9 @@ novelforge/
 8. **MainWindow 接线变更**（更新第 5 节规律 + 第 9 节调试验证）：
    - `start_flow` 信号入口、5 个 agent handler 分发逻辑、`accept_mode` 适配逻辑（`_on_accept_continuation`）变化
    - `FlowPluginManager` UI 变化（导入/导出/删除按钮、`plugin_changed` 信号）
+
+## CLI 失败语义
+
+统一出口为 cli_diagnostics，日志处理器仅记录结构，不格式化原始模型/异常消息。core.runtime_mode.strict_cli 使用 ContextVar 在 CLI 请求中开启严格响应与资源检查，桌面端默认保持兼容行为。模型返回截断、过滤、拒答、空内容、错误结构或无正常结束标记时不得当作成功产物。资源损坏不可当作空列表继续覆盖。清理和失败状态写盘使用 preserve_failure 保留主异常。修改错误处理必须覆盖本机 HTTP/SSE 与失败后文件/状态行为，不能仅检查错误文字。
+
+服务商错误须经 provider_details 提取并脱敏 message/code/type/param/status 与请求 ID，不可因禁止输出完整响应体而丢弃具体原因；请求匹配材料只用于内存脱敏，严禁写入诊断。

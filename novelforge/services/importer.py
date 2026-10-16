@@ -212,8 +212,8 @@ class TxtImporter:
             message=message,
         )
 
-    def _split_text(
-        self,
+    @staticmethod
+    def split_text(
         text: str,
         project_id: str,
         pattern: str,
@@ -300,6 +300,9 @@ class TxtImporter:
 
         logger.info("拆分完成: %d 章", len(chapters))
         return chapters
+
+    # 保留旧调用入口；无界面调用可直接拆分文本，无需初始化数据库。
+    _split_text = split_text
 
     def split_at_position(
         self,

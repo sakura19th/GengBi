@@ -268,6 +268,8 @@ def load_json_with_recovery(file_path: Path) -> tuple[Any, str | None]:
         (解析后的数据, 错误信息) 元组。成功时错误信息为 None。
         数据为 None 且错误信息非 None 表示加载失败。
     """
+    from novelforge.core.runtime_mode import strict_cli
+    first_error = None
     file_path = Path(file_path)
     bak_path = file_path.with_suffix(file_path.suffix + ".bak")
 
@@ -285,6 +287,7 @@ def load_json_with_recovery(file_path: Path) -> tuple[Any, str | None]:
             with open(file_path, "r", encoding="utf-8") as f:
                 return json.load(f), None
         except (json.JSONDecodeError, OSError) as e:
+            first_error = e
             logger.warning("文件 %s 损坏: %s，尝试从 .bak 恢复", file_path, e)
 
     # 尝试从 .bak 恢复
@@ -298,11 +301,15 @@ def load_json_with_recovery(file_path: Path) -> tuple[Any, str | None]:
             return data, None
         except (json.JSONDecodeError, OSError) as e:
             logger.error(".bak 文件也损坏: %s: %s", bak_path, e)
+            if strict_cli.get():
+                raise
             return None, f"文件 {file_path.name} 及其备份均损坏，需要重置或手动修复"
 
     if not file_path.exists():
         return None, None  # 文件不存在，非错误
 
+    if strict_cli.get() and first_error is not None:
+        raise first_error
     return None, f"文件 {file_path.name} 损坏且无可用备份"
 
 

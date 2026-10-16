@@ -100,7 +100,7 @@ class CustomAuditRuleService:
             return None
 
         api_key = self.config_manager.decrypt_api_key(ep.get("id", ""))
-        if not api_key:
+        if not api_key and not ep.get("allow_empty_key", False):
             logger.error("API Key 无效，无法结构化自定义设定")
             return None
 
@@ -126,6 +126,7 @@ class CustomAuditRuleService:
             reasoning_effort=reasoning_effort,
             extra_payload=extra_payload,
             extra_headers=extra_headers,
+            model_prompts=ep.get("model_prompts", {}),
             merge_system_messages=merge_system_messages,
             proxy=proxy,
         )
@@ -301,6 +302,11 @@ class CustomAuditRuleService:
                         continue
                     return None, last_error
                 except (AuthError, RateLimitError, APIError, LLMError) as e:
+                    from novelforge.core.runtime_mode import strict_cli
+                    from novelforge.services.llm_client import ResponseError
+                    if strict_cli.get() and isinstance(e, (AuthError, RateLimitError, APIError, ResponseError)):
+                        logger.error("模型请求失败: %s", e)
+                        raise
                     last_error = f"LLM 调用失败: {e}"
                     logger.warning("自定义设定解析第 %d 次尝试 LLM 调用失败: %s", attempt + 1, e)
                     if attempt < len(temperatures) - 1:

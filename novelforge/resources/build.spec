@@ -41,12 +41,13 @@ def _resolve_app_name() -> str:
 
 
 APP_NAME = _resolve_app_name()
+BUILD_CLI = os.environ.get("GENGBI_BUILD_CLI") == "1"
 
 # 收集 novelforge.resources 包的数据文件（themes/defaults 等资源）
 datas = collect_data_files('novelforge.resources')
 
 a = Analysis(
-    [os.path.join(PROJECT_ROOT, 'main.py')],
+    [os.path.join(PROJECT_ROOT, 'cli_main.py' if BUILD_CLI else 'main.py')],
     pathex=[PROJECT_ROOT],
     binaries=[],
     datas=datas,
@@ -58,12 +59,11 @@ a = Analysis(
         'jinja2',
         'aiosqlite',
         'cryptography',
-        'PySide6',
-    ],
+    ] + ([] if BUILD_CLI else ['PySide6']),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['PySide6', 'PyQt6', 'PyQt5'] if BUILD_CLI else [],
     noarchive=False,
 )
 
@@ -81,6 +81,6 @@ exe = EXE(
     strip=False,
     upx=True,
     runtime_tmpdir=None,
-    console=False,
+    console=BUILD_CLI,
     icon=None,
 )

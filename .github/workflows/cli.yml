@@ -1,0 +1,39 @@
+name: CLI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install headless dependencies
+        run: python -m pip install -r requirements-cli.txt pytest pyinstaller
+      - name: Test source CLI
+        run: python -m pytest tests/test_cli.py -q
+      - name: Build console executable
+        if: runner.os == 'Windows'
+        run: python -m novelforge.resources.build --cli
+      - name: Test packaged CLI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:GENGBI_TEST_EXECUTABLE = (Get-ChildItem dist/GengBi_CLI_v*.exe | Select-Object -First 1).FullName
+          python -m pytest tests/test_cli.py -q

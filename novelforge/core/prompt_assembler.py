@@ -745,7 +745,7 @@ class PromptAssembler:
         if self.template_engine is not None:
             try:
                 from novelforge.core.variable_store import VariableStore
-                var_store = VariableStore()
+                var_store = getattr(self.template_engine, "variable_store", None) or VariableStore()
                 variable_funcs = var_store.make_template_context(
                     project_id=project_id,
                     chapter_metadata=chapter_metadata or {},

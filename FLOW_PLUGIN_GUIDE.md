@@ -2,6 +2,14 @@
 
 本文档面向希望编写自定义流程插件的开发者，完整描述插件 JSON 格式、合法取值、编写规律与案例。
 
+CLI 提供 `flows list/show/import/export/save/delete` 管理流程文件；内置流程不可删除，导入同 ID 文件自动生成新 ID。整卷业务与桌面端共用 `VolumeLogic`，Qt 线程外壳与无界面异步入口分别位于 `volume_orchestrator.py` 和 `volume_engine.py`。CLI 执行验收状态见 `CLI_PARITY.md`。
+
+终端执行示例：`gengbi flows run planned_writing --project PROJECT_ID --auto`；也可选择 `single`、`rewrite_current`、`writing_mode`、`volume` 或已导入 ID。省略 `--auto` 时需交互终端，分析/暂停点可接受、用文件替换或取消。正文保存候选；重写模式用 `versions replace --yes` 采纳，其余模式用 `versions accept`。
+
+`flows runs` 列出运行；`flows run-show RUN_ID` 查看产物；`flows run-edit RUN_ID STAGE_ID -i 产物.txt` 修改已完成分析/大纲并使后续阶段失效；`flows resume RUN_ID --auto` 恢复。`--pause-after STAGE_ID` 可将运行拆分成多次命令。`--dry-run` 不调用模型，只显示执行计划和下个可组装阶段，后续提示依赖实际前序输出。已完成的请求不在恢复时重复发送；正文/档案变化需新建运行。
+
+CLI 支持五类 agent；`input_from` 按阶段 ID 引用更早产物，拒绝重复 ID、前向引用和缺失卷阶段依赖。`volume_pipeline` 运行完整卷，`volume_phase` 运行一个卷阶段。卷参数从 `--settings` 的 VolumeRunConfig JSON 读取，可由阶段 params 同名字段覆盖。正文 params 支持温度、Token/上下文上限、回溯数、目标字数和 exclude_current。阶段端点/模型由 flow_key 查配置，`--endpoint/--model` 可临时覆盖全部阶段。
+
 ---
 
 ## 1. 概述

@@ -245,16 +245,25 @@ class RegexService:
         if data is None:
             return []
         if not isinstance(data, list):
+            from novelforge.core.runtime_mode import strict_cli
+            if strict_cli.get():
+                raise ValueError("正则脚本文件顶层必须为数组")
             logger.warning("正则脚本文件 %s 顶层不是数组，已忽略", file_path)
             return []
 
         scripts: list[RegexScript] = []
         for item in data:
             if not isinstance(item, dict):
+                from novelforge.core.runtime_mode import strict_cli
+                if strict_cli.get():
+                    raise ValueError("正则脚本条目必须为对象")
                 continue
             try:
                 scripts.append(RegexScript.model_validate(item))
             except Exception as e:
+                from novelforge.core.runtime_mode import strict_cli
+                if strict_cli.get():
+                    raise
                 logger.warning("解析正则脚本失败，跳过: %s", e)
         return scripts
 
@@ -487,6 +496,9 @@ class RegexService:
         new_scripts: list[RegexScript] = []
         for item in data_list:
             if not isinstance(item, dict):
+                from novelforge.core.runtime_mode import strict_cli
+                if strict_cli.get():
+                    raise ValueError("正则脚本条目必须为对象")
                 continue
             try:
                 script = _parse_regex_script_from_st(item)
@@ -495,6 +507,9 @@ class RegexService:
                     script.id = _generate_regex_id()
                 new_scripts.append(script)
             except Exception as e:
+                from novelforge.core.runtime_mode import strict_cli
+                if strict_cli.get():
+                    raise
                 logger.warning("解析正则脚本失败，跳过: %s", e)
 
         # 追加到现有脚本（保留原有脚本）

@@ -37,6 +37,7 @@ from novelforge.services.llm_client import (
     LLMClient,
     LLMError,
     RateLimitError,
+    ResponseError,
 )
 from novelforge.services.storage_service import StorageService, _generate_id
 from novelforge.utils.paths import (
@@ -1885,7 +1886,7 @@ class ContextExtractor:
                         "主角形象批次 %d/%d 第 %d 次尝试 LLM 调用失败: %s",
                         batch_idx + 1, batch_count, attempt + 1, e,
                     )
-                    if attempt < len(extract_temperatures) - 1:
+                    if attempt < len(extract_temperatures) - 1 and not isinstance(e, (AuthError, RateLimitError, APIError, ResponseError)):
                         continue
                     return None, batch_count, False
                 except Exception as e:
@@ -2153,7 +2154,7 @@ class ContextExtractor:
                         "自定义角色 %s 批次 %d/%d 第 %d 次尝试 LLM 调用失败: %s",
                         character_name, batch_idx + 1, batch_count, attempt + 1, e,
                     )
-                    if attempt < len(extract_temperatures) - 1:
+                    if attempt < len(extract_temperatures) - 1 and not isinstance(e, (AuthError, RateLimitError, APIError, ResponseError)):
                         continue
                     return None, batch_count, False
                 except Exception as e:
@@ -2602,6 +2603,9 @@ class ContextExtractor:
             )
         except Exception as e:
             logger.warning("保存缓存失败: %s", e)
+            from novelforge.services.llm_client import strict_responses
+            if strict_responses.get():
+                raise
 
     # ===== 主角形象独立缓存（与 8 维度条目缓存解耦）=====
 
@@ -2689,6 +2693,9 @@ class ContextExtractor:
             )
         except Exception as e:
             logger.warning("保存主角形象缓存失败: %s", e)
+            from novelforge.services.llm_client import strict_responses
+            if strict_responses.get():
+                raise
 
     # ===== 自定义角色形象独立缓存（与 protagonist:/ctx_extract: 解耦）=====
 
@@ -2780,6 +2787,9 @@ class ContextExtractor:
             )
         except Exception as e:
             logger.warning("保存自定义角色缓存失败: %s", e)
+            from novelforge.services.llm_client import strict_responses
+            if strict_responses.get():
+                raise
 
     def _get_llm_client(self, flow_key: str = "") -> tuple[LLMClient, str] | None:
         """获取 LLM 客户端与默认模型。
@@ -2804,7 +2814,7 @@ class ContextExtractor:
             return None
 
         api_key = self.config_manager.decrypt_api_key(ep.get("id", ""))
-        if not api_key:
+        if not api_key and not ep.get("allow_empty_key", False):
             logger.error("API Key 无效，无法提取上下文")
             return None
 
@@ -2830,6 +2840,7 @@ class ContextExtractor:
             reasoning_effort=reasoning_effort,
             extra_payload=extra_payload,
             extra_headers=extra_headers,
+            model_prompts=ep.get("model_prompts", {}),
             merge_system_messages=merge_system_messages,
             proxy=proxy,
         )
@@ -3183,6 +3194,7 @@ class ContextExtractor:
                     )
                 if stream:
                     content_parts.clear()
+                finish_reason = None
                 try:
                     if stream:
                         async for chunk in client.stream_chat_completion(
@@ -3200,6 +3212,7 @@ class ContextExtractor:
                                     except Exception as e:
                                         logger.warning("on_chunk 回调异常: %s", e)
                             if chunk.finish_reason:
+                                finish_reason = chunk.finish_reason
                                 # 检测 max_tokens 截断（诊断用，不影响 break 行为）
                                 if chunk.finish_reason == "length":
                                     logger.warning(
@@ -3219,7 +3232,9 @@ class ContextExtractor:
                             stop_event=self._cancel_event,
                         )
                         # 检测 max_tokens 截断（诊断用，不影响后续解析流程）
-                        _fr = response.get("choices", [{}])[0].get("finish_reason")
+                        choices_for_finish = response.get("choices") or [{}]
+                        _fr = choices_for_finish[0].get("finish_reason")
+                        finish_reason = _fr
                         if _fr == "length":
                             logger.warning(
                                 "%s批次 %d/%d 第 %d 次尝试响应被 max_tokens 截断 "
@@ -3265,7 +3280,18 @@ class ContextExtractor:
                                 token_usage=total_token_usage,
                             )
                         message = choices[0].get("message", {})
+                        if message.get("refusal"):
+                            raise ResponseError("provider_refusal")
                         content = message.get("content", "") or ""
+
+                    if finish_reason == "length":
+                        raise ResponseError("output_truncated", finish_reason)
+                    if finish_reason in {"content_filter", "safety", "blocked", "refusal"}:
+                        raise ResponseError("provider_filtered", finish_reason)
+                    if not isinstance(content, str):
+                        raise ResponseError("response_schema", finish_reason)
+                    if not content.strip():
+                        raise ResponseError("empty_response", finish_reason)
 
                     # 获取 finish_reason 用于诊断日志（流式为 "stream"，非流式从 response 取）
                     _fr_diag = "stream" if stream else response.get("choices", [{}])[0].get("finish_reason", "unknown")
@@ -3318,7 +3344,9 @@ class ContextExtractor:
                         "%s批次 %d/%d 第 %d 次尝试 LLM 调用失败: %s",
                         log_prefix, batch_idx + 1, batch_count, attempt + 1, e,
                     )
-                    if attempt < len(extract_temperatures) - 1:
+                    if attempt < len(extract_temperatures) - 1 and not isinstance(
+                        e, (AuthError, RateLimitError, APIError, ResponseError)
+                    ):
                         continue
                     return ExtractResult(
                         entries=[],
@@ -4148,6 +4176,9 @@ class ContextExtractor:
             )
         except Exception as e:
             logger.warning("保存编辑后的上下文条目失败: %s", e)
+            from novelforge.services.llm_client import strict_responses
+            if strict_responses.get():
+                raise
 
     async def load_cached_protagonist(
         self, project_id: str, chapter_id: str

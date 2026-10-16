@@ -15,6 +15,7 @@ import asyncio
 import codecs
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
@@ -60,22 +61,39 @@ class LLMError(Exception):
 class AuthError(LLMError):
     """API 认证失败（401），不重试，需跳转设置。"""
 
+    def __init__(self, message: str, body: str = "", headers=None):
+        super().__init__(message)
+        self.body = body
+        self.response_headers = dict(headers or {})
+
+
+class ResponseError(LLMError):
+    """模型响应的结构化失败，不携带模型正文。"""
+
+    def __init__(self, code: str, finish_reason: str | None = None):
+        super().__init__(code)
+        self.code = code
+        self.finish_reason = finish_reason
+
 
 class RateLimitError(LLMError):
     """API 限流（429），含 Retry-After 秒数。"""
 
-    def __init__(self, message: str, retry_after: float) -> None:
+    def __init__(self, message: str, retry_after: float, body: str = "", headers=None) -> None:
         super().__init__(message)
         self.retry_after = retry_after
+        self.body = body
+        self.response_headers = dict(headers or {})
 
 
 class APIError(LLMError):
     """API 返回错误状态码（非 401/429）。"""
 
-    def __init__(self, status: int, message: str, body: str = "") -> None:
+    def __init__(self, status: int, message: str, body: str = "", headers=None) -> None:
         super().__init__(message)
         self.status = status
         self.body = body
+        self.response_headers = dict(headers or {})
 
 
 @dataclass
@@ -126,6 +144,34 @@ def _deep_merge_dict(base: dict, extra: dict) -> None:
             base[k] = v
 
 
+# CLI 请求采用严格协议检查；桌面调用保留既有部分输出行为。
+from novelforge.core.runtime_mode import strict_cli as strict_responses
+
+
+def retry_delay(value: str | None) -> float:
+    """不信任服务端 Retry-After，避免无效数值或无限等待。"""
+    try:
+        seconds = float(value or "5")
+    except (ValueError, TypeError):
+        return 5.0
+    return min(max(seconds, 0.0), 60.0) if math.isfinite(seconds) else 5.0
+
+
+def validate_finish(finish: str | None) -> None:
+    if finish is not None and not isinstance(finish, str):
+        raise ResponseError("response_schema")
+    if finish == "length":
+        raise ResponseError("output_truncated", finish)
+    if finish in {"content_filter", "safety", "blocked", "refusal"}:
+        raise ResponseError("provider_filtered", finish)
+    if finish in {"tool_calls", "function_call"}:
+        raise ResponseError("response_tool_calls", finish)
+    if finish != "stop":
+        raise ResponseError(
+            "unsupported_finish_reason" if finish else "incomplete_response", finish
+        )
+
+
 class LLMClient:
     """LLM 流式调用客户端。
 
@@ -149,6 +195,7 @@ class LLMClient:
         extra_headers: dict | None = None,
         proxy: str | None = None,
         merge_system_messages: bool | str | None = None,
+        model_prompts: dict[str, str] | None = None,
     ) -> None:
         """初始化 LLM 客户端。
 
@@ -188,6 +235,8 @@ class LLMClient:
         # 自定义扩展：payload 字段 deep merge，HTTP 头 update
         self.extra_payload: dict = extra_payload or {}
         self.extra_headers: dict = extra_headers or {}
+        from novelforge.services.model_prompts import validate_model_prompts
+        self.model_prompts = validate_model_prompts({} if model_prompts is None else model_prompts)
         # HTTP/HTTPS 代理 URL（None 表示不走代理）
         self.proxy = proxy.strip() if proxy and proxy.strip() else None
         # 合并 system：默认不合并，由端点选项显式开启
@@ -551,6 +600,17 @@ class LLMClient:
         if self.extra_payload:
             _deep_merge_dict(payload, self.extra_payload)
         self._sanitize_qwen_thinking_params(payload, model)
+        # 以扩展合并后的实际模型为准，避免 extra_payload 覆盖消息或模型时漏加/错加。
+        prompt = self.model_prompts.get(payload.get("model"), "")
+        if prompt:
+            messages = payload.get("messages")
+            if not isinstance(messages, list) or any(not isinstance(m, dict) for m in messages):
+                raise ValueError("启用模型附加提示词时，messages 必须是消息对象列表")
+            messages = [dict(message) for message in messages]
+            # 放在最后一条原 system 消息之后，保持原提示词和用户正文不变。
+            position = max((i + 1 for i, m in enumerate(messages) if m.get("role") == "system"), default=0)
+            messages.insert(position, {"role": "system", "content": prompt})
+            payload["messages"] = self._prepare_messages_for_model(messages, payload["model"])
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取复用的 aiohttp.ClientSession（懒加载）。
@@ -617,7 +677,7 @@ class LLMClient:
         self._apply_payload_extensions(payload, model)
 
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            **({"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}),
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
         }
@@ -625,10 +685,14 @@ class LLMClient:
         if self.extra_headers:
             headers.update(self.extra_headers)
 
+        if strict_responses.get():
+            from novelforge.cli_diagnostics import capture_request
+            capture_request(payload, headers)
         retry_count = 0
         last_error: Exception | None = None
 
         while retry_count <= self.MAX_RETRIES:
+            emitted = False
             try:
                 session = await self._get_session()
                 async with session.post(
@@ -642,12 +706,13 @@ class LLMClient:
                     if response.status == 401:
                         body = await response.text()
                         logger.error("API 认证失败 (401): %s", body[:200])
-                        raise AuthError("API Key 无效，请检查设置")
+                        raise AuthError("API Key 无效，请检查设置", body)
 
                     if response.status == 429:
-                        retry_after = float(
-                            response.headers.get("Retry-After", "5")
-                        )
+                        body = await response.text()
+                        if any(word in body.lower() for word in ("insufficient_quota", "insufficient balance", "余额不足")):
+                            raise APIError(429, "quota exhausted", body)
+                        retry_after = retry_delay(response.headers.get("Retry-After"))
                         if retry_count < self.MAX_RETRIES:
                             logger.warning(
                                 "API 限流 (429)，等待 %.1f 秒后重试 (%d/%d)",
@@ -660,7 +725,7 @@ class LLMClient:
                             continue
                         raise RateLimitError(
                             f"API 限流，已重试 {self.MAX_RETRIES} 次",
-                            retry_after,
+                            retry_after, body,
                         )
 
                     if response.status >= 400:
@@ -672,18 +737,30 @@ class LLMClient:
                         raise APIError(response.status, error_msg, body)
 
                     # 流式解析 SSE
-                    async for chunk in self._parse_sse_stream(
-                        response, stop_event
-                    ):
+                    finished = False
+                    async for chunk in self._parse_sse_stream(response, stop_event):
+                        if strict_responses.get() and chunk.finish_reason:
+                            validate_finish(chunk.finish_reason)
+                            if not emitted and not chunk.content:
+                                raise ResponseError("empty_response")
+                            finished = True
+                        emitted = emitted or bool(chunk.content)
                         yield chunk
+                        if finished:
+                            return
+                    if strict_responses.get() and not finished:
+                        raise ResponseError("incomplete_response")
                     return
 
-            except (AuthError, RateLimitError, APIError):
+            except (AuthError, RateLimitError, APIError) as error:
+                error.response_headers = dict(response.headers)
                 raise
             except asyncio.CancelledError:
                 logger.info("流式调用被取消")
                 raise
             except aiohttp.ClientError as e:
+                if strict_responses.get() and emitted:
+                    raise ResponseError("incomplete_response") from e
                 last_error = e
                 logger.warning("网络错误: %s，重试 %d/%d", e, retry_count + 1, self.MAX_RETRIES)
                 if retry_count < self.MAX_RETRIES:
@@ -766,18 +843,36 @@ class LLMClient:
             data = json.loads(full_data)
         except json.JSONDecodeError as e:
             logger.warning("SSE 数据 JSON 解析失败: %s, data=%s", e, full_data[:100])
+            if strict_responses.get():
+                raise ResponseError("response_json") from e
             return None
 
+        if strict_responses.get():
+            if not isinstance(data, dict):
+                raise ResponseError("response_schema")
+            if data.get("error"):
+                raise APIError(200, "SSE error event", json.dumps(data["error"]))
+            if not isinstance(data.get("choices", []), list):
+                raise ResponseError("response_schema")
         # 提取 choices[0].delta 内容
         choices = data.get("choices", [])
         if not choices:
             return None
 
+        if strict_responses.get() and not isinstance(choices[0], dict):
+            raise ResponseError("response_schema")
         choice0 = choices[0] if isinstance(choices[0], dict) else {}
         delta = choice0.get("delta", {}) or {}
         if not isinstance(delta, dict):
+            if strict_responses.get():
+                raise ResponseError("response_schema")
             delta = {}
         content = delta.get("content", "") or ""
+        if strict_responses.get():
+            if delta.get("refusal"):
+                raise ResponseError("provider_refusal")
+            if not isinstance(content, str):
+                raise ResponseError("response_schema")
         # 兼容 DeepSeek reasoning_content / OpenRouter reasoning / 部分网关 thinking
         reasoning_content = LLMClient._extract_reasoning_text(delta)
         if not reasoning_content:
@@ -856,6 +951,8 @@ class LLMClient:
         try:
             data = json.loads(body)
             # OpenAI 格式: {"error": {"message": "..."}}
+            if not isinstance(data, dict):
+                return "API 返回非对象错误响应"
             if "error" in data:
                 err = data["error"]
                 if isinstance(err, dict):
@@ -984,7 +1081,7 @@ class LLMClient:
         self._apply_payload_extensions(payload, model)
 
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            **({"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}),
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
@@ -992,6 +1089,9 @@ class LLMClient:
         if self.extra_headers:
             headers.update(self.extra_headers)
 
+        if strict_responses.get():
+            from novelforge.cli_diagnostics import capture_request
+            capture_request(payload, headers)
         retry_count = 0
         last_error: Exception | None = None
 
@@ -1014,12 +1114,13 @@ class LLMClient:
                     if response.status == 401:
                         body = await response.text()
                         logger.error("API 认证失败 (401): %s", body[:200])
-                        raise AuthError("API Key 无效，请检查设置")
+                        raise AuthError("API Key 无效，请检查设置", body)
 
                     if response.status == 429:
-                        retry_after = float(
-                            response.headers.get("Retry-After", "5")
-                        )
+                        body = await response.text()
+                        if any(word in body.lower() for word in ("insufficient_quota", "insufficient balance", "余额不足")):
+                            raise APIError(429, "quota exhausted", body)
+                        retry_after = retry_delay(response.headers.get("Retry-After"))
                         if retry_count < self.MAX_RETRIES:
                             logger.warning(
                                 "API 限流 (429)，等待 %.1f 秒后重试 (%d/%d)",
@@ -1032,7 +1133,7 @@ class LLMClient:
                             continue
                         raise RateLimitError(
                             f"API 限流，已重试 {self.MAX_RETRIES} 次",
-                            retry_after,
+                            retry_after, body,
                         )
 
                     if response.status >= 400:
@@ -1044,6 +1145,24 @@ class LLMClient:
                         raise APIError(response.status, error_msg, body)
 
                     data = await response.json()
+                    if strict_responses.get():
+                        if not isinstance(data, dict):
+                            raise ResponseError("response_schema")
+                        if data.get("error"):
+                            raise APIError(response.status, "API error", json.dumps(data["error"]))
+                        choices = data.get("choices")
+                        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+                            raise ResponseError("response_schema")
+                        message = choices[0].get("message")
+                        if not isinstance(message, dict):
+                            raise ResponseError("response_schema")
+                        if message.get("refusal"):
+                            raise ResponseError("provider_refusal")
+                        validate_finish(choices[0].get("finish_reason"))
+                        if not isinstance(message.get("content"), str):
+                            raise ResponseError("empty_response" if message.get("content") is None else "response_schema")
+                        if not message["content"].strip():
+                            raise ResponseError("empty_response")
                     logger.debug(
                         "非流式调用成功: model=%s, tokens=%s",
                         model,
@@ -1051,7 +1170,8 @@ class LLMClient:
                     )
                     return data
 
-            except (AuthError, RateLimitError, APIError):
+            except (AuthError, RateLimitError, APIError) as error:
+                error.response_headers = dict(response.headers)
                 raise
             except asyncio.CancelledError:
                 logger.info("非流式调用被取消")
@@ -1163,11 +1283,14 @@ class LLMClient:
             LLMError: 请求失败
         """
         url = f"{self.base_url}/models"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         # 自定义 HTTP 头合并（GET /models 也可能需要自定义头）
         if self.extra_headers:
             headers.update(self.extra_headers)
 
+        if strict_responses.get():
+            from novelforge.cli_diagnostics import capture_request
+            capture_request({}, headers)
         try:
             session = await self._get_session()
             async with session.get(
@@ -1176,11 +1299,16 @@ class LLMClient:
             ) as response:
                 if response.status >= 400:
                     body = await response.text()
-                    raise LLMError(
-                        f"获取模型列表失败 ({response.status}): "
-                        f"{self._parse_error_body(body)}"
-                    )
+                    if response.status == 401:
+                        raise AuthError("API 认证失败", body, response.headers)
+                    if response.status == 429:
+                        raise RateLimitError("API 限流", retry_delay(response.headers.get("Retry-After")), body, response.headers)
+                    raise APIError(response.status, self._parse_error_body(body), body, response.headers)
                 data = await response.json()
+                if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+                    raise ResponseError("response_schema")
+                if any(not isinstance(item, dict) or not isinstance(item.get("id"), str) for item in data["data"]):
+                    raise ResponseError("response_schema")
                 # 解析 data[].id
                 models = []
                 for item in data.get("data", []):

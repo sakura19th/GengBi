@@ -550,14 +550,21 @@ class PresetService(BaseJsonService[WritingPreset]):
             raise ValueError("预设 JSON 顶层必须是对象")
 
         # 解析 prompts
+        from novelforge.core.runtime_mode import strict_cli
         prompts_data = data.get("prompts", []) or []
+        if strict_cli.get() and not isinstance(prompts_data, list):
+            raise ValueError("预设 prompts 必须是数组")
         prompts: list[Prompt] = []
         for p_data in prompts_data:
             if not isinstance(p_data, dict):
+                if strict_cli.get():
+                    raise ValueError("预设提示模块必须是对象")
                 continue
             try:
                 prompts.append(_parse_prompt_from_st(p_data))
             except (ValueError, TypeError) as e:
+                if strict_cli.get():
+                    raise
                 logger.warning("解析 Prompt 失败，跳过: %s", e)
 
         # 解析 prompt_order

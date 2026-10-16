@@ -298,8 +298,11 @@ def import_worldbook(file_path: str | Path) -> list[ContextEntry]:
             f"世界书格式不合法，期望顶层为 dict，实际: {type(data).__name__}"
         )
 
+    from novelforge.core.runtime_mode import strict_cli
     entries_field = data.get("entries")
     if entries_field is None:
+        if strict_cli.get():
+            raise ValueError("世界书缺少 entries 字段")
         logger.warning("世界书 %s 无 entries 字段", path)
         return []
 
@@ -309,6 +312,8 @@ def import_worldbook(file_path: str | Path) -> list[ContextEntry]:
         # ST 标准格式：entries 为 dict，key 为 entry id
         for entry_id, entry_data in entries_field.items():
             if not isinstance(entry_data, dict):
+                if strict_cli.get():
+                    raise ValueError("世界书条目必须是对象")
                 logger.warning(
                     "世界书 entry %s 不是 dict，跳过: %s",
                     entry_id,
@@ -320,11 +325,15 @@ def import_worldbook(file_path: str | Path) -> list[ContextEntry]:
             try:
                 entries.append(_convert_entry(entry_data, fallback_id=fallback))
             except Exception as e:
+                if strict_cli.get():
+                    raise
                 logger.error("转换世界书 entry %s 失败: %s", entry_id, e)
     elif isinstance(entries_field, list):
         # 列表格式：entries 直接为 entry 对象列表
         for i, entry_data in enumerate(entries_field):
             if not isinstance(entry_data, dict):
+                if strict_cli.get():
+                    raise ValueError("世界书条目必须是对象")
                 logger.warning(
                     "世界书 entry[%d] 不是 dict，跳过: %s",
                     i,
@@ -334,6 +343,8 @@ def import_worldbook(file_path: str | Path) -> list[ContextEntry]:
             try:
                 entries.append(_convert_entry(entry_data, fallback_id=f""))
             except Exception as e:
+                if strict_cli.get():
+                    raise
                 logger.error("转换世界书 entry[%d] 失败: %s", i, e)
     else:
         raise ValueError(

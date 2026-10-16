@@ -605,6 +605,7 @@ class EndpointEditDialog(QDialog):
             ),
             "extra_payload": extra_payload,
             "extra_headers": extra_headers,
+            "model_prompts": dict(self._endpoint.get("model_prompts", {})),
             "is_default": self._default_check.isChecked(),
         }
         self.accept()
@@ -907,6 +908,7 @@ class SettingsDialog(QDialog):
             ),
             "extra_payload": dict(ep.get("extra_payload") or {}),
             "extra_headers": dict(ep.get("extra_headers") or {}),
+            "model_prompts": dict(ep.get("model_prompts", {})),
             "is_default": False,
         }
         try:

@@ -69,6 +69,23 @@ from novelforge.utils.paths import secure_file
 
 logger = logging.getLogger(__name__)
 
+# 桌面端和 CLI 共用的业务流程标识。
+FLOW_DEFINITIONS: list[tuple[str, str]] = [
+    ("single_continuation", "单章续写"),
+    ("volume_continuation", "卷续写"),
+    ("single_audit", "单章审计"),
+    ("rewrite_analysis", "重写当前章节分析"),
+    ("context_extraction", "上下文提取"),
+    ("ontology_extraction", "世界观底层提取"),
+    ("protagonist_extraction", "主角形象提取"),
+    ("custom_character_extraction", "自定义角色提取"),
+    ("style_extraction", "文风档案提取"),
+    ("custom_rule_parsing", "自定义设定解析"),
+    ("writing_element_analysis", "写作要素分析"),
+    ("writing_element_refinement", "写作要素深化"),
+    ("planned_writing_outline", "规划写作细纲生成"),
+]
+
 # 流程默认破限等级：提取类默认 low，其余 off；正文流程由预设控制
 FLOW_DEFAULT_JAILBREAKS: dict[str, str] = {
     "single_continuation": "off",
@@ -341,6 +358,7 @@ class ConfigManager:
             endpoint.setdefault("merge_system_messages", False)
             endpoint.setdefault("extra_payload", {})
             endpoint.setdefault("extra_headers", {})
+            endpoint.setdefault("model_prompts", {})
 
             self.config.setdefault("api_endpoints", []).append(endpoint)
             # 若无默认端点，设为第一个
